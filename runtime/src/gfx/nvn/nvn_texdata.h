@@ -86,7 +86,10 @@ constexpr int kGpuEncoderVersion = 1;
 // two-channel normal map). VK_FORMAT_UNDEFINED: no entry, or a BC7 entry. The GPU layer makes the image in this format (docs/S4f.md).
 // With [gfx] astc_bc = bc1 in effect (bc1) it also answers BC1_RGB (UNORM or SRGB as the texture) for a texture that has a BC1 entry or that the
 // alpha scan proves opaque (astc_bc1_candidate), unless an RGBA8 / BC5 entry exists.
-VkFormat cache_entry_format(const Texture& t, bool bc1 = false);
+// no_disk ([nvn] tex_async = standin, render thread): no file is opened; only the entries this process has already read, peeked or written count
+// (an unseen RGBA8 / BC5 entry then gets a BC7 image, and its texture a BC7 transcode in the background: a little less exact, never a stall). With
+// bc1 the BC1 answer then comes from the alpha scan alone (a BC1 entry is only made for a texture the scan proves opaque).
+VkFormat cache_entry_format(const Texture& t, bool bc1 = false, bool no_disk = false);
 // Texture content override (nxrt/tex_override.h). apply: when a hook is set and it answers for the texture, replaces bc7 (the tight
 // linear BC7 blocks of the w x h texture) with the encoded answer.
 bool texture_override_active();
