@@ -932,6 +932,14 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
             if (std::max(geo[i].w, geo[i].h) <= solid_max) { solid_src = i; break; }
         if (solid_src == 0 || solid_src >= geo.size()) solid_src = geo.size();
     }
+    // [nvn] standin_encode_px (default 16): of the levels from solid_src on, only those up to this size are encoded (BC7 preset 0); the ones
+    // between (64 and 32 px) are solid blocks from the solid_src level too. Their encode was most of a stand-in's cost on the render thread
+    // (bc7e in 97 of 254 samples of tex_ensure_current in a 4K load-in frame, about 0.7 ms per stand-in). At least standin_full_px: as before.
+    size_t solid_end = solid_src;
+    if (solid_src < geo.size()) {
+        static const uint32_t enc_max = static_cast<uint32_t>(std::max<int64_t>(1, config_get_int("nvn", "standin_encode_px", 16)));
+        while (solid_end < geo.size() && std::max(geo[solid_end].w, geo[solid_end].h) > enc_max) ++solid_end;
+    }
     std::vector<uint8_t> solid_rgba;
     uint32_t solid_layer = ~0u;
     std::vector<uint8_t> bc1_rgba;
@@ -940,7 +948,7 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     for (size_t i = 0; i < geo.size(); ++i) {
         const LevelGeom& g = geo[i];
         const PreparedLevel& pl = out.level[i];
-        if (i < solid_src && solid_src < geo.size()) {
+        if (i < solid_end && solid_src < geo.size()) {
             const LevelGeom& sg = geo[solid_src];
             const uint64_t out_slice = pl.size / L.layers;
             const uint32_t bw = (g.w + 3) / 4, bh = (g.h + 3) / 4;
