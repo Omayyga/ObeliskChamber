@@ -2601,7 +2601,19 @@ void tex_ensure_current(Texture* t, Frame& f) {
         caps.upgrade = astc_gpu_upgrade();
         caps.skip_entries = astc_gpu_skip_entries();   // [gfx] astc_gpu_cache_read: a fast GPU transcodes again rather than read BC7 / BC1 entries
     }
-    PreparedTexture prep;
+    // Reused from upload to upload (render thread): prepare_texture writes into the data buffer it already has, so a first visit's hundreds
+    // of megabytes of untiles and stand-ins stop paging in fresh memory per texture (page faults and zeroing on the render thread). A buffer
+    // grown past 64 MiB is given back. Every other field starts fresh (reset_prep), so nothing of the last upload (a GPU transcode's
+    // fields, a compact stand-in's rows) carries over.
+    static thread_local PreparedTexture tl_prep;
+    PreparedTexture& prep = tl_prep;
+    auto reset_prep = [&prep] {
+        std::vector<uint8_t> keep = std::move(prep.data);
+        if (keep.capacity() > (64ull << 20)) std::vector<uint8_t>().swap(keep);
+        prep = PreparedTexture();
+        prep.data = std::move(keep);
+    };
+    reset_prep();
     bool ok = false;
     bool from_job = false;
     const uint64_t t_prep0 = ft::now_ns();
@@ -2618,7 +2630,7 @@ void tex_ensure_current(Texture* t, Frame& f) {
             have_hash = true;
             ok = from_job = true;
         } else {                               // another image format than the one it was made for (a fallback format): prepare it again
-            prep = PreparedTexture();
+            reset_prep();
             if (staged) device().destroy_buffer(staged);
             staged = gfx::Buffer{};
         }
@@ -2676,7 +2688,7 @@ void tex_ensure_current(Texture* t, Frame& f) {
         }
         // queued and nothing to show yet: the stand-in. Failed: the CPU path, as with [gfx] astc_gpu = off.
         gpu_queued = r == AstcGpu::Deferred;
-        prep = PreparedTexture();
+        reset_prep();
         from_job = false;
         caps.gpu_astc = false;
         caps.skip_entries = caps.skip_entries && gpu_queued;   // the stand-in of a queued transcode, as with no cache; Failed: the CPU path reads entries again
