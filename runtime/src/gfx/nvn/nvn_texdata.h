@@ -38,6 +38,9 @@ struct TexCaps {
     bool standin_first = false;  // with provisional, render thread ([nvn] tex_async = standin): an ASTC texture going into a BC7 image gets the quick stand-in
                                  // straight away, without looking at the disk cache (no file open or read: on a hard disk those cost 30 ms to over a
                                  // second each). The background job reads the entry (or transcodes) and its result replaces the stand-in.
+    bool compact_standin = false;   // with standin_first ([nvn] standin_rows): the stand-in's big levels, solid blocks copied from a small level, come
+                                    // as one row of blocks per distinct source row (PreparedLevel::rows) instead of whole: the caller copies each
+                                    // block row into the image from its row, a tenth of the bytes and none of the filling of a whole 2048x2048 level.
     bool bc1 = false;            // [gfx] astc_bc = bc1 in effect (astc_bc1_active): an opaque ASTC texture comes out as BC1 when image_format allows it
     bool gpu_astc = false;       // [gfx] astc_gpu in effect (nvn_astc_gpu.h): a 2D ASTC texture without a usable cache entry is not transcoded here; it comes out as
                                  // its untiled ASTC blocks (PreparedTexture::gpu_astc) for the GPU layer to decode and encode. Wins over cache_only and provisional.
@@ -49,6 +52,9 @@ struct PreparedLevel {
     uint32_t width, height, depth;   // texels of the level
     uint64_t offset, size;           // bytes in PreparedTexture::data; the size covers all layers of the level
     uint32_t row_blocks;             // blocks per row of the output data (texels per row for uncompressed formats)
+    // Compact stand-in levels only (TexCaps::compact_standin; empty otherwise): entry layer * block rows + y is the offset in data of block row y
+    // of that layer (row_blocks blocks); rows that repeat share one offset. `size` is then the bytes of the distinct rows.
+    std::vector<uint64_t> rows;
 };
 
 struct PreparedTexture {
@@ -59,6 +65,7 @@ struct PreparedTexture {
     bool transcoded = false;             // ASTC was transcoded to BC7 or decoded to RGBA8 (the data is not the source encoding)
     bool from_cache = false;             // the data came from the BC7 disk cache
     bool provisional = false;            // a quick stand-in (TexCaps::provisional): replaced when the background job has the real data
+    bool compact = false;                // some levels are given as rows (PreparedLevel::rows; TexCaps::compact_standin)
     // TexCaps::gpu_astc: data holds the untiled ASTC blocks, not `format`. level[] then describes the source (offset and size of a level's blocks in
     // data, all layers; row_blocks = ASTC blocks per row); format / block_w / block_h / block_bytes say what the GPU layer is to make of it.
     bool gpu_astc = false;
