@@ -106,6 +106,7 @@ body[data-screen="title"] .card {
 .field label.name { font-size: var(--font-size-lg); text-shadow: 0 1px 2px var(--color-text-shadow); }
 .field .hint { display: none; }                          /* shown in the help box while the row has the cursor */
 .field .hint[data-status] { display: block; color: var(--color-text-dim); font-size: var(--font-size-xs); letter-spacing: 0; }
+.field .hint .status-warn { color: var(--color-danger); font-weight: 700; }   /* settings.js put(..., warn): files to delete */
 .unit { color: var(--color-text-dim); }
 /* the arrows either side of a value that has the cursor */
 .field .control { position: relative; }
@@ -418,6 +419,7 @@ html.game-art-menus .card .btn:not(.quiet) { --btn-height: 42px; }
 .field .btn { min-height: 28px; padding-block: 0; }
 /* a status under a name (a folder that was not found, with the places looked in) stays at two lines; the help box has the rest */
 .field .hint[data-status] { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; line-height: 1.3; }
+.field .hint[data-status]:has(.status-warn) { -webkit-line-clamp: 5; }   /* room for the list of unused Streamline files */
 .page { gap: var(--space-3); }
 .page > .banner { padding: var(--space-2) var(--space-3); font-size: var(--font-size-sm); line-height: 1.35; }
 .tabs { padding-bottom: var(--space-1); }
