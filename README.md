@@ -23,17 +23,17 @@ contributors. Goldoire wrote, when publishing the last version (0.2.0), that the
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
 How much is original, measured on 2026-11-14 by the lines of the repository's own text files as `git blame` attributes them
-(third-party folders and lock files left out, 399,871 lines):
+(third-party folders and lock files left out, 404,523 lines):
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 392,662 | 98.2% |
-| The original fefw-recomp: its contributors (Paulius / Kompas9, ranbinrang-rgb, Aidan Kinzett) | 933 | 0.2% |
-| Obelisk Chamber (this fork) | 6,276 | 1.6% |
+| The original fefw-recomp: Goldoire | 396,569 | 98.0% |
+| The original fefw-recomp: its contributors (Paulius / Kompas9, ranbinrang-rgb, Aidan Kinzett) | 931 | 0.2% |
+| Obelisk Chamber (this fork) | 7,023 | 1.7% |
 
-So about **98.4% of the code is the original's and about 1.6% was added here**. By commits the split is 26 from the original and 55
-from this fork. Lines are a rough measure of work, and the original in turn builds on the projects named under [Credits](#credits)
-(its first commit holds their code too, so their share is inside the 98.4%).
+So about **98.3% of the code is the original's and about 1.7% was added here**. By commits, not counting merges, the split is 22
+from the original and 63 from this fork. Lines are a rough measure of work, and the original in turn builds on the projects named under [Credits](#credits)
+(its first commit holds their code too, so their share is inside the 98.3%).
 
 The changes made in this fork were written with Claude (Anthropic's AI model), directed and tested by the fork's maintainer.
 
@@ -86,8 +86,12 @@ The changes made in this fork were written with Claude (Anthropic's AI model), d
 - A CI build of the runtime on every change
 
 > [!NOTE]
-> This fork has no packaged release yet. To use it, build from source ([docs/BUILDING.md](docs/BUILDING.md)); the steps below
-> describe a release package, as the original shipped it. The redesigned launcher is new and has had little testing.
+> This fork was made for personal use, and its releases are play-tests: they have had one person's testing on one PC, and updates
+> come when the maintainer wants something for their own play. The redesigned launcher is new and has had little testing.
+>
+> A release is a general build that runs on any supported processor. If you know how to build from source, that is the better
+> option: profile-guided optimisation, ThinLTO and tuning for your own CPU are available there. See
+> [docs/BUILDING.md](docs/BUILDING.md) and [docs/PGO.md](docs/PGO.md).
 
 ## Requirements
 
@@ -296,8 +300,9 @@ This project stands on the work of others. Thank you.
   mods as DLLs) and **Aidan Kinzett** (a clearer Set up error), and everyone who filed issues and helped test it.
 
 **This fork**
-- **xinthefreefallxai**: maintainer, direction and testing.
-- **Claude** (Anthropic): wrote the fork's changes.
+- **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
+  change on real hardware and made the releases.
+- **Claude** (Anthropic's AI model): wrote the fork's code changes under that direction.
 - The [Fortune's Weave decompilation project](https://code.vexcited.com/decompile/fefw): its function and class names helped find the
   game's menu code. No code from it is used.
 
