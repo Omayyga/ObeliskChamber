@@ -261,7 +261,8 @@ an instruction this port hooks makes Set up stop and name it.
 
 Code mods made for this port can also be DLLs in the mod's `exefs\` folder (`mods\<mod name>\exefs\<mod>.dll`), so one mod folder can
 carry an emulator's patches and this port's DLL side by side. They load when the game starts and can hook the game at the sites it was
-built with. A DLL runs with the same rights as the game: only install mods you trust. `[fs] dll_mods = false` in `ObeliskChamber.ini` turns them
+built with; from interface version 2 a mod can also give the game functions of its own to call, which is what adding an entry to one
+of the game's menus needs. A DLL runs with the same rights as the game: only install mods you trust. `[fs] dll_mods = false` in `ObeliskChamber.ini` turns them
 off. Writing one: [runtime/include/nxrt/mod_api.h](runtime/include/nxrt/mod_api.h).
 
 Mods can be switched on and off in the game: the title screen's DLC entry reads **DLC / Mods** and lists every mod folder on a RomFS
