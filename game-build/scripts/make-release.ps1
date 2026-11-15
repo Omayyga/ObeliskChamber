@@ -5,7 +5,8 @@
 #   pwsh game-build\scripts\make-release.ps1 -Version 0.1.0
 #
 # Inputs, built beforehand from this checkout:
-#   fefw_rt.dll + fefw_rt.lib   pwsh game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON"
+#   fefw_rt.dll + fefw_rt.lib   pwsh game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON -DNXRT_DAV1D_ASM=ON"
+#                               (NASM 2.14+ on PATH: the movie decoder's assembly; docs/BUILDING.md)
 #   ObeliskChamber-launcher.exe           built here (npm, Rust) with the build machine's paths remapped, unless -Launcher names one
 #   the shader translator       staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1); this script runs dotnet publish
 # Third-party payload, downloaded into the cache folder from the official sites: Zig (checked against ziglang.org's sha256), the Python
@@ -71,6 +72,11 @@ Need "$root\runtime\third_party\renhdrum\renhdrum.dll" 'renhdrum.dll (runtime\th
 # Desktop GPUs have no ASTC: a runtime built with NXRT_ASTC2BC7=OFF renders most textures black (issue #1). Refuse to package one.
 if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_ASTC2BC7=OFF' -Quiet) {
     throw "fefw_rt.dll was built without the ASTC transcoder (NXRT_ASTC2BC7=OFF): reconfigure with -DNXRT_ASTC2BC7=ON"
+}
+# The movie decoder without its assembly (no NASM at build time) is too slow for the 1440p movies: the pictures fall behind and the sound
+# drops out, then plays out of step. Refuse to package it.
+if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_DAV1D_ASM=OFF' -Quiet) {
+    throw "fefw_rt.dll was built without dav1d's assembly (NXRT_DAV1D_ASM=OFF): install NASM 2.14+ and reconfigure with -DNXRT_DAV1D_ASM=ON"
 }
 if ($buildLauncher) {
     # Rust keeps source paths for panic messages: map the user profile (cargo registry, rustup) and the checkout to neutral names
