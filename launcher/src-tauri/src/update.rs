@@ -14,10 +14,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The GitHub repository whose releases the launcher follows. FEFW_UPDATE_REPO at build time: a fork's launcher follows the fork.
+/// The GitHub repository whose releases the launcher follows: this fork's, unless FEFW_UPDATE_REPO names another at build time.
+/// (The original's repository, Goldoire/fefw-recomp, no longer exists; a launcher following it would offer the releases of whoever
+/// registered that name next.)
 pub const REPO: &str = match option_env!("FEFW_UPDATE_REPO") {
     Some(r) => r,
-    None => "Goldoire/fefw-recomp",
+    None => "xinthefreefallxai/ObeliskChamber",
 };
 /// FEFW_BUILD_ID at build time: the release tag this launcher was built for (a fork tagging its releases by commit). Any other
 /// latest release then counts as newer, as tags like that have no order.
