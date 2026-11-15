@@ -102,7 +102,7 @@ natively. `fefw_build.py` builds the same `x86_64-windows-gnu` executable with t
 the launcher's **Runner** setting (empty: Steam's own Proton, else `umu-run`, else `wine`). The launcher writes the `ObeliskChamber.ini` paths as `Z:/...` so they work
 under Wine and Proton, also when the game is started from Steam (**Add to Steam** on the Play page adds it as a non-Steam game).
 Updating from the launcher works the same way, with the release's `-linux-x64.tar.gz` asset in place of the `-win64.zip`.
-A fork can build a launcher that follows its own releases: `FEFW_UPDATE_REPO=<owner>/<repo>` at build time, and `FEFW_BUILD_ID=<tag>`
+The launcher follows this repository's releases (`xinthefreefallxai/ObeliskChamber`). A fork can build one that follows its own: `FEFW_UPDATE_REPO=<owner>/<repo>` at build time, and `FEFW_BUILD_ID=<tag>`
 when its release tags are not version numbers (any other latest tag then counts as an update).
 
 The Linux package is made from the Windows one, after `make-release.ps1`, on x86_64 Linux or WSL2:
