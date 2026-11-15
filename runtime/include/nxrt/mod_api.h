@@ -23,9 +23,12 @@
  *         @nsobid DB93B0125F4850601D61C3EDDE012F8EB2ECFE77
  *         midhook 0x7100e1d03c      # comment
  *
- *     Set up lifts the game with main.sites plus the sites of the installed mods, so after adding, changing or removing such a
- *     file the game is built again (the Play page says the build is out of date). hook_mid logs a warning for an address that
- *     was not lifted as a midhook site.
+ *     Set up lifts the game with main.sites plus the sites of the installed mods, so after installing, updating or removing such a
+ *     mod the game is built again (the Play page says the build is out of date). A mod switched off in mod.ini keeps its sites (a
+ *     site with no hook attached only passes through), so switching it on or off needs only the next start. Set up writes the list
+ *     main was lifted with next to ObeliskChamber.exe (ObeliskChamber.sites); the runtime checks hook_inline / hook_mid /
+ *     hook_entry in main against it (a warning in the log for a site this build lacks) and, at start, the installed mods' .sites
+ *     files: a mod whose sites are missing is named on screen and marked "needs Set up" in the game's Mods menu.
  *     The condition flags (NZCV) are kept inside each lifted function, not in the Ctx: a hook must not read or set c->N, c->Z,
  *     c->C or c->V. A midhook that runs the rest of the function itself (call_guest at its own site) starts it with stale flags,
  *     so such a site must be where the flags are set again before they are read, e.g. right after a call or at a cmp / tst,

@@ -664,7 +664,10 @@ def apply_exefs_patches(main_path, patches, mod_sites=()):
 # a call into the runtime (inline, midhook, entryhook: the instructions are lifted as before), plus one line
 #     @nsobid <main build ID>          (as in a .pchtxt)
 # so that sites for another version of the game are left out. Set up lifts main with main.sites plus these sites; they are part
-# of the build stamp, so adding, changing or removing them lifts again. A mod with exefs = off in mod.ini adds none.
+# of the build stamp, so installing, updating or removing such a mod lifts again. The sites of a mod with exefs = off in mod.ini
+# are kept: a site no hook is attached to only passes through, so switching the mod on or off (the game's Mods menu) needs no Set up,
+# only the next start, like any DLL mod. The list main was lifted with is written next to ObeliskChamber.exe (ObeliskChamber.sites,
+# write_lifted_sites), so the runtime can tell a mod whose sites are missing from this build.
 MOD_SITE_KINDS = ('inline', 'midhook', 'entryhook')
 
 
@@ -673,7 +676,7 @@ def collect_mod_sites(game, build_id):
     found = []
     for name, d in find_mod_dirs(os.path.join(game, 'mods')):
         ex = os.path.join(d, 'exefs')
-        if not os.path.isdir(ex) or not mod_exefs_on(d):
+        if not os.path.isdir(ex):        # exefs = off does not count here (see above)
             continue
         for f in sorted(os.listdir(ex), key=str.lower):
             if not f.lower().endswith('.sites') or not os.path.isfile(os.path.join(ex, f)):
@@ -745,6 +748,17 @@ def write_sites(main_path, mod_sites, build):
         f.write(own.rstrip('\n') + '\n\n# ---- added by mods (exefs/*.sites)\n' + ''.join(l + '\n' for l in lines))
     progress('verify', 1, 1, 'Hook sites from mods: %d (%s)' % (len(lines), ', '.join(sorted({w.rsplit(':', 1)[0] for w, _, _ in mod_sites}))))
     return out
+
+
+def write_lifted_sites(game, sites, build_id):
+    """<game>/ObeliskChamber.sites: the site list main was lifted with (main.sites plus the mods' sites) under an @nsobid line, read by
+    the runtime to check hooks and the sites of installed mods against this build (runtime/src/services/mods_dll.cpp)."""
+    dst = os.path.join(game, 'ObeliskChamber.sites')
+    tmp = dst + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write('# The hook sites ObeliskChamber.exe was built with (written by Set up)\n@nsobid %s\n' % build_id)
+        f.write(open(sites, encoding='utf-8').read())
+    os.replace(tmp, dst)
 
 
 def popen(cmd, **kw):
@@ -1076,6 +1090,7 @@ def main():
         times['compile'] = round(time.time() - t, 1)
         t = time.time()
         exe = link(runner, obj, game, env, variant)
+        write_lifted_sites(game, sites, want['main_build_id'])
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
             progress('finish', 0, 1, 'Removing the build files')

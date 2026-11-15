@@ -266,7 +266,8 @@ Code mods made for this port can also be DLLs in the mod's `exefs\` folder (`mod
 carry an emulator's patches and this port's DLL side by side. They load when the game starts and can hook the game at the sites it was
 built with. A DLL mod that needs hook sites of its own lists them in a `.sites` file beside it (see
 [mod_api.h](runtime/include/nxrt/mod_api.h)); like exefs patches, they are added when the game is built, so press **Set up** after
-installing or removing such a mod. From interface version 2 a mod can also give the game functions of its own to call, which is what adding an entry to one
+installing, updating or removing such a mod (switching it on or off in the Mods menu needs only a restart; a mod whose sites
+the current build lacks is named on screen at start and marked "needs Set up" in the menu). From interface version 2 a mod can also give the game functions of its own to call, which is what adding an entry to one
 of the game's menus needs, and from version 3 a mod can change the game's data files as they are loaded (add rows to a table,
 for example), so two mods that add to the same file no longer overwrite each other. From version 4 a mod can show a list screen in the game's own style, with a value per row that left and right change. A DLL runs with the same rights as the game: only install mods you trust. `[fs] dll_mods = false` in `ObeliskChamber.ini` turns them
 off. Writing one: [runtime/include/nxrt/mod_api.h](runtime/include/nxrt/mod_api.h).
