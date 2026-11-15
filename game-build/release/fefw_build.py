@@ -720,6 +720,46 @@ def mod_sites_stamp(mod_sites):
     return hashlib.sha256(''.join('%s %x\n' % ka for ka in sorted({(k, a) for _, k, a in mod_sites})).encode()).hexdigest()
 
 
+# Midhook sites and the condition flags (runtime/include/nxrt/hooks.h): lifted functions keep NZCV in a local, so a midhook that
+# runs the rest of the function itself starts it with stale flags. Its site has to be where the flags are set again before they are
+# read, never between a compare and the instruction that uses it. Set up cannot follow the flow, but it warns about the common
+# mistake: a midhook whose own instruction reads the flags, or that comes right after one that sets them. (mask, value, name)
+FLAG_READERS = (
+    (0xFF000010, 0x54000000, 'b.cond'),
+    (0x3FE00000, 0x1A800000, 'csel / csinc / csinv / csneg (cset, cinc, cneg ...)'),
+    (0x3FE00000, 0x3A400000, 'ccmp / ccmn'),
+    (0xFF200C00, 0x1E200400, 'fccmp / fccmpe'),
+    (0xFF200C00, 0x1E200C00, 'fcsel'),
+    (0x1FE0FC00, 0x1A000000, 'adc / sbc'),
+)
+FLAG_SETTERS = (
+    (0x3F800000, 0x31000000, 'adds / subs (immediate; cmp / cmn)'),
+    (0x3F000000, 0x2B000000, 'adds / subs (register; cmp / cmn)'),
+    (0x7F800000, 0x72000000, 'ands (immediate; tst)'),
+    (0x7F000000, 0x6A000000, 'ands / bics (register; tst)'),
+    (0x3FE0FC00, 0x3A000000, 'adcs / sbcs'),
+    (0x3FE00000, 0x3A400000, 'ccmp / ccmn'),
+    (0xFF203C00, 0x1E202000, 'fcmp / fcmpe'),
+    (0xFF200C00, 0x1E200400, 'fccmp / fccmpe'),
+    (0xFFFFFFE0, 0xD51B4200, 'msr nzcv'),
+)
+
+
+def insn_kind(word, table):
+    return next((name for mask, value, name in table if word & mask == value), None)
+
+
+def flags_warning(word, prev):
+    """Why a midhook at an instruction `word` (after `prev`) may start a continuation with stale flags, or None."""
+    reads = insn_kind(word, FLAG_READERS)
+    if reads:
+        return 'its instruction reads the condition flags (%s)' % reads
+    sets = insn_kind(prev, FLAG_SETTERS) if prev is not None else None
+    if sets:
+        return 'it comes right after an instruction that sets the condition flags (%s)' % sets
+    return None
+
+
 def write_sites(main_path, mod_sites, build):
     """The site list main is lifted with: main.sites itself when no mod adds sites, else build/main.sites = main.sites plus the
     sites of the mods, each checked to lie in main's code."""
@@ -727,8 +767,9 @@ def write_sites(main_path, mod_sites, build):
     if not mod_sites:
         return base
     with open(main_path, 'rb') as f:
-        hdr = f.read(0x40)
-    text_off, text_size = int.from_bytes(hdr[0x14:0x18], 'little'), int.from_bytes(hdr[0x18:0x1C], 'little')
+        data = f.read()
+    text_file, text_off, text_size = (int.from_bytes(data[o:o + 4], 'little') for o in (0x10, 0x14, 0x18))
+    word_at = lambda off: int.from_bytes(data[text_file + off - text_off:text_file + off - text_off + 4], 'little')
     own = open(base).read()
     have = set()
     for line in own.splitlines():
@@ -740,6 +781,12 @@ def write_sites(main_path, mod_sites, build):
         off = addr - MODULES[0][2]
         if not text_off <= off < text_off + text_size:
             raise Fail("%s: 0x%x is outside main's code" % (where, addr))
+        if kind == 'midhook':
+            why = flags_warning(word_at(off), word_at(off - 4) if off - 4 >= text_off else None)
+            if why:
+                progress('verify', 1, 1, 'Note: %s: midhook 0x%x: %s. A hook there that runs the rest of the function itself '
+                         '(call_guest at its site) would start it with stale flags; one that returns 0 is fine '
+                         '(runtime/include/nxrt/hooks.h)' % (where, addr, why))
         if (kind, addr) not in have:
             have.add((kind, addr))
             lines.append('%s 0x%x   # %s' % (kind, addr, where))
