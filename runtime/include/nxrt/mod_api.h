@@ -16,8 +16,16 @@
  *
  * What a mod can do:
  *   - attach to the hook sites the game was lifted with (recomp/games/<game>/main.sites): inline, midhook and entry hooks, the same as
- *     the runtime's own features (nxrt/hooks.h). A site that is not in that list is never reached: a new site needs a change to
- *     main.sites (and a Set up run) like any other hook.
+ *     the runtime's own features (nxrt/hooks.h). A site that is not in that list is never reached. A mod that needs sites of its
+ *     own lists them beside its DLL in exefs/<any name>.sites, in the syntax of main.sites with only the kinds inline, midhook and
+ *     entryhook, plus a line `@nsobid <main build ID>` (sites for another version are left out):
+ *
+ *         @nsobid DB93B0125F4850601D61C3EDDE012F8EB2ECFE77
+ *         midhook 0x7100e1d03c      # comment
+ *
+ *     Set up lifts the game with main.sites plus the sites of the installed mods, so after adding, changing or removing such a
+ *     file the game is built again (the Play page says the build is out of date). hook_mid logs a warning for an address that
+ *     was not lifted as a midhook site.
  *     The condition flags (NZCV) are kept inside each lifted function, not in the Ctx: a hook must not read or set c->N, c->Z,
  *     c->C or c->V. A midhook that runs the rest of the function itself (call_guest at its own site) starts it with stale flags,
  *     so such a site must be where the flags are set again before they are read, e.g. right after a call or at a cmp / tst,

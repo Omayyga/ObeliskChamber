@@ -230,15 +230,18 @@ def tree_hash(root, rels):
 SHADER_TRANSLATOR_VERSION = 3
 
 
-def tool_stamp(variant, patch_stamp=None):
+def tool_stamp(variant, patch_stamp=None, sites_stamp=None):
     """The part of the build stamp this package decides: a release that changes any of it rebuilds ObeliskChamber.exe. The processor
     variant is in it as well, so an ObeliskChamber.exe built for the other one is rebuilt (the lift is kept: see main). The exefs patches of
-    the installed mods (exefs_patch_stamp) are in it only when there are any, so a build without patches keeps its old stamp."""
+    the installed mods (exefs_patch_stamp) and their hook sites (mod_sites_stamp) are in it only when there are any, so a build without
+    them keeps its old stamp."""
     stamp = {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
              'runtime': sha256(os.path.join(SDK, 'fefw_rt.lib')), 'cxxflags': cxxflags(variant), 'cpu': variant,
              'modules': [list(m) for m in MODULES]}
     if patch_stamp:
         stamp['exefs_patches'] = patch_stamp
+    if sites_stamp:
+        stamp['mod_sites'] = sites_stamp
     if tune_stamp():
         stamp['tune'] = tune_stamp()
     return stamp
@@ -302,12 +305,15 @@ def check(game, variant):
         load_tune(game, quiet=True)
         bid = json.load(open(os.path.join(HERE, 'dump_hashes.json'), encoding='utf-8'))['main_build_id']
         patch_stamp = exefs_patch_stamp(collect_exefs_patches(game, bid))
+        sites_stamp = mod_sites_stamp(collect_mod_sites(game, bid))
     except Fail as e:
         return False, str(e)
-    want = tool_stamp(variant, patch_stamp)
+    want = tool_stamp(variant, patch_stamp, sites_stamp)
     changed = [k for k in sorted(set(want) | set(done['tools'])) if done['tools'].get(k) != want.get(k)]
     if changed == ['exefs_patches']:
         return False, 'the exefs patches in mods changed (Set up applies them)'
+    if changed and set(changed) <= {'exefs_patches', 'mod_sites'}:
+        return False, 'the hook sites of mods changed (Set up lifts the game with them)'
     if changed and set(changed) <= {'tune', 'cxxflags'}:
         return False, 'build_options.json changed (Set up builds with it)'
     if 'cpu' in changed and done['tools'].get('cpu') in CPU_VARIANTS:
@@ -606,8 +612,9 @@ def site_addresses():
     return out
 
 
-def apply_exefs_patches(main_path, patches):
-    """Write the patches into the plain main NSO (uncompressed segments) and fix the segment hashes in its header."""
+def apply_exefs_patches(main_path, patches, mod_sites=()):
+    """Write the patches into the plain main NSO (uncompressed segments) and fix the segment hashes in its header. A patch may not
+    touch a site of main.sites or one a mod adds (collect_mod_sites)."""
     if not patches:
         return
     data = bytearray(open(main_path, 'rb').read())
@@ -619,6 +626,8 @@ def apply_exefs_patches(main_path, patches):
         foff, moff, size = (int.from_bytes(data[0x10 + 0x10 * i + k:0x14 + 0x10 * i + k], 'little') for k in (0, 4, 8))
         segs.append((foff, moff, size))
     sites = site_addresses()
+    for where, kind, addr in mod_sites:
+        sites.setdefault(addr - MODULES[0][2], '%s (%s)' % (kind, where))
     touched = set()
     owner = {}
     for name, where, mem in patches:
@@ -647,6 +656,95 @@ def apply_exefs_patches(main_path, patches):
     os.replace(tmp, main_path)
     n = sum(len(m) for _, _, m in patches)
     progress('verify', 1, 1, 'Applied %d exefs patch record(s) from %s' % (n, ', '.join(sorted({w for _, w, _ in patches}))))
+
+
+# ---- hook sites of mods (mods/<name>/exefs/*.sites) --------------------------------------------------------------------------------
+# A code mod (exefs/*.dll, runtime/include/nxrt/mod_api.h) can hook only an instruction the game was lifted with as a site. A mod
+# that needs sites of its own lists them in exefs/<anything>.sites, in the syntax of main.sites but only with the kinds that just add
+# a call into the runtime (inline, midhook, entryhook: the instructions are lifted as before), plus one line
+#     @nsobid <main build ID>          (as in a .pchtxt)
+# so that sites for another version of the game are left out. Set up lifts main with main.sites plus these sites; they are part
+# of the build stamp, so adding, changing or removing them lifts again. A mod with exefs = off in mod.ini adds none.
+MOD_SITE_KINDS = ('inline', 'midhook', 'entryhook')
+
+
+def collect_mod_sites(game, build_id):
+    """The hook sites the installed mods add to main: [(file:line, kind, guest address)], in mod order."""
+    found = []
+    for name, d in find_mod_dirs(os.path.join(game, 'mods')):
+        ex = os.path.join(d, 'exefs')
+        if not os.path.isdir(ex) or not mod_exefs_on(d):
+            continue
+        for f in sorted(os.listdir(ex), key=str.lower):
+            if not f.lower().endswith('.sites') or not os.path.isfile(os.path.join(ex, f)):
+                continue
+            where = '%s/exefs/%s' % (name, f)
+            bid, recs = None, []
+            text = open(os.path.join(ex, f), encoding='utf-8-sig', errors='replace').read()
+            for ln, line in enumerate(text.splitlines(), 1):
+                t = line.split('#', 1)[0].split()
+                if not t:
+                    continue
+                if t[0].lower() == '@nsobid':
+                    if len(t) != 2:
+                        raise Fail('%s:%d: @nsobid takes one build ID' % (where, ln))
+                    bid = t[1]
+                    continue
+                if t[0] not in MOD_SITE_KINDS:
+                    raise Fail('%s:%d: "%s" is not a site a mod can add (%s)' % (where, ln, t[0], ', '.join(MOD_SITE_KINDS)))
+                try:
+                    if len(t) != 2:
+                        raise ValueError
+                    addr = int(t[1], 16)
+                except ValueError:
+                    raise Fail('%s:%d: expected "<kind> <guest address in hex>"' % (where, ln))
+                recs.append((ln, t[0], addr))
+            if bid is None:
+                raise Fail('%s has no @nsobid line (the build ID of the main its sites are for)' % where)
+            if not bid_matches(bid, build_id):
+                continue                 # another version of the game
+            for ln, kind, addr in recs:
+                if addr % 4 or not MODULES[0][2] <= addr < MODULES[1][2]:
+                    raise Fail('%s:%d: 0x%x is not an instruction address in main (main is at 0x%x)' % (where, ln, addr, MODULES[0][2]))
+                found.append(('%s:%d' % (where, ln), kind, addr))
+    return found
+
+
+def mod_sites_stamp(mod_sites):
+    """One hash over the sites the mods add (comments, order and duplicates do not count)."""
+    if not mod_sites:
+        return None
+    return hashlib.sha256(''.join('%s %x\n' % ka for ka in sorted({(k, a) for _, k, a in mod_sites})).encode()).hexdigest()
+
+
+def write_sites(main_path, mod_sites, build):
+    """The site list main is lifted with: main.sites itself when no mod adds sites, else build/main.sites = main.sites plus the
+    sites of the mods, each checked to lie in main's code."""
+    base = os.path.join(RECOMP, *SITES.split('/'))
+    if not mod_sites:
+        return base
+    with open(main_path, 'rb') as f:
+        hdr = f.read(0x40)
+    text_off, text_size = int.from_bytes(hdr[0x14:0x18], 'little'), int.from_bytes(hdr[0x18:0x1C], 'little')
+    own = open(base).read()
+    have = set()
+    for line in own.splitlines():
+        t = line.split('#', 1)[0].split()
+        if len(t) >= 2:
+            have.add((t[0], int(t[1], 16)))
+    lines = []
+    for where, kind, addr in mod_sites:
+        off = addr - MODULES[0][2]
+        if not text_off <= off < text_off + text_size:
+            raise Fail("%s: 0x%x is outside main's code" % (where, addr))
+        if (kind, addr) not in have:
+            have.add((kind, addr))
+            lines.append('%s 0x%x   # %s' % (kind, addr, where))
+    out = os.path.join(build, 'main.sites')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(own.rstrip('\n') + '\n\n# ---- added by mods (exefs/*.sites)\n' + ''.join(l + '\n' for l in lines))
+    progress('verify', 1, 1, 'Hook sites from mods: %d (%s)' % (len(lines), ', '.join(sorted({w.rsplit(':', 1)[0] for w, _, _ in mod_sites}))))
+    return out
 
 
 def popen(cmd, **kw):
@@ -701,9 +799,8 @@ class Runner:
         return rc, '\n'.join(tail)
 
 
-def lift(runner, exefs, gen, jobs):
-    """One lifter process per module (the lifter itself runs `jobs` worker processes)."""
-    sites = os.path.join(RECOMP, 'games', 'fefw', 'main.sites')
+def lift(runner, exefs, gen, jobs, sites):
+    """One lifter process per module (the lifter itself runs `jobs` worker processes); main with the site list `sites`."""
     for k, (name, nso, base, index, shards) in enumerate(MODULES):
         out = os.path.join(gen, name)
         marker = os.path.join(out, '.lifted')
@@ -953,9 +1050,11 @@ def main():
         plain = os.path.join(game, 'exefs')
         write_exefs(a.exefs, plain)
         patches = collect_exefs_patches(game, want['main_build_id'])
-        apply_exefs_patches(os.path.join(plain, 'main'), patches)
+        mod_sites = collect_mod_sites(game, want['main_build_id'])
+        apply_exefs_patches(os.path.join(plain, 'main'), patches, mod_sites)
+        sites = write_sites(os.path.join(plain, 'main'), mod_sites, build)
         stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'],
-                 'tools': tool_stamp(variant, exefs_patch_stamp(patches))}
+                 'tools': tool_stamp(variant, exefs_patch_stamp(patches), mod_sites_stamp(mod_sites))}
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -970,7 +1069,7 @@ def main():
         env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
-        lift(runner, plain, gen, a.jobs)
+        lift(runner, plain, gen, a.jobs, sites)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env, variant)

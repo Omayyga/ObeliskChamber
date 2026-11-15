@@ -114,7 +114,14 @@ uint32_t track(uint32_t id) {
     return id;
 }
 uint32_t api_hook_inline(uint64_t addr, NxModInlineFn fn, void* user) { return track(hook_add_inline(addr, fn, user)); }
-uint32_t api_hook_mid(uint64_t addr, NxModSiteFn fn, void* user) { return track(hook_add_mid(addr, fn, user)); }
+uint32_t api_hook_mid(uint64_t addr, NxModSiteFn fn, void* user) {
+    // A midhook site is lifted as a function of its own (the "original" to continue with), so an address that is not one was not
+    // lifted as a site: the hook is kept but never runs until the site is added (main.sites, or the mod's exefs/*.sites + Set up)
+    if (addr && !fn_lookup(addr))
+        NXLOG_W(kTag, "hook_mid(0x%llx): not a lifted midhook site, the hook will not run (list it in the mod's exefs/*.sites "
+                      "and run Set up)", static_cast<unsigned long long>(addr));
+    return track(hook_add_mid(addr, fn, user));
+}
 uint32_t api_hook_entry(uint64_t addr, NxModSiteFn fn, void* user) { return track(hook_add_entry(addr, fn, user)); }
 int api_hook_remove(uint32_t id) { return hook_remove(id) ? 1 : 0; }
 
