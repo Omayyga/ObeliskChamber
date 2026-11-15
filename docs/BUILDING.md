@@ -6,7 +6,11 @@ For development. Players should use the zip on the Releases page instead. You ne
 - LLVM 23 or newer (`clang-cl`), in `C:\Program Files\LLVM\bin`, or named by `NX_LLVM` (its bin folder) or `NX_TOOLCHAIN` (a folder with `llvm\bin`)
 - CMake 3.25+, Ninja, Git, [uv](https://docs.astral.sh/uv/) (it fetches Python 3.13), .NET 10 SDK, PowerShell 7 (or Windows PowerShell)
 - for the launcher: Rust (stable) and Node.js 20+
-- optional: NASM 2.14+ (faster movie decoding; on PATH, or `NX_TOOLCHAIN\bin`), sccache
+- NASM 2.14+ (on PATH, or `NX_TOOLCHAIN\bin`, or `-DNXRT_NASM=<nasm.exe>`): the movie decoder's assembly. Without it the runtime still
+  builds, but the decoder is C only and 1440p movies fall behind their sound; CMake warns and the log says "C only". A release runtime
+  must have it: configure with `-DNXRT_DAV1D_ASM=ON` (a missing NASM then fails the configure), and `make-release.ps1` refuses a
+  `fefw_rt.dll` built without it. Install with `winget install NASM.NASM` or `choco install nasm`.
+- optional: sccache
 
 ## With the launcher
 
