@@ -230,15 +230,18 @@ def tree_hash(root, rels):
 SHADER_TRANSLATOR_VERSION = 3
 
 
-def tool_stamp(variant, patch_stamp=None):
+def tool_stamp(variant, patch_stamp=None, sites_stamp=None):
     """The part of the build stamp this package decides: a release that changes any of it rebuilds ObeliskChamber.exe. The processor
     variant is in it as well, so an ObeliskChamber.exe built for the other one is rebuilt (the lift is kept: see main). The exefs patches of
-    the installed mods (exefs_patch_stamp) are in it only when there are any, so a build without patches keeps its old stamp."""
+    the installed mods (exefs_patch_stamp) and their hook sites (mod_sites_stamp) are in it only when there are any, so a build without
+    them keeps its old stamp."""
     stamp = {'lifter': tree_hash(RECOMP, LIFTER), 'sites': tree_hash(RECOMP, [SITES]), 'sdk': tree_hash(SDK, SDK_FILES),
              'runtime': sha256(os.path.join(SDK, 'fefw_rt.lib')), 'cxxflags': cxxflags(variant), 'cpu': variant,
              'modules': [list(m) for m in MODULES]}
     if patch_stamp:
         stamp['exefs_patches'] = patch_stamp
+    if sites_stamp:
+        stamp['mod_sites'] = sites_stamp
     if tune_stamp():
         stamp['tune'] = tune_stamp()
     return stamp
@@ -302,12 +305,15 @@ def check(game, variant):
         load_tune(game, quiet=True)
         bid = json.load(open(os.path.join(HERE, 'dump_hashes.json'), encoding='utf-8'))['main_build_id']
         patch_stamp = exefs_patch_stamp(collect_exefs_patches(game, bid))
+        sites_stamp = mod_sites_stamp(collect_mod_sites(game, bid))
     except Fail as e:
         return False, str(e)
-    want = tool_stamp(variant, patch_stamp)
+    want = tool_stamp(variant, patch_stamp, sites_stamp)
     changed = [k for k in sorted(set(want) | set(done['tools'])) if done['tools'].get(k) != want.get(k)]
     if changed == ['exefs_patches']:
         return False, 'the exefs patches in mods changed (Set up applies them)'
+    if changed and set(changed) <= {'exefs_patches', 'mod_sites'}:
+        return False, 'the hook sites of mods changed (Set up lifts the game with them)'
     if changed and set(changed) <= {'tune', 'cxxflags'}:
         return False, 'build_options.json changed (Set up builds with it)'
     if 'cpu' in changed and done['tools'].get('cpu') in CPU_VARIANTS:
@@ -606,8 +612,9 @@ def site_addresses():
     return out
 
 
-def apply_exefs_patches(main_path, patches):
-    """Write the patches into the plain main NSO (uncompressed segments) and fix the segment hashes in its header."""
+def apply_exefs_patches(main_path, patches, mod_sites=()):
+    """Write the patches into the plain main NSO (uncompressed segments) and fix the segment hashes in its header. A patch may not
+    touch a site of main.sites or one a mod adds (collect_mod_sites)."""
     if not patches:
         return
     data = bytearray(open(main_path, 'rb').read())
@@ -619,6 +626,8 @@ def apply_exefs_patches(main_path, patches):
         foff, moff, size = (int.from_bytes(data[0x10 + 0x10 * i + k:0x14 + 0x10 * i + k], 'little') for k in (0, 4, 8))
         segs.append((foff, moff, size))
     sites = site_addresses()
+    for where, kind, addr in mod_sites:
+        sites.setdefault(addr - MODULES[0][2], '%s (%s)' % (kind, where))
     touched = set()
     owner = {}
     for name, where, mem in patches:
@@ -647,6 +656,156 @@ def apply_exefs_patches(main_path, patches):
     os.replace(tmp, main_path)
     n = sum(len(m) for _, _, m in patches)
     progress('verify', 1, 1, 'Applied %d exefs patch record(s) from %s' % (n, ', '.join(sorted({w for _, w, _ in patches}))))
+
+
+# ---- hook sites of mods (mods/<name>/exefs/*.sites) --------------------------------------------------------------------------------
+# A code mod (exefs/*.dll, runtime/include/nxrt/mod_api.h) can hook only an instruction the game was lifted with as a site. A mod
+# that needs sites of its own lists them in exefs/<anything>.sites, in the syntax of main.sites but only with the kinds that just add
+# a call into the runtime (inline, midhook, entryhook: the instructions are lifted as before), plus one line
+#     @nsobid <main build ID>          (as in a .pchtxt)
+# so that sites for another version of the game are left out. Set up lifts main with main.sites plus these sites; they are part
+# of the build stamp, so installing, updating or removing such a mod lifts again. The sites of a mod with exefs = off in mod.ini
+# are kept: a site no hook is attached to only passes through, so switching the mod on or off (the game's Mods menu) needs no Set up,
+# only the next start, like any DLL mod. The list main was lifted with is written next to ObeliskChamber.exe (ObeliskChamber.sites,
+# write_lifted_sites), so the runtime can tell a mod whose sites are missing from this build.
+MOD_SITE_KINDS = ('inline', 'midhook', 'entryhook')
+
+
+def collect_mod_sites(game, build_id):
+    """The hook sites the installed mods add to main: [(file:line, kind, guest address)], in mod order."""
+    found = []
+    for name, d in find_mod_dirs(os.path.join(game, 'mods')):
+        ex = os.path.join(d, 'exefs')
+        if not os.path.isdir(ex):        # exefs = off does not count here (see above)
+            continue
+        for f in sorted(os.listdir(ex), key=str.lower):
+            if not f.lower().endswith('.sites') or not os.path.isfile(os.path.join(ex, f)):
+                continue
+            where = '%s/exefs/%s' % (name, f)
+            bid, recs = None, []
+            text = open(os.path.join(ex, f), encoding='utf-8-sig', errors='replace').read()
+            for ln, line in enumerate(text.splitlines(), 1):
+                t = line.split('#', 1)[0].split()
+                if not t:
+                    continue
+                if t[0].lower() == '@nsobid':
+                    if len(t) != 2:
+                        raise Fail('%s:%d: @nsobid takes one build ID' % (where, ln))
+                    bid = t[1]
+                    continue
+                if t[0] not in MOD_SITE_KINDS:
+                    raise Fail('%s:%d: "%s" is not a site a mod can add (%s)' % (where, ln, t[0], ', '.join(MOD_SITE_KINDS)))
+                try:
+                    if len(t) != 2:
+                        raise ValueError
+                    addr = int(t[1], 16)
+                except ValueError:
+                    raise Fail('%s:%d: expected "<kind> <guest address in hex>"' % (where, ln))
+                recs.append((ln, t[0], addr))
+            if bid is None:
+                raise Fail('%s has no @nsobid line (the build ID of the main its sites are for)' % where)
+            if not bid_matches(bid, build_id):
+                continue                 # another version of the game
+            for ln, kind, addr in recs:
+                if addr % 4 or not MODULES[0][2] <= addr < MODULES[1][2]:
+                    raise Fail('%s:%d: 0x%x is not an instruction address in main (main is at 0x%x)' % (where, ln, addr, MODULES[0][2]))
+                found.append(('%s:%d' % (where, ln), kind, addr))
+    return found
+
+
+def mod_sites_stamp(mod_sites):
+    """One hash over the sites the mods add (comments, order and duplicates do not count)."""
+    if not mod_sites:
+        return None
+    return hashlib.sha256(''.join('%s %x\n' % ka for ka in sorted({(k, a) for _, k, a in mod_sites})).encode()).hexdigest()
+
+
+# Midhook sites and the condition flags (runtime/include/nxrt/hooks.h): lifted functions keep NZCV in a local, so a midhook that
+# runs the rest of the function itself starts it with stale flags. Its site has to be where the flags are set again before they are
+# read, never between a compare and the instruction that uses it. Set up cannot follow the flow, but it warns about the common
+# mistake: a midhook whose own instruction reads the flags, or that comes right after one that sets them. (mask, value, name)
+FLAG_READERS = (
+    (0xFF000010, 0x54000000, 'b.cond'),
+    (0x3FE00000, 0x1A800000, 'csel / csinc / csinv / csneg (cset, cinc, cneg ...)'),
+    (0x3FE00000, 0x3A400000, 'ccmp / ccmn'),
+    (0xFF200C00, 0x1E200400, 'fccmp / fccmpe'),
+    (0xFF200C00, 0x1E200C00, 'fcsel'),
+    (0x1FE0FC00, 0x1A000000, 'adc / sbc'),
+)
+FLAG_SETTERS = (
+    (0x3F800000, 0x31000000, 'adds / subs (immediate; cmp / cmn)'),
+    (0x3F000000, 0x2B000000, 'adds / subs (register; cmp / cmn)'),
+    (0x7F800000, 0x72000000, 'ands (immediate; tst)'),
+    (0x7F000000, 0x6A000000, 'ands / bics (register; tst)'),
+    (0x3FE0FC00, 0x3A000000, 'adcs / sbcs'),
+    (0x3FE00000, 0x3A400000, 'ccmp / ccmn'),
+    (0xFF203C00, 0x1E202000, 'fcmp / fcmpe'),
+    (0xFF200C00, 0x1E200400, 'fccmp / fccmpe'),
+    (0xFFFFFFE0, 0xD51B4200, 'msr nzcv'),
+)
+
+
+def insn_kind(word, table):
+    return next((name for mask, value, name in table if word & mask == value), None)
+
+
+def flags_warning(word, prev):
+    """Why a midhook at an instruction `word` (after `prev`) may start a continuation with stale flags, or None."""
+    reads = insn_kind(word, FLAG_READERS)
+    if reads:
+        return 'its instruction reads the condition flags (%s)' % reads
+    sets = insn_kind(prev, FLAG_SETTERS) if prev is not None else None
+    if sets:
+        return 'it comes right after an instruction that sets the condition flags (%s)' % sets
+    return None
+
+
+def write_sites(main_path, mod_sites, build):
+    """The site list main is lifted with: main.sites itself when no mod adds sites, else build/main.sites = main.sites plus the
+    sites of the mods, each checked to lie in main's code."""
+    base = os.path.join(RECOMP, *SITES.split('/'))
+    if not mod_sites:
+        return base
+    with open(main_path, 'rb') as f:
+        data = f.read()
+    text_file, text_off, text_size = (int.from_bytes(data[o:o + 4], 'little') for o in (0x10, 0x14, 0x18))
+    word_at = lambda off: int.from_bytes(data[text_file + off - text_off:text_file + off - text_off + 4], 'little')
+    own = open(base).read()
+    have = set()
+    for line in own.splitlines():
+        t = line.split('#', 1)[0].split()
+        if len(t) >= 2:
+            have.add((t[0], int(t[1], 16)))
+    lines = []
+    for where, kind, addr in mod_sites:
+        off = addr - MODULES[0][2]
+        if not text_off <= off < text_off + text_size:
+            raise Fail("%s: 0x%x is outside main's code" % (where, addr))
+        if kind == 'midhook':
+            why = flags_warning(word_at(off), word_at(off - 4) if off - 4 >= text_off else None)
+            if why:
+                progress('verify', 1, 1, 'Note: %s: midhook 0x%x: %s. A hook there that runs the rest of the function itself '
+                         '(call_guest at its site) would start it with stale flags; one that returns 0 is fine '
+                         '(runtime/include/nxrt/hooks.h)' % (where, addr, why))
+        if (kind, addr) not in have:
+            have.add((kind, addr))
+            lines.append('%s 0x%x   # %s' % (kind, addr, where))
+    out = os.path.join(build, 'main.sites')
+    with open(out, 'w', encoding='utf-8') as f:
+        f.write(own.rstrip('\n') + '\n\n# ---- added by mods (exefs/*.sites)\n' + ''.join(l + '\n' for l in lines))
+    progress('verify', 1, 1, 'Hook sites from mods: %d (%s)' % (len(lines), ', '.join(sorted({w.rsplit(':', 1)[0] for w, _, _ in mod_sites}))))
+    return out
+
+
+def write_lifted_sites(game, sites, build_id):
+    """<game>/ObeliskChamber.sites: the site list main was lifted with (main.sites plus the mods' sites) under an @nsobid line, read by
+    the runtime to check hooks and the sites of installed mods against this build (runtime/src/services/mods_dll.cpp)."""
+    dst = os.path.join(game, 'ObeliskChamber.sites')
+    tmp = dst + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write('# The hook sites ObeliskChamber.exe was built with (written by Set up)\n@nsobid %s\n' % build_id)
+        f.write(open(sites, encoding='utf-8').read())
+    os.replace(tmp, dst)
 
 
 def popen(cmd, **kw):
@@ -701,9 +860,8 @@ class Runner:
         return rc, '\n'.join(tail)
 
 
-def lift(runner, exefs, gen, jobs):
-    """One lifter process per module (the lifter itself runs `jobs` worker processes)."""
-    sites = os.path.join(RECOMP, 'games', 'fefw', 'main.sites')
+def lift(runner, exefs, gen, jobs, sites):
+    """One lifter process per module (the lifter itself runs `jobs` worker processes); main with the site list `sites`."""
     for k, (name, nso, base, index, shards) in enumerate(MODULES):
         out = os.path.join(gen, name)
         marker = os.path.join(out, '.lifted')
@@ -953,9 +1111,11 @@ def main():
         plain = os.path.join(game, 'exefs')
         write_exefs(a.exefs, plain)
         patches = collect_exefs_patches(game, want['main_build_id'])
-        apply_exefs_patches(os.path.join(plain, 'main'), patches)
+        mod_sites = collect_mod_sites(game, want['main_build_id'])
+        apply_exefs_patches(os.path.join(plain, 'main'), patches, mod_sites)
+        sites = write_sites(os.path.join(plain, 'main'), mod_sites, build)
         stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'],
-                 'tools': tool_stamp(variant, exefs_patch_stamp(patches))}
+                 'tools': tool_stamp(variant, exefs_patch_stamp(patches), mod_sites_stamp(mod_sites))}
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -970,13 +1130,14 @@ def main():
         env['ZIG_LOCAL_CACHE_DIR'] = os.path.join(build, 'zig-cache')
         gen, obj = os.path.join(build, 'lift'), os.path.join(build, 'obj')
         t = time.time()
-        lift(runner, plain, gen, a.jobs)
+        lift(runner, plain, gen, a.jobs, sites)
         times['lift'] = round(time.time() - t, 1)
         t = time.time()
         compile_all(runner, gen, obj, a.jobs, env, variant)
         times['compile'] = round(time.time() - t, 1)
         t = time.time()
         exe = link(runner, obj, game, env, variant)
+        write_lifted_sites(game, sites, want['main_build_id'])
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
             progress('finish', 0, 1, 'Removing the build files')
