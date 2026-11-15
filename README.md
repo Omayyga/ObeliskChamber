@@ -23,20 +23,20 @@ contributors. Goldoire wrote, when publishing the last version (0.2.0), that the
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
 How much comes from where, measured on 2026-11-15 by the lines of the repository's own text files as `git blame` attributes them
-over the full history (third-party folders and lock files left out, 407,921 lines). Earlier versions of this table gave too few
+over the full history (third-party folders and lock files left out, 401,198 lines). Earlier versions of this table gave too few
 lines to the original's contributors; this count fixes that.
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 386,682 | 94.8% |
+| The original fefw-recomp: Goldoire | 386,682 | 96.4% |
 | The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,155 | 1.5% |
 | [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| Obelisk Chamber (this fork) | 14,594 | 3.6% |
+| Obelisk Chamber (this fork) | 7,871 | 2.0% |
 
-So about **96.3% of the code is the original's, 0.1% comes from Kompas9's fork and about 3.6% was added here**. By commits, not
-counting merges, the split is 85 from the original, 17 from Kompas9's fork and 74 from this fork. Lines are a rough measure of
+So about **97.9% of the code is the original's, 0.1% comes from Kompas9's fork and about 2.0% was added here**. By commits, not
+counting merges, the split is 85 from the original, 17 from Kompas9's fork and 77 from this fork. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 96.3%).
+their share is inside the 97.9%).
 
 The changes made in this fork were written with Claude (Anthropic's AI model), directed and tested by the fork's maintainer.
 
