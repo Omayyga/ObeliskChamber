@@ -722,8 +722,8 @@ def mod_sites_stamp(mod_sites):
 
 # Midhook sites and the condition flags (runtime/include/nxrt/hooks.h): lifted functions keep NZCV in a local, so a midhook that
 # runs the rest of the function itself starts it with stale flags. Its site has to be where the flags are set again before they are
-# read, never between a compare and the instruction that uses it. Set up cannot follow the flow, but it warns about the common
-# mistake: a midhook whose own instruction reads the flags, or that comes right after one that sets them. (mask, value, name)
+# read, never between a compare and the instruction that uses it. Set up follows the code forward from the site (flags_warning) and
+# notes a midhook whose flags are read before they are set again. (mask, value, name)
 FLAG_READERS = (
     (0xFF000010, 0x54000000, 'b.cond'),
     (0x3FE00000, 0x1A800000, 'csel / csinc / csinv / csneg (cset, cinc, cneg ...)'),
@@ -731,6 +731,7 @@ FLAG_READERS = (
     (0xFF200C00, 0x1E200400, 'fccmp / fccmpe'),
     (0xFF200C00, 0x1E200C00, 'fcsel'),
     (0x1FE0FC00, 0x1A000000, 'adc / sbc'),
+    (0xFFFFFFE0, 0xD53B4200, 'mrs nzcv'),
 )
 FLAG_SETTERS = (
     (0x3F800000, 0x31000000, 'adds / subs (immediate; cmp / cmn)'),
@@ -749,14 +750,44 @@ def insn_kind(word, table):
     return next((name for mask, value, name in table if word & mask == value), None)
 
 
-def flags_warning(word, prev):
-    """Why a midhook at an instruction `word` (after `prev`) may start a continuation with stale flags, or None."""
-    reads = insn_kind(word, FLAG_READERS)
-    if reads:
-        return 'its instruction reads the condition flags (%s)' % reads
-    sets = insn_kind(prev, FLAG_SETTERS) if prev is not None else None
-    if sets:
-        return 'it comes right after an instruction that sets the condition flags (%s)' % sets
+# Instructions that end the forward scan. A call (bl / blr) or a return leaves the flags dead (the ABI does not keep them across
+# either); br goes somewhere the scan cannot follow. b is followed to its target; cbz / cbnz / tbz / tbnz, which do not touch the
+# flags, are followed on their fall-through path.
+FLAG_SCAN_STOP = (
+    (0xFC000000, 0x94000000),   # bl
+    (0xFFFFFC1F, 0xD63F0000),   # blr
+    (0xFFFFFC1F, 0xD65F0000),   # ret
+    (0xFFFFFC1F, 0xD61F0000),   # br
+    (0xFFE0001F, 0xD4000001),   # svc
+    (0xFFE00000, 0xD4200000),   # brk
+)
+FLAG_SCAN_LIMIT = 64            # instructions; past that the site counts as fine
+
+
+def flags_warning(word_at, off, lo, hi):
+    """Why a midhook at main offset `off` may start a continuation with stale flags, or None. Follows the code from the site
+    (word_at(offset) = instruction word, code in [lo, hi)) until the flags are set again (fine), read (a note), or the path
+    leaves what can be followed (fine)."""
+    at, seen = off, set()
+    for _ in range(FLAG_SCAN_LIMIT):
+        if not lo <= at < hi or at in seen:
+            return None
+        seen.add(at)
+        w = word_at(at)
+        reads = insn_kind(w, FLAG_READERS)
+        if reads:                                   # checked first: ccmp / adcs read the flags before they set them
+            if at == off:
+                return 'its instruction reads the condition flags (%s)' % reads
+            return 'the condition flags are read at 0x%x (%s) before they are set again' % (at + MODULES[0][2], reads)
+        if insn_kind(w, FLAG_SETTERS):
+            return None
+        if any(w & m == v for m, v in FLAG_SCAN_STOP):
+            return None
+        if w & 0xFC000000 == 0x14000000:            # b: follow it
+            imm = w & 0x3FFFFFF
+            at += (imm - (1 << 26) if imm & (1 << 25) else imm) * 4
+            continue
+        at += 4                                     # anything else, and cbz / tbz falling through
     return None
 
 
@@ -782,7 +813,7 @@ def write_sites(main_path, mod_sites, build):
         if not text_off <= off < text_off + text_size:
             raise Fail("%s: 0x%x is outside main's code" % (where, addr))
         if kind == 'midhook':
-            why = flags_warning(word_at(off), word_at(off - 4) if off - 4 >= text_off else None)
+            why = flags_warning(word_at, off, text_off, text_off + text_size)
             if why:
                 progress('verify', 1, 1, 'Note: %s: midhook 0x%x: %s. A hook there that runs the rest of the function itself '
                          '(call_guest at its site) would start it with stale flags; one that returns 0 is fine '
