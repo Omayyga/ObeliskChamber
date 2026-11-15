@@ -35,6 +35,10 @@
  *     which is called as soon as the DLL is loaded. The game is not in memory yet: only log, edit_file and the version 3 helpers
  *     (mod folders, host files, zstd, memory) may be used there. Nonzero = the mod declines, as for nxmod_init.
  *
+ *   - (version 4) show a screen of rows in the game's own style, where the game module offers one (open_list): a label and a value
+ *     per row, a help line, up to three tabs; left / right and the confirm button are the mod's to answer. For settings that are
+ *     numbers or choices, which a plain menu of the game cannot change in place.
+ *
  * Loading can be turned off with [fs] dll_mods = false. A DLL runs with the same rights as the game: install only mods you trust.
  */
 #ifndef NXRT_MOD_API_H
@@ -48,7 +52,7 @@
 extern "C" {
 #endif
 
-#define NXMOD_API_VERSION 3u
+#define NXMOD_API_VERSION 4u
 
 typedef void (*NxModInlineFn)(Ctx* c, uint64_t addr, void* user);
 typedef int (*NxModSiteFn)(Ctx* c, uint64_t addr, void* user);   /* midhook / entry hook: nonzero = handled (nxrt/hooks.h) */
@@ -66,6 +70,26 @@ typedef struct NxModFile {
     void (*replace)(const struct NxModFile* file, const void* data, uint64_t size);
 } NxModFile;
 typedef void (*NxModFileFn)(const NxModFile* file, void* user);
+
+/* A list screen (version 4, open_list). Rows are numbered from 0. Texts are UTF-8, written into out (n bytes, terminator included):
+ * keep labels and values short (under 64 bytes), help under 160. Functions left NULL are skipped. */
+typedef struct NxModList {
+    uint32_t size;               /* sizeof(NxModList) of the mod */
+    int pages;                   /* tabs, 1 to 3 */
+    const char* titles[3];       /* their names (under 23 bytes each); they must stay valid while the screen is open */
+    int count;                   /* rows */
+    void* user;
+    int (*page)(int row, void* user);                                /* the row's tab; NULL: all on the first */
+    void (*label)(int row, char* out, uint64_t n, void* user);
+    void (*value)(int row, char* out, uint64_t n, void* user);
+    void (*help)(int row, char* out, uint64_t n, void* user);
+    /* the confirm button on a row: the answer goes to the game's menu (Fortune's Weave: 3 closes the list, 13 keeps it open and
+     * draws the row's value again, 0 does nothing). NULL: the list closes. */
+    uint32_t (*pick)(Ctx* c, int row, void* user);
+    void (*back)(void* user);                                        /* the cancel button: the list is closing */
+    /* left (dir -1) or right (dir +1) on a row: nonzero when the row's value changed (it is drawn again) */
+    int (*side)(Ctx* c, int row, int dir, void* user);
+} NxModList;
 
 typedef struct NxModApi {
     uint32_t version;            /* NXMOD_API_VERSION of the runtime */
@@ -139,6 +163,14 @@ typedef struct NxModApi {
     /* Memory for mods built without a C runtime: alloc returns size zeroed bytes (NULL on failure), free_mem releases them. */
     void* (*alloc)(uint64_t size);
     void (*free_mem)(void* p);
+
+    /* ---- version 4 (check api->version >= 4 before use) ---- */
+
+    /* Opens a list screen from the confirm handler of a menu item of the game (item = that item; c = the Ctx the handler was given).
+     * The list is copied; its functions are called on the game thread while the screen is open. Returns 1 when the screen was made,
+     * 0 when the game module offers no such screen or it could not be made. The answer the item's handler should then give the game
+     * is the game's own for "opened a screen" (Fire Emblem: Fortune's Weave: 9). One list is open at a time. */
+    int (*open_list)(Ctx* c, uint64_t item, const struct NxModList* list);
 } NxModApi;
 
 typedef int (*NxModInitFn)(const NxModApi* api, const char* mod_dir);

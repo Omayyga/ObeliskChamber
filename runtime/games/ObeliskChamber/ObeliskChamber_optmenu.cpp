@@ -46,7 +46,9 @@
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/nvn_backend.h"
+#include "nxrt/mod_api.h"
 #include "nxrt/platform.h"
+#include "nxrt/services_api.h"
 #include "play_types.h"
 #include "play_ui.h"
 
@@ -558,6 +560,21 @@ void list_value(::Ctx* c) {
     if (g_list.value) g_list.value(i, g_list_value, sizeof g_list_value);
     call(c, g_base + kSetText, {base, g_base + kStrTxt, ptr(g_list_value)});
 }
+// Left / right on a row (slots 40 / 39, as the Options rows' "previous / next value"): the owner changes the row's value and says so; the
+// value is drawn again and the row's arrow moves, as on an Options row. Without an owner's function: no value, no change.
+void list_side(::Ctx* c, int dir) {
+    const uint64_t item = c->x[0];
+    const int i = list_row(item);
+    if (i < 0 || !g_list.side || !(call(c, g_ivt2[2 + kISlotReady], {item}) & 1) || !g_list.side(c, i, dir)) {
+        c->x[0] = 0;
+        return;
+    }
+    call(c, g_ivt2[2 + kISlotRedraw], {item});
+    if (const uint64_t base = part_alive(item + kItemBase)) call(c, g_base + kArrow, {base, dir < 0 ? 1ull : 0ull});
+    c->x[0] = 1;
+}
+void list_next(::Ctx* c) { list_side(c, 1); }
+void list_prev(::Ctx* c) { list_side(c, -1); }
 // A prompt the row's pick opened (answer 12) is a process made after the list, under the same parent: while one is there, the list still
 // gets the buttons the prompt gets (B on the prompt also closed the list, seen on a PC). Processes: +0x20 = parent, +0x28 = newest child,
 // +0x38 = the sibling made before this one. So from a pick that answered 12 the list ignores A and B until the prompt was seen and is gone
@@ -935,6 +952,9 @@ bool slot_is(uint64_t vt, int slot, uint64_t fn) {
 }
 }  // namespace
 
+namespace {
+int mod_open_list(::Ctx* c, uint64_t item, const ::NxModList* list);   // below: the pick list for code mods
+}
 void optmenu_install(uint64_t base) {
     g_base = base;
     g_on = config_get_bool("fefw", "native_options", true);
@@ -1020,8 +1040,9 @@ void optmenu_frame() {
         g_yvt[2 + kFSlotCloneNew] = hle_register("fefw.optmenu.reset_yes_clone_new", reset_yes_clone_new);
         g_yvt[2 + kFSlotCloneAt] = hle_register("fefw.optmenu.reset_yes_clone_at", reset_yes_clone_at);
     } else NXLOG_W(kTag, "the Options screen's reset prompt is not where it was expected: minus does nothing on Recomp Options");
-    g_ivt2[2 + kISlotNext] = g_base + kBaseNext;
-    g_ivt2[2 + kISlotPrev] = g_base + kBasePrev;
+    g_ivt2[2 + kISlotNext] = hle_register("fefw.optmenu.list_next", list_next);
+    g_ivt2[2 + kISlotPrev] = hle_register("fefw.optmenu.list_prev", list_prev);
+    services::modapi::set_list_opener(mod_open_list);
     const uint64_t slot = g_base + kVtMenu + kMSlotBuild * 8;
     mem::protect(slot & ~0xfffull, 0x1000, mem::Prot::RW);
     wr<uint64_t>(slot, hle_register("fefw.optmenu.build", menu_build));
@@ -1056,6 +1077,33 @@ bool optmenu_open_list(::Ctx* c, uint64_t item, const OptList& list) {
     g_pending = kScreenNone;
     return built;
 }
+// The same list for a code mod (nxrt/mod_api.h version 4, open_list): the mod's list is kept and its functions are reached through ours.
+namespace {
+::NxModList g_mod_list{};
+int mod_page(int row) { return g_mod_list.page ? g_mod_list.page(row, g_mod_list.user) : 0; }
+void mod_label(int row, char* out, size_t n) { if (g_mod_list.label) g_mod_list.label(row, out, n, g_mod_list.user); }
+void mod_value(int row, char* out, size_t n) { if (g_mod_list.value) g_mod_list.value(row, out, n, g_mod_list.user); }
+void mod_help(int row, char* out, size_t n) { if (g_mod_list.help) g_mod_list.help(row, out, n, g_mod_list.user); }
+uint32_t mod_pick(::Ctx* c, int row) { return g_mod_list.pick ? g_mod_list.pick(c, row, g_mod_list.user) : kClose; }
+void mod_back() { if (g_mod_list.back) g_mod_list.back(g_mod_list.user); }
+int mod_side(::Ctx* c, int row, int dir) { return g_mod_list.side ? g_mod_list.side(c, row, dir, g_mod_list.user) : 0; }
+int mod_open_list(::Ctx* c, uint64_t item, const ::NxModList* list) {
+    if (!list || list->size < sizeof(::NxModList)) return 0;
+    g_mod_list = *list;
+    OptList l;
+    l.pages = std::clamp(list->pages, 1, kListPages);
+    for (int i = 0; i < kListPages; ++i) l.titles[i] = list->titles[i];
+    l.count = list->count;
+    l.page = list->page ? mod_page : nullptr;
+    l.label = mod_label;
+    l.value = mod_value;
+    l.help = mod_help;
+    l.pick = mod_pick;
+    l.back = mod_back;
+    l.side = mod_side;
+    return optmenu_open_list(c, item, l) ? 1 : 0;
+}
+}  // namespace
 // The pick list closes as B on a row closes it (the menu's handler with the answer 3), when it is open. For a pick whose prompt decided
 // something the list must not stay over.
 void optmenu_close_list(::Ctx* c) {
