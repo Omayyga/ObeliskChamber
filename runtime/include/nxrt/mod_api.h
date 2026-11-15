@@ -18,6 +18,10 @@
  *   - attach to the hook sites the game was lifted with (recomp/games/<game>/main.sites): inline, midhook and entry hooks, the same as
  *     the runtime's own features (nxrt/hooks.h). A site that is not in that list is never reached: a new site needs a change to
  *     main.sites (and a Set up run) like any other hook.
+ *     The condition flags (NZCV) are kept inside each lifted function, not in the Ctx: a hook must not read or set c->N, c->Z,
+ *     c->C or c->V. A midhook that runs the rest of the function itself (call_guest at its own site) starts it with stale flags,
+ *     so such a site must be where the flags are set again before they are read, e.g. right after a call or at a cmp / tst,
+ *     never between a compare and the branch or csel that uses it. The full rule is in nxrt/hooks.h.
  *   - call any lifted guest function (call_guest) from a hook or the frame callback, on the thread and Ctx it was given.
  *   - read and write guest memory directly: guest addresses are host addresses (main is at main_base); is_mapped checks a range first.
  *   - run once per presented frame (on_frame), on the main thread with its Ctx.
