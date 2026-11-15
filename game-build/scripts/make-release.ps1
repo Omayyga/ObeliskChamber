@@ -119,6 +119,9 @@ $tables = Get-ChildItem "$root\locales" -Filter '*.ini' -File -ErrorAction Silen
 if ($tables) { foreach ($t in $tables) { Put $t.FullName "locales\$($t.Name)" } }
 Put "$root\locales\README.md" 'locales\README.md'
 
+# --- the bundled mod, switched off by its folder name (a folder starting with _ is not loaded; the player renames it to use it)
+Mirror "$root\game-build\release\mods" 'mods'
+
 # --- the shader translator, self-contained (no .NET install needed on the player's PC)
 $harness = Join-Path $Out 'harness'
 # Always rebuild: reusing Out/harness can silently ship an older translator after

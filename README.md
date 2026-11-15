@@ -266,6 +266,11 @@ of the game's menus needs, and from version 3 a mod can change the game's data f
 for example), so two mods that add to the same file no longer overwrite each other. From version 4 a mod can show a list screen in the game's own style, with a value per row that left and right change. A DLL runs with the same rights as the game: only install mods you trust. `[fs] dll_mods = false` in `ObeliskChamber.ini` turns them
 off. Writing one: [runtime/include/nxrt/mod_api.h](runtime/include/nxrt/mod_api.h).
 
+The release comes with one code mod of this kind, **Create New Class** (`mods\_CreateNewClass`): it makes classes of your own from
+the Class Change screen. It is **off**: its folder name starts with `_`. Rename the folder to `CreateNewClass` to try it, and read
+its `README.txt` first: a save with a unit in a created class needs the mod to load. Its source is in
+[game-build/release/mods/_CreateNewClass/source](game-build/release/mods/_CreateNewClass/source).
+
 Mods can be switched on and off in the game: the title screen's DLC entry reads **DLC / Mods** and lists every mod folder on a RomFS
 tab and an ExeFS tab. The switch is the file `mod.ini` in the mod's folder (`romfs = on` / `off`, `exefs = on` / `off`; no file means
 on), which you can also edit by hand. RomFS files and DLLs follow it at the next start, exefs patches at the next **Set up**.

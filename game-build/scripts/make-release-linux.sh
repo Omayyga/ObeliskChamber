@@ -100,6 +100,8 @@ echo "--- from this checkout"
 cp "$ROOT/game-build/release/fefw_build.py" "$PKG/tools/build/fefw_build.py"
 cp "$ROOT/tools/shaders/ampere/extract_corpus.py" "$PKG/tools/shaders/extract_corpus.py"
 sed "s/@VERSION@/$VERSION/" "$ROOT/game-build/release/README-linux.txt" > "$PKG/README.txt"
+# the bundled mod, switched off by its folder name (a folder starting with _ is not loaded)
+cp -a "$ROOT/game-build/release/mods" "$PKG/mods"
 
 echo "--- Zig $ZIG_VERSION"
 zig="$CACHE/zig-x86_64-linux-$ZIG_VERSION.tar.xz"

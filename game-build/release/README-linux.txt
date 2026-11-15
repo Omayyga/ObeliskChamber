@@ -14,4 +14,7 @@ ObeliskChamber.exe is a Windows program: the launcher builds it on this PC and s
 Updating: the launcher's About page installs a new release (or extract the new package over this folder). Then press Set up again
 in the launcher if it asks (Desktop Mode on a Steam Deck) before playing from Steam. Your saves are kept (save/).
 
+Mods: mods/ holds Create New Class, a code mod that makes classes of your own, switched off (its folder name starts with _).
+Rename mods/_CreateNewClass to mods/CreateNewClass to use it, and read its README.txt first.
+
 Licences: LICENSE.txt, LEGAL.txt and licenses/.
