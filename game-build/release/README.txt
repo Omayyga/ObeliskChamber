@@ -10,4 +10,7 @@ decrypted dump of the game (update 131072), as a folder with exefs/ and romfs/ o
 
 Updating: extract the new release over this folder and press Set up again if the launcher asks. Your saves are kept (save/).
 
+Mods: mods/ holds Create New Class, a code mod that makes classes of your own, switched off (its folder name starts with _).
+Rename mods/_CreateNewClass to mods/CreateNewClass to use it, and read its README.txt first.
+
 Licences: LICENSE.txt, LEGAL.txt and licenses/.

@@ -1,0 +1,356 @@
+Create New Class 1.0 - documentation
+README.txt is the short guide. This file explains every part.
+
+Contents
+  1. How it works
+  2. The list of classes
+  3. A class's sheet, line by line
+  4. Mounted classes and their dismounted class
+  5. Magic: what a class holds and where spells start
+  6. Saved games and safety
+  7. The files (job.txt, asset.txt, the others)
+  8. Sharing a class
+  9. Limits and things not yet checked
+ 10. Source
+
+
+1. HOW IT WORKS
+  The game keeps its classes in a table that it reads once, at start.
+  This mod adds rows to that table while the game's files are being set
+  up: one row for every entry in job.txt. A new entry starts as a copy of
+  a class of the game (its Base Class). The look of a class (models,
+  colours, animations) is in a second table; the mod adds rows there too,
+  from asset.txt.
+
+  That is why some things need a restart: a row that is not in the table
+  when the game starts cannot be added later. Numbers in a row that does
+  exist (stats, tier, exam, gender ...) change at once.
+
+  Because a class has to exist from the start, job.txt always holds a few
+  empty placeholders (JID_Custom01, JID_Custom02 ...). "New class" in the
+  menu turns the first empty one into a class. At each start the mod adds
+  placeholders until four are empty.
+
+  The key of a class (JID_Custom03) never changes. The name you see is a
+  separate text. (Test builds before 1.0 changed a placeholder's key to its name
+  once; keys changed that way stay as they are.)
+
+
+2. THE LIST OF CLASSES
+  Open: left stick click on the Class Change screen.
+  Move with the d-pad or the left stick. The right stick does not move
+  the creator's lists, so it still turns the camera. (The number
+  screens are the runtime's own and may still follow it.)
+  It shows the classes you made, then "New class". Dismounted classes are
+  not listed: they follow their mounted class (see part 4). With more than twelve lines the list is split into
+  pages.
+
+  New class
+    Kind (Infantry, Magic, Armored, Cavalry, Fliers) > Class Tier > class.
+    How a class of the game is sorted into a kind: flying first, then
+    cavalry, then armored, then magic (its best weapon skill is Black or
+    White Magic), otherwise infantry. Cavalry and Fliers are exactly the
+    game's mounted classes.
+    The game's own yes / no box asks before the class is made. On Yes
+    the lists close by themselves and the new class's sheet opens.
+
+
+3. A CLASS'S SHEET, LINE BY LINE
+  (at once)  = shows immediately        (restart) = from the next start
+
+  Base Class                                                   (at once)
+    Makes the class a copy of another class again. Its numbers and its
+    look start over as the new base's.
+
+  Name                                                         (restart)
+    Name and Description, each typed on the game's own keyboard
+    (the one used to name a character). Name: 24 characters. Description:
+    90 characters, one line (for a second line type \n in job.txt).
+
+  Class Info
+    Class Tier and Movement   (at once)  Tier 1 to 5; the movement type
+                              is the game's own number. Points to Master
+                              follow the tier (30, 60, 100, 130, 160).
+    Class Type                (at once)  Infantry, Armored Infantry,
+                              Cavalry, Armored Cavalry, Fliers, Flying
+                              Cavalry, Dragon, Beast, Fiend. Sets the
+                              icons beside the class's name, which also
+                              decide what is effective against it. A unit
+                              already in the class may keep the old type
+                              until the save is loaded again.
+    Gender                    (at once)  Anyone, Male only, Female only.
+    Class Icon                (at once)  the icon and picture of another
+                              class.
+    Class Line, previous      (at once)  the class before this one in its
+    Class Line, next                     line, and the one after. Any
+                              class of the game or one you made, or
+                              (none). What the game uses these for has
+                              not been traced; they are set the way the
+                              game's own classes have them.
+
+  Basic Stats                                                  (at once)
+    Basic Stats         of units whose character has none of its own
+                        (generic soldiers)
+    Class Bonus         added to the stats of every unit in the class
+    Growth Rate         of generic soldiers
+    Growth Rate Bonus   added to the Growth Rate of every unit
+    Stat caps are not listed: 99 in every class of the game.
+
+  Skill Exp Bonus                                              (at once)
+    One screen: Sword, Lance, Axe, Bow, Gauntlets, Black Magic, White
+    Magic, Special, Infantry, Cavalry, Heavy Armor, Flying, Authority.
+    "-" on a weapon means the class cannot use it.
+
+  Abilities
+    Class Ability 1-3   (restart)  from a list of every ability the
+                        game's classes have, or (none).
+    Master Ability      (at once)  what a unit gets for mastering the
+                        class.
+
+  Certification Exam                                           (at once)
+    Primary and Secondary Skills
+        One screen, a row per skill. Left / right: the Skill Lv a unit
+        needs ("-" = not asked). Confirm: Primary or Secondary (three
+        Secondary at most).
+        Every Primary Skill is needed. Of the Secondary Skills only the
+        one the unit is closest in counts. Example from the game: Light
+        Cavalry has Sword 5 and Lance 5 as Secondary, Cavalry 3 as
+        Primary: Cavalry 3 and either Sword 5 or Lance 5.
+    Pass Chance lost per missing Lv
+        Pass Chance = 100 - this x the missing Skill Lv. The game's
+        classes have 30, or 15.
+    Barred characters
+        (none), or the game's list. The game has one: Orchel and Goliath,
+        barred from every mounted class.
+
+  Mounted                                   see part 4
+
+  Appearance                         (at once on the unit; kept at once)
+    Body, Material, Outfit Colors, Map scale, Accessories, Footsteps.
+    Each value comes from a class, a character or another row of the
+    game's look table; lists are grouped that way.
+    Outfit Colors: three colours. Each from ten families of twelve
+    shades, or "Exact color" (hue, saturation, brightness, red, green,
+    blue on the number screen).
+    Accessories: one line per attach point (head, shield arm ...), or
+    remove all.
+
+  Animations and Magic
+    Animations   (restart for single weapons)  the class's animations as
+                 a whole, or for one weapon kind (Sword, Lance, Axe, Bow,
+                 Gauntlet, Black magic, White magic, Special, No weapon)
+                 from another class, character or row.
+    Magic        see part 5
+
+  Remove this class                                            (restart)
+    The game's yes / no box asks first. The class (and its dismounted
+    class) leaves job.txt and asset.txt at once and is gone from the game
+    after a restart. See part 6 before using it.
+
+  Portraits: a created class gives its generic soldier portrait only to
+  generic soldiers; a named character keeps the character's own.
+
+
+4. MOUNTED CLASSES AND THEIR DISMOUNTED CLASS
+  In the game a mounted class is two classes: the mounted one, and an
+  on-foot one the unit turns into while dismounted. The unit stays of the
+  mounted class.
+
+  A class copied from a mounted class already works: it has the base's
+  mount and dismounts into the base's on-foot class.
+
+  Mounted > Generate dismounted class            (restart)
+    Only for a class whose Base Class is mounted (kind Cavalry or
+    Fliers). It makes an on-foot class of your own:
+      - it starts as a copy of the base's on-foot class (type, movement,
+        icon, look and animations are that class's);
+      - your class's name, stats, growths, skill bonuses, tier, gender
+        and Master Ability are carried over, and the body, colours and
+        accessories you chose;
+      - its Class Bonus is yours minus what the base's on-foot class
+        loses against its mounted one (usually speed and move);
+      - it has no exam: units only take the mounted class's exam;
+      - the mount, the riding animations and the casting choices are not
+        carried over.
+    After the restart the dismounted class follows the mounted one: when
+    you change the mounted class's name, stats, growths, skill bonuses,
+    tier, gender, abilities, Master Ability, Class Line, body, colours,
+    accessories or footsteps, the dismounted class gets the same.
+
+  Mounted > Regenerate dismounted class
+    Shown once the pair exists. It writes the dismounted class's entry
+    again from the mounted class as it is now, exactly as the first
+    time (so the Dismounted Class Bonus starts over too). Use it when
+    the dismounted class does not match. Numbers change at once; the
+    look, the type icons and the animations from the next start.
+
+  Mounted > Dismounted Class Bonus               (at once)
+    The one thing the dismounted class has of its own, as in the game's
+    pairs: the Class Bonus while on foot. Changing the mounted class's
+    Class Bonus moves this by the same amount, so the difference you set
+    stays.
+
+  Mounted > Mount model
+    The mount's outfit. The animal itself (body, tail, coat colour) comes
+    from the mount the unit has equipped.
+
+  Why a mounted base is required: a class with an on-foot class must have
+  a mount, or the game crashes when it reads it. A mounted base brings
+  the mount, the link and the Mount / Dismount ability with it.
+
+  Pairs made by test builds from a class on foot keep working.
+
+
+5. MAGIC: WHAT A CLASS HOLDS AND WHERE SPELLS START      (all: restart)
+  Animations and Magic > Magic opens four lines:
+    From a class or character   the magic effect row of another class
+    Held while casting          nothing, or a sword model in the right
+                                hand (bronze, iron, poison, thunder)
+    Black magic effect          each spell's own, or one weapon effect
+                                for every black magic spell of the class
+    Spells start at             the casting point (as the game), or the
+                                right hand
+
+  "The right hand" is for a class that casts with an animation that does
+  not move the game's casting point (a rider, for example): its tome and
+  staff spells and their glyph then start at the hand. Only that class is
+  changed: the mod makes copies of the spells for it. A chosen black
+  magic effect wins over those copies. Dark spells keep the game's ground
+  glyph.
+
+  For every caster in the game at once: a text file magic_launch.txt in
+  this folder with one line, Loc_R_Weapon (or Loc_L_Weapon, Loc_TrailTip,
+  Loc_C_Center). Delete it when you use "the right hand" on a class.
+
+
+6. SAVED GAMES AND SAFETY
+  The game stores a unit's class by the class's key. When it loads a save
+  and a unit's class is not in the table, it crashes. It loads your last
+  save at start-up, so that crash comes before the title screen and no
+  message can be shown first.
+
+  What keeps this from happening:
+    - The download contains no job.txt and no asset.txt.
+    - At every start the mod copies job.txt and asset.txt to job.txt.bak
+      and asset.txt.bak (when job.txt holds at least one made class).
+    - If job.txt is missing, or holds only empty placeholders while
+      job.txt.bak has classes, the backup is put back and the log says
+      so. Delete job.txt.bak if you really want to start over.
+    - A class's key never changes.
+    - Making and removing a class ask first.
+
+  What you still have to do:
+    - Keep a save slot with no units in created classes.
+    - Before "Remove this class": move its units to another class, save,
+      then remove.
+    - To play without the mod: do the same for every created class first.
+
+  If it happened anyway: put job.txt and asset.txt back (the .bak files,
+  or your own copy). A job.txt entry with the right key and any base is
+  enough for the save to load.
+
+
+7. THE FILES
+  All in the CreateNewClass folder.
+    job.txt          the classes
+    asset.txt        the look of each class where it differs from its base
+    job.txt.bak      the mod's spare copies (see part 6)
+    asset.txt.bak
+    job.ini          enabled = false stops the folder from being read;
+                     debug = true adds a detailed trace to the log
+    magic_launch.txt optional (see part 5)
+    exefs\           the mod itself
+    source\          its source
+
+  The menu writes both text files; you do not need to edit them. They can
+  be edited with the game closed. The menu rewrites them whole, so
+  comments you add are lost.
+
+  job.txt
+    [JID_Custom01]                 the key: never change it once used
+    base = JID_...                 the Base Class (JID_無し = empty)
+    name = Sky Lancer
+    help = First line.\nSecond line.
+    sex = 0 / 1 / 2                anyone / male only / female only
+    class_exp = 130, 25            Points to Master and the battle number
+    abilities = SID_a, SID_b, none the three Class Abilities
+    skills = JID_...               or: the abilities of that class
+    barred = JID_... / none        the barred list of that class
+    dismount = JID_... / none      its dismounted class
+    mount = none                   it has no mount (a dismounted class)
+    mount = JID_...                it has that class's mount
+    lower = JID_... / upper = JID_...   the Class Line (upper = none)
+    attributes = JID_... / none    the class whose type icons it has
+    icon = JID_...                 the class whose icon it shows
+    master_skill = SID_... / none
+    stats, modifiers, caps, growths, growth_bonus =
+        HP,Str,Mag,Dex,Spd,Lck,Def,Res,Cha,sight,move
+    weapon_ranks = sword,lance,axe,bow,gauntlet,black,white,special
+        (-1 = cannot use)          the first eight Skill Exp Bonus rows
+    unit_types = infantry,cavalry,heavy armor,flying,authority
+    move_type = n        rank = n (the Class Tier)
+    cc_ranks = the Skill Lv the exam asks: 8 weapons, then the 5 others
+    cc_shared = up to three skill numbers that are Secondary (15 = none;
+        0 sword .. 7 special, 8 infantry .. 12 authority)
+    cc_fail = the Pass Chance lost per missing Lv
+    A line that is absent means "as the Base Class".
+
+  asset.txt
+    [JID_Custom01]
+    body, material, colors, scale, anim, footstep, accessories, mount,
+    magic = value          (field.m / field.f for one sex)
+      a value is  [cond,cond]   the look row with exactly these conditions
+                  JID_Class     that class's rows
+                  a model name
+                  #RRGGBB,#RRGGBB,#RRGGBB   for colors (- = none)
+    anim.sword / lance / axe / bow / gauntlet / black / white / special /
+    unarmed = animation names   for that weapon kind only
+    cast_hand = W1_014          a model held while casting black magic
+    cast_effect = MagicWP_...   one effect for every black magic spell
+    cast_spells = hand          spells and glyph start at the right hand
+
+
+8. SHARING A CLASS
+  A class is one entry in job.txt and, if its look was changed, one entry
+  with the same key in asset.txt. A mounted class with its own dismounted
+  class is two entries in each (JID_Key and JID_Key下馬).
+
+  To add someone's class by hand, with the game closed:
+    1. Copy their entries to the end of your job.txt and asset.txt.
+    2. If you already have an entry with that key, give the new one a key
+       no entry uses: in both files, in its dismount = line, in its
+       dismounted class's key, and in any lower = / upper = line that
+       names it.
+    3. Start the game.
+
+  The safer way is to rebuild the class in the menu from a list of its
+  settings: nothing is forgotten, keys cannot clash, and settings that
+  point at other created classes (Class Line, icon) are chosen from what
+  you actually have.
+
+
+9. LIMITS AND THINGS NOT YET CHECKED
+  - 64 entries at most, dismounted classes and empty placeholders
+    included.
+  - Enemies do not use created classes.
+  - Combat arts follow the character and the weapon, not the class.
+  - Class Line: stored as the game stores it; its effect in the game has
+    not been traced.
+  - A class you made can be another class's Class Line target, but not
+    its Base Class or icon. If a target is removed, the link is dropped
+    at the next start and logged.
+  - Typing uses the game's keyboard; the game stands still while it is
+    open, as it does when a character is named.
+
+
+10. SOURCE
+  source\create_class.c and the headers beside it are the whole mod.
+  Build:
+    clang --target=x86_64-pc-windows-msvc -O2 -ffreestanding -fno-builtin
+          -fno-stack-protector -c create_class.c
+    lld-link /DLL /NOENTRY /NODEFAULTLIB /OUT:create_class.dll
+             create_class.obj
+  The mod contains nothing of the game.
+
+  The DLL in exefs\ is built from source\ with the two commands above
+  (clang and lld-link 18 or later); SHA256SUMS has its checksum.
