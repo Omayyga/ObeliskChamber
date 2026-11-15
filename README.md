@@ -22,18 +22,21 @@ Almost all of this project is the original **[fefw-recomp](https://github.com/Go
 contributors. Goldoire wrote, when publishing the last version (0.2.0), that the repository would be deleted and that anyone is free
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
-How much is original, measured on 2026-11-14 by the lines of the repository's own text files as `git blame` attributes them
-(third-party folders and lock files left out, 404,523 lines):
+How much comes from where, measured on 2026-11-15 by the lines of the repository's own text files as `git blame` attributes them
+over the full history (third-party folders and lock files left out, 407,921 lines). Earlier versions of this table gave too few
+lines to the original's contributors; this count fixes that.
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 396,569 | 98.0% |
-| The original fefw-recomp: its contributors (Paulius / Kompas9, ranbinrang-rgb, Aidan Kinzett) | 931 | 0.2% |
-| Obelisk Chamber (this fork) | 7,023 | 1.7% |
+| The original fefw-recomp: Goldoire | 386,682 | 94.8% |
+| The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,155 | 1.5% |
+| [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
+| Obelisk Chamber (this fork) | 14,594 | 3.6% |
 
-So about **98.3% of the code is the original's and about 1.7% was added here**. By commits, not counting merges, the split is 22
-from the original and 63 from this fork. Lines are a rough measure of work, and the original in turn builds on the projects named under [Credits](#credits)
-(its first commit holds their code too, so their share is inside the 98.3%).
+So about **96.3% of the code is the original's, 0.1% comes from Kompas9's fork and about 3.6% was added here**. By commits, not
+counting merges, the split is 85 from the original, 17 from Kompas9's fork and 74 from this fork. Lines are a rough measure of
+work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
+their share is inside the 96.3%).
 
 The changes made in this fork were written with Claude (Anthropic's AI model), directed and tested by the fork's maintainer.
 
@@ -303,8 +306,25 @@ This project stands on the work of others. Thank you.
 **The original**
 - **[fefw-recomp](https://github.com/Goldoire/fefw-recomp) by Goldoire**: the port itself, about 98% of what is here. See
   [Where this comes from](#where-this-comes-from).
-- Its contributors: **Paulius (Kompas9)** (ultrawide fixes, storage-buffer reads, Vulkan layer handling), **ranbinrang-rgb** (code
-  mods as DLLs) and **Aidan Kinzett** (a clearer Set up error), and everyone who filed issues and helped test it.
+- Its contributors: **Stellarznith** (DualSense haptic feedback, the F1 upscaler and frame generation status, translations),
+  **Aidan Kinzett** (the Linux package and starting the game through Steam's Proton or Wine, a clearer Set up error),
+  **Paulius (Kompas9)** (ultrawide fixes, torch shadows, storage-buffer reads, Vulkan layer handling), **ranbinrang-rgb** (code mods
+  as DLLs) and **Abubakar-ux** (the frame rate counter with frame generation), and everyone who filed issues and helped test it.
+
+**[Kompas9's fork](https://github.com/Kompas9/fefw-recomp) by Paulius (Kompas9)**
+
+After the original's last release, Paulius kept improving it in a fork of their own. These changes were brought in here with their
+commits, so the history shows them as the author:
+- Faster game code: the condition flags are a local of each translated function instead of four fields written to memory (the
+  game's code is about 18% smaller; it takes effect at the next Set up).
+- The game's alpha test (the hardware stage that hides see-through pixels, used by a dissolve effect) applied as a shader variant
+  (`[nvn] alpha_test`).
+- A shader fix for integer textures (four shaders that were read as float images, issue #89 of the original).
+- GPU statistics counters written once per address (`[nvn] stat_counters`), saving render-thread time each frame.
+- A D-pad for the tutorial's page-turn glyphs with a PlayStation or Xbox pad (`[fefw] pager_dpad`).
+- The launcher names the Streamline files in the DLSS folder that the game does not use (NVIDIA's NGX can load stray ones).
+- astc-encoder 5.7.1, and much quieter logs: no unknown-NVN-function list, Streamline plugin notes, libvpx line or RGB565 texture
+  warnings at every start.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
