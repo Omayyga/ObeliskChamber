@@ -23,20 +23,20 @@ contributors. Goldoire wrote, when publishing the last version (0.2.0), that the
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
 How much comes from where, measured on 2026-11-15 by the lines of the repository's own text files as `git blame` attributes them
-over the full history (third-party folders and lock files left out, 407,921 lines). Earlier versions of this table gave too few
+over the full history (third-party folders and lock files left out, 401,198 lines). Earlier versions of this table gave too few
 lines to the original's contributors; this count fixes that.
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 386,682 | 94.8% |
+| The original fefw-recomp: Goldoire | 386,682 | 96.4% |
 | The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,155 | 1.5% |
 | [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| Obelisk Chamber (this fork) | 14,594 | 3.6% |
+| Obelisk Chamber (this fork) | 7,871 | 2.0% |
 
-So about **96.3% of the code is the original's, 0.1% comes from Kompas9's fork and about 3.6% was added here**. By commits, not
-counting merges, the split is 85 from the original, 17 from Kompas9's fork and 74 from this fork. Lines are a rough measure of
+So about **97.9% of the code is the original's, 0.1% comes from Kompas9's fork and about 2.0% was added here**. By commits, not
+counting merges, the split is 85 from the original, 17 from Kompas9's fork and 77 from this fork. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 96.3%).
+their share is inside the 97.9%).
 
 The changes made in this fork were written with Claude (Anthropic's AI model), directed and tested by the fork's maintainer.
 
@@ -268,11 +268,6 @@ built with; from interface version 2 a mod can also give the game functions of i
 of the game's menus needs, and from version 3 a mod can change the game's data files as they are loaded (add rows to a table,
 for example), so two mods that add to the same file no longer overwrite each other. From version 4 a mod can show a list screen in the game's own style, with a value per row that left and right change. A DLL runs with the same rights as the game: only install mods you trust. `[fs] dll_mods = false` in `ObeliskChamber.ini` turns them
 off. Writing one: [runtime/include/nxrt/mod_api.h](runtime/include/nxrt/mod_api.h).
-
-The release comes with one code mod of this kind, **Create New Class** (`mods\_CreateNewClass`): it makes classes of your own from
-the Class Change screen. It is **off**: its folder name starts with `_`. Rename the folder to `CreateNewClass` to try it, and read
-its `README.txt` first: a save with a unit in a created class needs the mod to load. Its source is in
-[game-build/release/mods/_CreateNewClass/source](game-build/release/mods/_CreateNewClass/source).
 
 Mods can be switched on and off in the game: the title screen's DLC entry reads **DLC / Mods** and lists every mod folder on a RomFS
 tab and an ExeFS tab. The switch is the file `mod.ini` in the mod's folder (`romfs = on` / `off`, `exefs = on` / `off`; no file means
