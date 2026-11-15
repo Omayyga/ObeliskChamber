@@ -6,6 +6,9 @@
 #include <string>
 #include <vector>
 
+struct Ctx;          // the lifted code's register state (nxrecomp/ctx.h)
+struct NxModList;    // nxrt/mod_api.h
+
 namespace nxrt::services {
 
 // ---- fs (fs.cpp): save data backend used by am (EnsureSaveData ...) and the fsp-srv commands ---------------------------------------
@@ -71,6 +74,11 @@ struct ModCodec {
     int64_t (*zstd_compress)(const void* src, uint64_t src_size, void* dst, uint64_t cap, int level) = nullptr;
 };
 void set_codec(const ModCodec& c);
+// The list screen of the interface's version 4 (open_list): the game module that has one hands its opener over when it is installed.
+// Without one open_list answers 0.
+using ListOpener = int (*)(::Ctx* c, uint64_t item, const ::NxModList* list);
+void set_list_opener(ListOpener fn);
+int open_list(::Ctx* c, uint64_t item, const ::NxModList* list);   // what the interface's open_list calls
 bool file_edit_wanted(const std::string& image_path);
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
 }  // namespace modapi

@@ -116,6 +116,7 @@ struct OptList {
     uint32_t (*pick)(::Ctx* c, int row) = nullptr;   // on the game thread, inside the row's A handler
     void (*back)() = nullptr;          // B on a row: the list is closing
     bool (*dirty)() = nullptr;         // true while the rows' values may have changed: they are drawn again (a few times a second)
+    int (*side)(::Ctx* c, int row, int dir) = nullptr;   // left (-1) / right (+1) on a row, on the game thread: nonzero = its value changed
     uint64_t fn[5] = {};               // internal: the tab label function object
 };
 bool optmenu_open_list(::Ctx* c, uint64_t item, const OptList& list);

@@ -375,6 +375,7 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     m->api.zstd_compress = &api_zstd_compress;
     m->api.alloc = &api_alloc;
     m->api.free_mem = &api_free;
+    m->api.open_list = &modapi::open_list;
     m->init = init;
     m->dir = u8(mod_dir);
     {
@@ -398,6 +399,15 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
 }  // namespace
 
 void set_codec(const ModCodec& c) { st().codec = c; }
+
+namespace {
+ListOpener g_list_opener = nullptr;
+}
+void set_list_opener(ListOpener fn) { g_list_opener = fn; }
+int open_list(::Ctx* c, uint64_t item, const ::NxModList* list) {
+    if (!g_list_opener || !c || !item || !list || list->size < sizeof(::NxModList) || list->count < 1) return 0;
+    return g_list_opener(c, item, list);
+}
 
 bool file_edit_wanted(const std::string& image_path) {
     const std::string key = edit_key(image_path.c_str());
