@@ -586,7 +586,7 @@ void list_prev(::Ctx* c) { list_side(c, -1); }
 // Save and Continue prompts) can stay up a little longer, and after a save a last step is closed with A. That A also reached the row, which
 // asked again 0.86 s after the save (seen on a PC). So while a report window is still registered the guard stays on (kPromptWindow).
 // The game keeps one global pointer to "the" report window, [main+0x22a10c0]: a new window is stored there only when it is empty
-// (0x16da9f4 and 0x16daf54: ldr x9, [x8,#0xc0]; cbnz x9; str ..., [x8,#0xc0]) and its destructor clears it. A prompt made while the old
+// (0x16da9f4 and 0x16daf54: adrp x8, the global's page; ldr x9, [x8,#0xc0]; cbnz x9; str ..., [x8,#0xc0]) and its destructor clears it. A prompt made while the old
 // window is still there is not registered, so its Yes / No / B close the old one and nothing ever closes the new one: it stayed on screen
 // and the field camera no longer turned (seen on a PC). 0x1618dc0(window) closes a window once it has finished opening (what the
 // Continue prompt's Yes and No call); it does nothing before that.
@@ -1120,12 +1120,18 @@ void optmenu_frame() {
     // The report window's global: checked through the two places that store it (see kPromptWindow); without it the list guard works as
     // before (no wait for the window, no refusal, no close).
     g_report_ok = fn_lookup(g_base + kReportClose) && mem::is_mapped(g_base + kReportWindow, 8);
+    // Each site starts with the adrp of the global's page (the check read the ldr there before, one instruction early, so it always failed
+    // and the list never waited for the window: the save prompt came back after a save, seen on a PC).
     for (uint64_t at : kReportStores) {
         uint32_t w[8] = {};
         bool store = false;
         if (!rd(g_base + at, &w)) g_report_ok = false;
-        for (int i = 2; i < 8; ++i) store = store || (w[i] & 0xffffffe0u) == 0xf9006100u;   // str xN, [x8,#0xc0]
-        g_report_ok = g_report_ok && w[0] == 0xf9406109u && (w[1] & 0xff00001fu) == 0xb5000009u && store;   // ldr x9, [x8,#0xc0]; cbnz x9
+        const bool adrp = (w[0] & 0x9f00001fu) == 0x90000008u;      // adrp x8, page
+        int64_t imm = static_cast<int64_t>((((w[0] >> 5) & 0x7ffffu) << 2) | ((w[0] >> 29) & 3u));
+        if (imm & (int64_t{1} << 20)) imm -= int64_t{1} << 21;
+        const bool page = adrp && static_cast<uint64_t>(static_cast<int64_t>(at & ~0xfffull) + imm * 0x1000) == (kReportWindow & ~0xfffull);
+        for (int i = 3; i < 8; ++i) store = store || (w[i] & 0xffffffe0u) == 0xf9006100u;   // str xN, [x8,#0xc0]
+        g_report_ok = g_report_ok && page && w[1] == 0xf9406109u && (w[2] & 0xff00001fu) == 0xb5000009u && store;   // ldr x9, [x8,#0xc0]; cbnz x9
     }
     if (!g_report_ok) NXLOG_W(kTag, "the game's report window is not where it was expected: the save list does not wait for it");
     g_ivt2[2 + kISlotNext] = hle_register("fefw.optmenu.list_next", list_next);
