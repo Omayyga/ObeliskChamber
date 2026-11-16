@@ -30,15 +30,15 @@ over the full history (third-party folders and lock files left out, 401,708 line
 | The original fefw-recomp: Goldoire | 386,730 | 96.3% |
 | The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,140 | 1.5% |
 | [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here | 3,368 | 0.8% |
+| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here | 3,884 | 1.0% |
 | Obelisk Chamber (this fork): its maintainer | 7,971 | 2.0% |
 | Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 377 | 0.1% |
 
-So about **97.1% of the code is the original's, 0.1% comes from Kompas9's fork, 0.8% from Stephen Jayakar's fork and about 2.1%
-was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 47 from Stephen
-Jayakar's fork, 99 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
+So about **97.0% of the code is the original's, 0.1% comes from Kompas9's fork, 1.0% from Stephen Jayakar's fork and about 2.1%
+was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 51 from Stephen
+Jayakar's fork, 100 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 97.1%).
+their share is inside the 97.0%).
 
 The maintainer's changes in this fork were written with Claude (Anthropic's AI model), directed and tested by the maintainer.
 
@@ -372,6 +372,11 @@ are brought in here with his commits, so the history shows him as the author, an
   (`standin_copy`, `standin_rows`), uploads go through a persistent staging ring (`staging_ring_mb`), and an area's first uploads
   are spread over frames (`pool_upload_ms`, 24 ms a frame while a backlog streams in). On his PC the load-in frame after a menu
   went from 3.8 s to about 0.3 s.
+- Fewer first-use stalls from shaders: the whole shader pack is kept in memory so no shader file is read during play
+  (`[nvn] shader_pack_all`, `shader_pack_resident`), compute pipelines are built ahead on background threads
+  (`compute_async = prebuild`), draws no longer wait for a pipeline still being built (`prewarm_wait = false`), two extra threads
+  take urgent jobs (`gpl_burst_threads`), and the background build threads scale with the CPU. On his PC, with empty shader
+  caches, the worst battle frame went from 142 to 44 ms.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
