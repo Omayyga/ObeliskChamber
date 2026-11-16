@@ -586,11 +586,20 @@ void list_prev(::Ctx* c) { list_side(c, -1); }
 // Save and Continue prompts) can stay up a little longer, and after a save a last step is closed with A. That A also reached the row, which
 // asked again 0.86 s after the save (seen on a PC). So while a report window is still registered the guard stays on (kPromptWindow).
 // The game keeps one global pointer to "the" report window, [main+0x22a10c0]: a new window is stored there only when it is empty
-// (0x16da9f4 and 0x16daf54: ldr x9, [x8,#0xc0]; cbnz x9; str ..., [x8,#0xc0]) and its destructor clears it. A prompt made while the old
+// (0x16da9f4 and 0x16daf54: adrp x8, the global's page; ldr x9, [x8,#0xc0]; cbnz x9; str ..., [x8,#0xc0]) and its destructor clears it. A prompt made while the old
 // window is still there is not registered, so its Yes / No / B close the old one and nothing ever closes the new one: it stayed on screen
 // and the field camera no longer turned (seen on a PC). 0x1618dc0(window) closes a window once it has finished opening (what the
 // Continue prompt's Yes and No call); it does nothing before that.
-enum { kPromptNone, kPromptWaiting, kPromptSeen, kPromptWindow };
+// A step the game shows after the prompt's Yes (the save's "saved" step, closed with A) can be a process of its own, made after the prompt:
+// with the report window already gone the guard lifted and the A that closed that step reached the row, which asked again 0.65 s after the
+// save (seen on a PC with the window check working). So the processes over the list when the prompt is first seen are noted, and once the
+// prompt is gone the guard stays on while a process made after that is still over the list (kPromptAfter), for at most kAfterWait. The
+// Save entry's helper process is made before its prompt, so a helper left after a cancel is in the note and does not hold the list.
+enum { kPromptNone, kPromptWaiting, kPromptSeen, kPromptWindow, kPromptAfter };
+constexpr auto kAfterWait = std::chrono::seconds(4);
+uint64_t g_prompt_snap[16] = {};   // the processes over the list when the prompt was first seen
+int g_prompt_snap_n = 0;
+int g_guard_logs = 0;              // the guard's per-pick lines: the first 32 of a run
 int g_prompt = kPromptNone, g_prompt_ignored = 0;
 constexpr uint64_t kReportWindow = 0x22a10c0, kReportClose = 0x1618dc0;
 constexpr uint64_t kReportStores[] = {0x16da9f4, 0x16daf54};
@@ -669,6 +678,8 @@ bool under_prompt(::Ctx* c, uint64_t item) {
         if (n > 0) {
             g_prompt = kPromptSeen;
             g_prompt_proc = over[0];
+            g_prompt_snap_n = n;
+            std::copy(over, over + n, g_prompt_snap);
         } else if (std::chrono::steady_clock::now() - g_prompt_at > std::chrono::seconds(2)) {
             prompt_ended(c, menu);
         }
@@ -694,8 +705,30 @@ bool under_prompt(::Ctx* c, uint64_t item) {
             }
             call(c, g_base + kReportClose, {w});
         }
+    } else if (g_prompt == kPromptAfter) {
+        int left = 0;
+        for (int k = 0; k < n; ++k) left += std::find(g_prompt_snap, g_prompt_snap + g_prompt_snap_n, over[k]) == g_prompt_snap + g_prompt_snap_n;
+        const auto waited = std::chrono::steady_clock::now() - g_prompt_at;
+        if (!left || waited > kAfterWait) {
+            if (g_guard_logs < 32) {
+                ++g_guard_logs;
+                NXLOG_I(kTag, "pick list: the step(s) after the prompt %s after %lld ms", left ? "are still up, the guard lifts" : "are gone",
+                        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count()));
+            }
+            prompt_ended(c, menu);
+        }
     } else if (std::find(over, over + n, g_prompt_proc) == over + n) {
-        if (prompt_ended(c, menu) && n > 0) {
+        int fresh = 0;
+        for (int k = 0; k < n; ++k) fresh += std::find(g_prompt_snap, g_prompt_snap + g_prompt_snap_n, over[k]) == g_prompt_snap + g_prompt_snap_n;
+        if (g_guard_logs < 32) {
+            ++g_guard_logs;
+            NXLOG_I(kTag, "pick list: the prompt is gone; over the list: %d process(es), %d made after the prompt; report window %s", n, fresh,
+                    report_window() ? "up" : "none");
+        }
+        if (fresh) {
+            g_prompt = kPromptAfter;
+            g_prompt_at = std::chrono::steady_clock::now();
+        } else if (prompt_ended(c, menu) && n > 0) {
             static bool told = false;
             if (!told) {
                 told = true;
@@ -703,7 +736,7 @@ bool under_prompt(::Ctx* c, uint64_t item) {
             }
         }
     }
-    if (g_prompt == kPromptNone) g_prompt_ignored = 0, g_prompt_proc = 0;
+    if (g_prompt == kPromptNone) g_prompt_ignored = 0, g_prompt_proc = 0, g_prompt_snap_n = 0;
     return g_prompt != kPromptNone;
 }
 void list_acall(::Ctx* c) {
@@ -1120,12 +1153,18 @@ void optmenu_frame() {
     // The report window's global: checked through the two places that store it (see kPromptWindow); without it the list guard works as
     // before (no wait for the window, no refusal, no close).
     g_report_ok = fn_lookup(g_base + kReportClose) && mem::is_mapped(g_base + kReportWindow, 8);
+    // Each site starts with the adrp of the global's page (the check read the ldr there before, one instruction early, so it always failed
+    // and the list never waited for the window: the save prompt came back after a save, seen on a PC).
     for (uint64_t at : kReportStores) {
         uint32_t w[8] = {};
         bool store = false;
         if (!rd(g_base + at, &w)) g_report_ok = false;
-        for (int i = 2; i < 8; ++i) store = store || (w[i] & 0xffffffe0u) == 0xf9006100u;   // str xN, [x8,#0xc0]
-        g_report_ok = g_report_ok && w[0] == 0xf9406109u && (w[1] & 0xff00001fu) == 0xb5000009u && store;   // ldr x9, [x8,#0xc0]; cbnz x9
+        const bool adrp = (w[0] & 0x9f00001fu) == 0x90000008u;      // adrp x8, page
+        int64_t imm = static_cast<int64_t>((((w[0] >> 5) & 0x7ffffu) << 2) | ((w[0] >> 29) & 3u));
+        if (imm & (int64_t{1} << 20)) imm -= int64_t{1} << 21;
+        const bool page = adrp && static_cast<uint64_t>(static_cast<int64_t>(at & ~0xfffull) + imm * 0x1000) == (kReportWindow & ~0xfffull);
+        for (int i = 3; i < 8; ++i) store = store || (w[i] & 0xffffffe0u) == 0xf9006100u;   // str xN, [x8,#0xc0]
+        g_report_ok = g_report_ok && page && w[1] == 0xf9406109u && (w[2] & 0xff00001fu) == 0xb5000009u && store;   // ldr x9, [x8,#0xc0]; cbnz x9
     }
     if (!g_report_ok) NXLOG_W(kTag, "the game's report window is not where it was expected: the save list does not wait for it");
     g_ivt2[2 + kISlotNext] = hle_register("fefw.optmenu.list_next", list_next);
