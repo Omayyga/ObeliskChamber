@@ -680,7 +680,7 @@ bool enabled() { return g_q != nullptr && g_running; }
 
 void install() {
     // read once; the back end may be brought up again (tests): the wrappers go in again whenever volk loaded fresh entry points
-    static const int threads = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "replay_threads", 1), 1, 2));
+    static const int threads = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "replay_threads", 2), 1, 2));
     g_threads = threads;
     if (g_threads < 2 || g_running) return;
     if (!vkCmdDraw || !vkUpdateDescriptorSets || !vkEndCommandBuffer) {
