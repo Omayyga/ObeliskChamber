@@ -590,7 +590,16 @@ void list_prev(::Ctx* c) { list_side(c, -1); }
 // window is still there is not registered, so its Yes / No / B close the old one and nothing ever closes the new one: it stayed on screen
 // and the field camera no longer turned (seen on a PC). 0x1618dc0(window) closes a window once it has finished opening (what the
 // Continue prompt's Yes and No call); it does nothing before that.
-enum { kPromptNone, kPromptWaiting, kPromptSeen, kPromptWindow };
+// A step the game shows after the prompt's Yes (the save's "saved" step, closed with A) can be a process of its own, made after the prompt:
+// with the report window already gone the guard lifted and the A that closed that step reached the row, which asked again 0.65 s after the
+// save (seen on a PC with the window check working). So the processes over the list when the prompt is first seen are noted, and once the
+// prompt is gone the guard stays on while a process made after that is still over the list (kPromptAfter), for at most kAfterWait. The
+// Save entry's helper process is made before its prompt, so a helper left after a cancel is in the note and does not hold the list.
+enum { kPromptNone, kPromptWaiting, kPromptSeen, kPromptWindow, kPromptAfter };
+constexpr auto kAfterWait = std::chrono::seconds(4);
+uint64_t g_prompt_snap[16] = {};   // the processes over the list when the prompt was first seen
+int g_prompt_snap_n = 0;
+int g_guard_logs = 0;              // the guard's per-pick lines: the first 32 of a run
 int g_prompt = kPromptNone, g_prompt_ignored = 0;
 constexpr uint64_t kReportWindow = 0x22a10c0, kReportClose = 0x1618dc0;
 constexpr uint64_t kReportStores[] = {0x16da9f4, 0x16daf54};
@@ -669,6 +678,8 @@ bool under_prompt(::Ctx* c, uint64_t item) {
         if (n > 0) {
             g_prompt = kPromptSeen;
             g_prompt_proc = over[0];
+            g_prompt_snap_n = n;
+            std::copy(over, over + n, g_prompt_snap);
         } else if (std::chrono::steady_clock::now() - g_prompt_at > std::chrono::seconds(2)) {
             prompt_ended(c, menu);
         }
@@ -694,8 +705,30 @@ bool under_prompt(::Ctx* c, uint64_t item) {
             }
             call(c, g_base + kReportClose, {w});
         }
+    } else if (g_prompt == kPromptAfter) {
+        int left = 0;
+        for (int k = 0; k < n; ++k) left += std::find(g_prompt_snap, g_prompt_snap + g_prompt_snap_n, over[k]) == g_prompt_snap + g_prompt_snap_n;
+        const auto waited = std::chrono::steady_clock::now() - g_prompt_at;
+        if (!left || waited > kAfterWait) {
+            if (g_guard_logs < 32) {
+                ++g_guard_logs;
+                NXLOG_I(kTag, "pick list: the step(s) after the prompt %s after %lld ms", left ? "are still up, the guard lifts" : "are gone",
+                        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(waited).count()));
+            }
+            prompt_ended(c, menu);
+        }
     } else if (std::find(over, over + n, g_prompt_proc) == over + n) {
-        if (prompt_ended(c, menu) && n > 0) {
+        int fresh = 0;
+        for (int k = 0; k < n; ++k) fresh += std::find(g_prompt_snap, g_prompt_snap + g_prompt_snap_n, over[k]) == g_prompt_snap + g_prompt_snap_n;
+        if (g_guard_logs < 32) {
+            ++g_guard_logs;
+            NXLOG_I(kTag, "pick list: the prompt is gone; over the list: %d process(es), %d made after the prompt; report window %s", n, fresh,
+                    report_window() ? "up" : "none");
+        }
+        if (fresh) {
+            g_prompt = kPromptAfter;
+            g_prompt_at = std::chrono::steady_clock::now();
+        } else if (prompt_ended(c, menu) && n > 0) {
             static bool told = false;
             if (!told) {
                 told = true;
@@ -703,7 +736,7 @@ bool under_prompt(::Ctx* c, uint64_t item) {
             }
         }
     }
-    if (g_prompt == kPromptNone) g_prompt_ignored = 0, g_prompt_proc = 0;
+    if (g_prompt == kPromptNone) g_prompt_ignored = 0, g_prompt_proc = 0, g_prompt_snap_n = 0;
     return g_prompt != kPromptNone;
 }
 void list_acall(::Ctx* c) {
