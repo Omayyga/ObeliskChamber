@@ -886,7 +886,8 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     if (gpu_kind && (bc7 || bc1) && !cache_dir().empty() && (entry_format == VK_FORMAT_UNDEFINED || entry_format == out.format)) {
         gpu_key = cache_key_of(t.storage_size, src_mem, L, geo, fmt, (bc1 ? 0x300 : 0x200) + kGpuEncoderVersion);
         gpu_file = bc7_cache_path(t, gpu_key);
-        if (!caps.skip_entries && cache_peek_format(gpu_file, gpu_key) == out.format && cache_read(gpu_file, gpu_key, out)) {
+        // (standin_now: no file is opened on the render thread; the GPU transcodes, or the background job reads the entry behind a stand-in)
+        if (!caps.skip_entries && !standin_now && cache_peek_format(gpu_file, gpu_key) == out.format && cache_read(gpu_file, gpu_key, out)) {
             out.from_cache = true;
             NXLOG_I(kTag, "texture %u: %s data (GPU encoded) from cache %s", t.id, bc1 ? "BC1" : "BC7", gpu_file.c_str());
             if (upgrade_possible) schedule_upgrade(t, src_mem, upgrade_key, upgrade_quality, cache_dir());
@@ -916,6 +917,7 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     if (!(bc7 || bc1) || (entry_format != VK_FORMAT_UNDEFINED && entry_format != out.format)) cache_file.clear();
     if (edit_make) cache_file.clear();   // edited data stays out of the shared cache
     // needed this frame and no entry: the quickest preset now (not cached, no upgrade); the background job makes the entry and the real data
+    // (standin_now: a stand-in at any preset, as the background job makes the real data; standin_now only applies to BC7 images)
     const bool provisional = caps.provisional && ((bc7 && (quality > 0 || standin_now)) || bc1) && !edit_make;
     if (provisional) {
         cache_file.clear();
@@ -988,7 +990,7 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
         for (size_t i = 0; i < geo.size(); ++i) {
             PreparedLevel& pl = out.level[i];
             pl.offset = off;
-            if (i < solid_src) {
+            if (i < solid_end) {
                 const LevelGeom& g = geo[i];
                 const uint32_t bh = (g.h + 3) / 4;
                 uint32_t prev = ~0u, n = 0;
@@ -1054,14 +1056,14 @@ bool prepare_texture(const Texture& t, const TexCaps& caps, PreparedTexture& out
     std::vector<uint8_t> solid_rgba, solid_enc;
     std::vector<uint32_t> solid_xs;
     uint32_t solid_layer = ~0u;
+    // [nvn] standin_copy (default on): the solid blocks of the source level are encoded once per layer and copied into the big levels, a row of
+    // blocks that maps to the same source row as the one before is copied whole (a 4096x4096 stand-in wrote a million blocks one by one, with
+    // two 64-bit divisions each). Byte for byte the old result. false: each block computed as before (A/B). BC7 (16-byte) or BC1 (8-byte) blocks.
+    const bool solid_copy = solid_src < geo.size() && config_get_bool("nvn", "standin_copy", true);
+    const size_t sbb = bc1 ? 8 : 16;   // bytes of a stand-in's solid block (the compact layout is BC7 only)
     std::vector<uint8_t> bc1_rgba;
     const bool bc1_alpha_checked = !bc1;   // a BC1 texture's decoded alpha is checked (cheap next to the encode)
     bool bc1_alpha_seen = false;
-    // [nvn] standin_copy (default on): the solid blocks of the source level are encoded once per layer and copied into the big levels, a row of
-    // blocks that maps to the same source row as the one before is copied whole (a 4096x4096 stand-in wrote a million blocks one by one, with
-    // two 64-bit divisions each). Byte for byte the old result. false: each block computed as before (A/B).
-    const bool solid_copy = solid_src < geo.size() && config_get_bool("nvn", "standin_copy", true);
-    const size_t sbb = bc1 ? 8 : 16;   // bytes of a stand-in's solid block
     for (size_t i = 0; i < geo.size(); ++i) {
         const LevelGeom& g = geo[i];
         const PreparedLevel& pl = out.level[i];
