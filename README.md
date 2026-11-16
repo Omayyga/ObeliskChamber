@@ -30,15 +30,15 @@ over the full history (third-party folders and lock files left out, 401,708 line
 | The original fefw-recomp: Goldoire | 386,730 | 96.3% |
 | The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,140 | 1.5% |
 | [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here | 1,107 | 0.3% |
+| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here | 1,658 | 0.4% |
 | Obelisk Chamber (this fork): its maintainer | 7,971 | 2.0% |
 | Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 377 | 0.1% |
 
-So about **97.6% of the code is the original's, 0.1% comes from Kompas9's fork, 0.3% from Stephen Jayakar's fork and about 2.1%
-was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 6 from Stephen
-Jayakar's fork, 85 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
+So about **97.5% of the code is the original's, 0.1% comes from Kompas9's fork, 0.4% from Stephen Jayakar's fork and about 2.1%
+was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 11 from Stephen
+Jayakar's fork, 91 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 97.6%).
+their share is inside the 97.5%).
 
 The maintainer's changes in this fork were written with Claude (Anthropic's AI model), directed and tested by the maintainer.
 
@@ -359,6 +359,11 @@ are brought in here with his commits, so the history shows him as the author, an
 - The render thread's Vulkan calls made by a second thread (`[nvn] replay_threads = 2`, off by default), handed over in batches,
   and a small cache of pipeline layouts (`[nvn] layout_cache`). On his PC the busiest street's render-thread work went from 16.8 to
   about 14 ms a frame.
+- Fewer GPU barriers, each behind its own setting and off by default: dispatches that share nothing run side by side
+  (`[nvn] dispatch_barriers`), the game's own barriers kept only where they guard something (`[nvn] game_barriers`), runs of
+  uniform-buffer updates with two barriers instead of two each (`[nvn] batch_ubo_updates`), feedback copies of only the sampled
+  levels (`[nvn] feedback_levels`) and a read-only depth pass kept open (`[nvn] depth_ro_sticky`), with `[prof] gpu_stats` to
+  measure them. On his PC at 4K the GPU time per frame went from 15.1 to 10.9 ms with all five on.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
