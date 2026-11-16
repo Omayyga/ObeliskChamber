@@ -1180,11 +1180,11 @@ Texture* feedback_clone(Texture* t) {
     return tex_gpu_scaled(c.get(), tex_scale(t)) ? c.get() : nullptr;
 }
 
-// [nvn] feedback_levels (default false): the copy holds only the levels the draw's views sample (all bindings of the texture together)
+// [nvn] feedback_levels (default true in this fork): the copy holds only the levels the draw's views sample (all bindings of the texture together)
 // instead of every level. A draw that renders a small mip while it samples the next larger one (a bloom or blur chain over one mipmapped
 // texture) then copies that one small level, not the whole chain from the full-size level 0 down.
 bool fb_levels_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "feedback_levels", false);
+    static const bool on = nxrt::config_get_bool("nvn", "feedback_levels", true);
     return on;
 }
 
@@ -2923,7 +2923,7 @@ const ProgLayout* layout_cached(const ShaderInfo* const stages[6]) {
     return pl;
 }
 
-// [nvn] depth_ro_sticky (default false): a draw that does not sample the depth target and writes neither depth nor stencil stays in an
+// [nvn] depth_ro_sticky (default true in this fork): a draw that does not sample the depth target and writes neither depth nor stencil stays in an
 // open pass whose depth attachment is read-only, instead of ending it for a writable one. The transparent and particle draws of a frame
 // (depth test on, depth writes off) where only some of them sample the depth (soft particles) then stay in one pass, without a layout
 // change of the full-size depth buffer back and forth at each switch.
@@ -2932,7 +2932,7 @@ void cs_draw_index_range(uint64_t addr, uint64_t size);
 
 bool depth_ro_for_draw() {
     if (g_want_depth_ro) return true;
-    static const bool sticky = nxrt::config_get_bool("nvn", "depth_ro_sticky", false);
+    static const bool sticky = nxrt::config_get_bool("nvn", "depth_ro_sticky", true);
     if (!sticky || !P.open || !P.depth_ro || !targets_match()) return false;
     const bool writes_depth = S.ds.depth_test && S.ds.depth_write;
     const bool writes_stencil = P.has_stencil && S.ds.stencil_test && (S.stencil_wmask[0] != 0 || S.stencil_wmask[1] != 0);
@@ -4109,7 +4109,7 @@ uint64_t g_cs_n = 0, g_cs_skipped = 0, g_cs_conflicts = 0, g_cs_untracked = 0;
 // draw that depends on an open dispatch, the pass ends and the barrier is recorded.
 int cs_mode() {
     static const int m = [] {
-        const std::string v = nxrt::config_get_str("nvn", "dispatch_barriers", "full");
+        const std::string v = nxrt::config_get_str("nvn", "dispatch_barriers", "tracked");
         return v == "tracked_draws" ? 2 : v == "tracked" ? 1 : 0;
     }();
     return m;
@@ -4314,7 +4314,7 @@ void cs_after_dispatch() {
 
 // Ops that record no GPU work (state and bindings) or that check the open dispatches themselves keep them open.
 bool game_barriers_tracked() {
-    static const bool tracked = nxrt::config_get_str("nvn", "game_barriers", "full") == "tracked";
+    static const bool tracked = nxrt::config_get_str("nvn", "game_barriers", "tracked") == "tracked";
     return tracked;
 }
 
@@ -4490,7 +4490,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     if (!(ovl_plain && covl::hold(*cs, *pl, ovl_joined))) {
         covl::g.pending = false;
         covl::g.wrote.clear();
-        cs_after_dispatch();      // [nvn] dispatch_barriers: the barrier now (full, the default: as before) or left open (tracked)
+        cs_after_dispatch();      // [nvn] dispatch_barriers: the barrier now (full: as before) or left open (tracked, the default in this fork)
     }
     if (alt_tex) calt::ran(alt_tex);
     if (g_trace) trace_snap_after_dispatch(*cs, *pl);
@@ -4812,7 +4812,7 @@ void do_downsample(const P_Downsample& p) {
     gstamp("downsample");
 }
 
-// [nvn] batch_ubo_updates (default false): the game updates uniform buffers in runs (~15 nvnCommandBufferUpdateUniformBuffer back to
+// [nvn] batch_ubo_updates (default true in this fork): the game updates uniform buffers in runs (~15 nvnCommandBufferUpdateUniformBuffer back to
 // back, four runs a frame), and each update had a full barrier before and after it. With this on, an update directly after another one
 // (nothing recorded in between, ranges apart) needs no barrier before it, and the barrier after it waits for the next command that is not
 // an update (wm_close from the interpreter): a run costs two barriers instead of two per update.
@@ -4822,7 +4822,7 @@ uint64_t g_wm_mark = 0;                                    // memory_barrier_cou
 std::vector<std::pair<uint64_t, uint64_t>> g_wm_ranges;     // the open updates' [addr, end)
 
 bool wm_batch_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "batch_ubo_updates", false);
+    static const bool on = nxrt::config_get_bool("nvn", "batch_ubo_updates", true);
     return on;
 }
 
@@ -5383,7 +5383,7 @@ void run_list(const CmdList& list, int depth) {
             }
             case Op::Barrier: {
                 counters().game_barriers.fetch_add(1, std::memory_order_relaxed);
-                // [nvn] game_barriers = tracked (default full): with tracked pass barriers, everything recorded since the last full barrier
+                // [nvn] game_barriers = tracked (the default in this fork): with tracked pass barriers, everything recorded since the last full barrier
                 // that has no barrier of its own is attachment writes of passes (a pass whose draws wrote other memory ended with a full
                 // barrier, copies and fills carry one, open dispatches are excluded here). Every later use of those attachments gets its
                 // own dependency (a layout change, or pending_conflict for the next pass on the same image), so the game's barrier adds
