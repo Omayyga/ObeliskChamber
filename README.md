@@ -29,16 +29,16 @@ over the full history (third-party folders and lock files left out, 401,708 line
 |---|---|---|
 | The original fefw-recomp: Goldoire | 386,730 | 96.3% |
 | The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,140 | 1.5% |
-| [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here | 3,884 | 1.0% |
+| [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 418 | 0.1% |
+| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here (4,457 of them two lists of hot function addresses) | 9,582 | 2.3% |
 | Obelisk Chamber (this fork): its maintainer | 7,971 | 2.0% |
 | Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 377 | 0.1% |
 
-So about **97.0% of the code is the original's, 0.1% comes from Kompas9's fork, 1.0% from Stephen Jayakar's fork and about 2.1%
-was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 51 from Stephen
-Jayakar's fork, 100 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
+So about **95.6% of the code is the original's, 0.1% comes from Kompas9's fork, 2.3% from Stephen Jayakar's fork and about 2.0%
+was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 62 from Stephen
+Jayakar's fork, 102 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 97.0%).
+their share is inside the 95.6%).
 
 The maintainer's changes in this fork were written with Claude (Anthropic's AI model), directed and tested by the maintainer.
 
@@ -334,8 +334,8 @@ This project stands on the work of others. Thank you.
 
 After the original's last release, Paulius kept improving it in a fork of their own. These changes were brought in here with their
 commits, so the history shows them as the author:
-- Faster game code: the condition flags are a local of each translated function instead of four fields written to memory (the
-  game's code is about 18% smaller; it takes effect at the next Set up).
+- Faster game code: the condition flags as a local of each translated function instead of four fields written to memory. Later
+  replaced by Stephen Jayakar's version of the same idea (below), which goes further; this change was reverted for it.
 - The game's alpha test (the hardware stage that hides see-through pixels, used by a dissolve effect) applied as a shader variant
   (`[nvn] alpha_test`).
 - A shader fix for integer textures (four shaders that were read as float images, issue #89 of the original).
@@ -377,6 +377,13 @@ are brought in here with his commits, so the history shows him as the author, an
   (`compute_async = prebuild`), draws no longer wait for a pipeline still being built (`prewarm_wait = false`), two extra threads
   take urgent jobs (`gpl_burst_threads`), and the background build threads scale with the CPU. On his PC, with empty shader
   caches, the worst battle frame went from 142 to 44 ms.
+- Faster translated game code (takes effect at the next Set up): the condition flags kept in a local of each function and
+  tested from the compared values, native versions of the game's memcpy / memset / strlen and similar routines, the hottest
+  functions packed together and small hot functions copied into their callers, the game's zstd decoder run natively (zstd 1.5.7,
+  BSD licence), the translated code told that the guest context does not escape (so the compiler keeps its values in
+  registers), whole-register vector writes, and temporary guest registers in locals. On his PC the game's main thread used
+  about 25% less CPU time and arrival frames after fast travel dropped from 485 to about 320 ms. His profile-guided build
+  options (`fefw_build.py --pgo-gen` / `--pgo-use`) are there for developers; releases do not use them.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
