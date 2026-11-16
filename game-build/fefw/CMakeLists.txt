@@ -85,12 +85,15 @@ foreach(m main sdk subsdk0 subsdk1 subsdk2 rtld)
     list(APPEND FEFW_LIBS fefw_${m})
 endforeach()
 
-add_executable(fefw src/fefw_main.cpp res/fefw.rc)
+# src/fefw_hle.cpp: native routines the lifted code calls (recomp/games/fefw/config.py inline_replace, e.g. nx_hle_zstd_multiframe).
+# The release package compiles it at its own link step (game-build/release/fefw_build.py); this build needs it here too, with the
+# runtime's zstd (nxrt_zstd) for its decoder.
+add_executable(fefw src/fefw_main.cpp src/fefw_hle.cpp res/fefw.rc)
 # The target and this folder keep the name fefw (build scripts and build folders point at them); the program is ObeliskChamber.exe.
 set_target_properties(fefw PROPERTIES OUTPUT_NAME "ObeliskChamber")
 set_source_files_properties(res/fefw.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.manifest;${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.ico")
 target_include_directories(fefw PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_ObeliskChamber nxrt_gfx nxrt)
+target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_ObeliskChamber nxrt_gfx nxrt nxrt_zstd)
 # As pkp.exe: a linker map next to the exe (host frames get names), a big main stack (lifted code nests deeply), low host allocations so
 # the guest ranges at 0x71_0000_0000 and up stay free. res/fefw.rc carries the manifest (UTF-8 code page).
 target_link_options(fefw PRIVATE /MAP /STACK:134217728 /HIGHENTROPYVA:NO /DEBUG /MANIFEST:NO)

@@ -28,6 +28,20 @@
 #include <string.h>
 #include <math.h>
 
+/* NX_NOESC marks the context parameter of every function the lifted code calls (the lifted functions themselves, call_indirect, host_import,
+ * the SVC and site entries): the callee uses the context only for the duration of the call and keeps no pointer to it, and guest memory never
+ * lies inside a Ctx. With it the host compiler (clang: `noescape` = LLVM `captures(none)`) knows that no guest load or store can touch the
+ * context, so a register value read from or written to `c->x[n]` before a guest memory access is still valid after it (otherwise every guest
+ * store forces the context registers in use to be reloaded). Only the lifted code defines NX_NOESCAPE_CTX (fefw_build.py, NxRecomp.cmake); the
+ * runtime's definitions of the same functions are built without it (the attribute is part of the function type in clang, and the lifted code
+ * and the runtime are separate units, so the two never meet). Needs `-mllvm -capture-tracking-max-uses-to-explore=<large>` to pay off in big
+ * functions: LLVM gives up proving a pointer uncaptured after 100 uses, and the context has thousands. */
+#if defined(NX_NOESCAPE_CTX) && defined(__clang__)
+#define NX_NOESC __attribute__((noescape))
+#else
+#define NX_NOESC
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -64,7 +78,7 @@ typedef struct Ctx {
 
 /* Indirect call or tail call to a guest address (BLR, BR out of a function, an unresolved jump table).
  * Looks the address up in the function tables of every loaded module. */
-void call_indirect(Ctx *c, uint64_t addr);
+void call_indirect(Ctx *NX_NOESC c, uint64_t addr);
 /* A call to a symbol another module provides (a PLT stub whose target is undefined in this module). `import_id` is globally
  * unique: NX_IMPORT_ID(module index, symbol index). The module index is NxModule.index of the calling module (the order of
  * the game config's module list, or --index of `nxrecomp lift`); the symbol index is the position in that module's
@@ -73,24 +87,24 @@ void call_indirect(Ctx *c, uint64_t addr);
 #define NX_IMPORT_ID(module_index, sym) (((uint32_t)(module_index) << 20) | (uint32_t)(sym))
 #define NX_IMPORT_MODULE(id) ((uint32_t)(id) >> 20)
 #define NX_IMPORT_SYM(id) ((uint32_t)(id) & 0xfffffu)
-void host_import(Ctx *c, uint32_t import_id);
+void host_import(Ctx *NX_NOESC c, uint32_t import_id);
 /* Raised by the generated code for: an undefined / reserved instruction word, BRK, falling off the end of a function. */
 void guest_trap(const char *what, uint64_t addr);
 /* An instruction the lifter could not translate (a gap in coverage, listed by `cover`). */
 void guest_unimpl(uint64_t pc, uint32_t insn, const char *what);
-void guest_svc(Ctx *c, uint32_t number);
+void guest_svc(Ctx *NX_NOESC c, uint32_t number);
 /* System registers the lifter does not model inline (anything but TPIDR_EL0, TPIDRRO_EL0, FPCR, FPSR, NZCV, DCZID, CTR,
  * CNTVCT/CNTFRQ). `sysreg` is bits 20:5 of the MRS/MSR word (o0:op1:CRn:CRm:op2). */
-uint64_t guest_mrs(Ctx *c, uint32_t sysreg);
-void guest_msr(Ctx *c, uint32_t sysreg, uint64_t value);
+uint64_t guest_mrs(Ctx *NX_NOESC c, uint32_t sysreg);
+void guest_msr(Ctx *NX_NOESC c, uint32_t sysreg, uint64_t value);
 /* Sites compiled in by the lifter from a site list (nxrecomp/program.py load_sites): a callout before an instruction, a
  * function hook at a function's start, a hook at a mid-function address. A hook returns nonzero when it has done the
  * function's work (the lifted function then returns at once). */
-void nx_site_inline(Ctx *c, uint64_t addr);
-int nx_site_midhook(Ctx *c, uint64_t addr);
-int nx_hook_entry(Ctx *c, uint64_t addr);
+void nx_site_inline(Ctx *NX_NOESC c, uint64_t addr);
+int nx_site_midhook(Ctx *NX_NOESC c, uint64_t addr);
+int nx_hook_entry(Ctx *NX_NOESC c, uint64_t addr);
 /* Diagnostics of a failed STXR (bits < 0: the monitor was not open on that address). May be a no-op. */
-void stx_diag(Ctx *c, uint64_t a, uint64_t expected, uint64_t seen, uint64_t v, int bits);
+void stx_diag(Ctx *NX_NOESC c, uint64_t a, uint64_t expected, uint64_t seen, uint64_t v, int bits);
 
 /* One lifted function of a module and its guest address. */
 typedef struct { uint64_t addr; void (*fn)(Ctx *); } FnEntry;
@@ -104,7 +118,7 @@ typedef struct { uint64_t pad; void (*fn)(Ctx *, uint64_t); } NxResume;
 /* C++ exception support. A lifted function that contains a catch clause whose handler can return is entered as
  * nx_catch_call(c, u_<entry>): the runtime runs body(c, 0) under a host frame it can unwind back to, and on an exception
  * that this function catches, calls body(c, landing pad) there instead. (ssbu-recomp's nro_catch_call.) */
-void nx_catch_call(Ctx *c, void (*body)(Ctx *, uint64_t));
+void nx_catch_call(Ctx *NX_NOESC c, void (*body)(Ctx *, uint64_t));
 
 /* Unwind tables (from .eh_frame and the C++ LSDAs, see nxrecomp/eh.py and ehtables.py). All arrays are sorted by address.
  * Row: from `pc` (inclusive) to the next row of the same FDE, the CFA is x[cfa_reg] + cfa_off (cfa_reg 29 = FP, 31 = SP)
@@ -195,49 +209,6 @@ static inline void vzero(V128 *v) { v->d[0] = 0; v->d[1] = 0; }
 /* flags and integer helpers                                                                                  */
 /* ======================================================================================================== */
 
-/* The condition flags live in four words of the Ctx, or, in generated code that keeps them in a local of the function
- * (nxrecomp/program.py), in an NxFlags: the helpers take either (C++: any type with N, Z, C and V). */
-typedef struct NxFlags { uint32_t N, Z, C, V; } NxFlags;
-#ifdef __cplusplus
-}  /* extern "C": templates cannot have C linkage */
-template <class H> static inline uint64_t adds64(H *c, uint64_t a, uint64_t b, uint32_t cin) {
-    uint64_t r = a + b + cin;
-    c->N = (uint32_t)(r >> 63);
-    c->Z = r == 0;
-    c->C = (r < a) || (cin && r == a);
-    c->V = (uint32_t)(((a ^ r) & (b ^ r)) >> 63);
-    return r;
-}
-template <class H> static inline uint32_t adds32(H *c, uint32_t a, uint32_t b, uint32_t cin) {
-    uint64_t wide = (uint64_t)a + b + cin;
-    uint32_t r = (uint32_t)wide;
-    c->N = r >> 31;
-    c->Z = r == 0;
-    c->C = (uint32_t)(wide >> 32);
-    c->V = ((a ^ r) & (b ^ r)) >> 31;
-    return r;
-}
-template <class H> static inline uint64_t logic64(H *c, uint64_t r) { c->N = (uint32_t)(r >> 63); c->Z = r == 0; c->C = 0; c->V = 0; return r; }
-template <class H> static inline uint32_t logic32(H *c, uint32_t r) { c->N = r >> 31; c->Z = r == 0; c->C = 0; c->V = 0; return r; }
-template <class H> static inline void set_nzcv(H *c, int f) { c->N = (f >> 3) & 1; c->Z = (f >> 2) & 1; c->C = (f >> 1) & 1; c->V = f & 1; }
-template <class H> static inline uint64_t get_nzcv(const H *c) { return ((uint64_t)c->N << 31) | ((uint64_t)c->Z << 30) | ((uint64_t)c->C << 29) | ((uint64_t)c->V << 28); }
-
-template <class H> static inline int cond(const H *c, int cc) {
-    int r;
-    switch (cc >> 1) {
-    case 0: r = c->Z; break;
-    case 1: r = c->C; break;
-    case 2: r = c->N; break;
-    case 3: r = c->V; break;
-    case 4: r = c->C && !c->Z; break;
-    case 5: r = c->N == c->V; break;
-    case 6: r = c->N == c->V && !c->Z; break;
-    default: return 1;
-    }
-    return (cc & 1) ? !r : r;
-}
-extern "C" {
-#else
 static inline uint64_t adds64(Ctx *c, uint64_t a, uint64_t b, uint32_t cin) {
     uint64_t r = a + b + cin;
     c->N = (uint32_t)(r >> 63);
@@ -274,25 +245,13 @@ static inline int cond(const Ctx *c, int cc) {
     }
     return (cc & 1) ? !r : r;
 }
-#endif
 
-#ifdef __cplusplus
-}  /* extern "C" */
-template <class H> static inline void fcmp(H *c, double a, double b) {
-    if (a != a || b != b) set_nzcv(c, 3);
-    else if (a == b) set_nzcv(c, 6);
-    else if (a < b) set_nzcv(c, 8);
-    else set_nzcv(c, 2);
-}
-extern "C" {
-#else
 static inline void fcmp(Ctx *c, double a, double b) {
     if (a != a || b != b) set_nzcv(c, 3);
     else if (a == b) set_nzcv(c, 6);
     else if (a < b) set_nzcv(c, 8);
     else set_nzcv(c, 2);
 }
-#endif
 
 static inline uint32_t ror32(uint32_t v, unsigned n) { n &= 31; return n ? (v >> n) | (v << (32 - n)) : v; }
 static inline uint64_t ror64(uint64_t v, unsigned n) { n &= 63; return n ? (v >> n) | (v << (64 - n)) : v; }
@@ -305,8 +264,15 @@ static inline uint32_t clz32(uint32_t v) { return v ? (uint32_t)__builtin_clz(v)
 static inline uint64_t clz64(uint64_t v) { return v ? (uint64_t)__builtin_clzll(v) : 64; }
 static inline uint32_t cls32(uint32_t v) { return clz32(((v >> 1) ^ v) & 0x7fffffffu) - 1; }
 static inline uint64_t cls64(uint64_t v) { return clz64(((v >> 1) ^ v) & 0x7fffffffffffffffull) - 1; }
+/* RBIT: clang's bit-reverse builtin (the same bits; the compiler also folds clz(rbit(x)), the guest's count-trailing-zeros idiom in
+ * strlen / memchr / memcmp, into one tzcnt); other compilers keep the loop. */
+#if defined(__clang__)
+static inline uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
+static inline uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
+#else
 static inline uint32_t rbit32(uint32_t v) { uint32_t r = 0; for (int i = 0; i < 32; i++) r |= ((v >> i) & 1u) << (31 - i); return r; }
 static inline uint64_t rbit64(uint64_t v) { uint64_t r = 0; for (int i = 0; i < 64; i++) r |= ((v >> i) & 1ull) << (63 - i); return r; }
+#endif
 static inline uint64_t umulh(uint64_t a, uint64_t b) { return (uint64_t)(((unsigned __int128)a * b) >> 64); }
 static inline uint64_t smulh(uint64_t a, uint64_t b) { return (uint64_t)(((__int128)(int64_t)a * (int64_t)b) >> 64); }
 static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
