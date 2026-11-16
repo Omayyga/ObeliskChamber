@@ -36,7 +36,7 @@ over the full history (third-party folders and lock files left out, 401,708 line
 
 So about **97.5% of the code is the original's, 0.1% comes from Kompas9's fork, 0.4% from Stephen Jayakar's fork and about 2.1%
 was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 11 from Stephen
-Jayakar's fork, 86 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
+Jayakar's fork, 91 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
 their share is inside the 97.5%).
 
