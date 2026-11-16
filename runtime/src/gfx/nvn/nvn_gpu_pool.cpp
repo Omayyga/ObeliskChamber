@@ -153,6 +153,21 @@ bool committed_slab(uint64_t start) {
     return true;
 }
 
+// [nvn] pool_slabs: small pools share a 16 MiB slab import (on), or each is imported on its own as in 0.1.7 (off). auto: off on Intel GPUs,
+// where 0.2.x lost the device in the first vkQueueSubmit2 after the title screen's textures arrived (Arc B580, driver 101.9175, ObeliskChamber issue #81)
+// while 0.1.7, which had no slabs, ran on the same driver; on elsewhere. Read once, at the first import.
+bool slabs_on() {
+    static const bool on = [] {
+        const std::string v = config_get_str("nvn", "pool_slabs", "auto");
+        const bool intel = gfx::gpu_quirks().intel;
+        const bool r = v == "auto" ? !intel : config_get_bool("nvn", "pool_slabs", true);
+        NXLOG_I(kTag, "pool imports: shared 16 MiB slabs %s ([nvn] pool_slabs = %s%s)", r ? "on" : "off", v.c_str(),
+                v == "auto" ? (intel ? ", Intel GPU" : ", not Intel") : "");
+        return r;
+    }();
+    return on;
+}
+
 // Imports pool bytes [off, off + size) of g into c. False (c.failed) when it cannot.
 bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const char* what, size_t index, size_t count, bool batch = true) {
     c.tried = true;
@@ -167,7 +182,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     // Small pools share one import rather than consuming an allocation each. The weak
     // cache releases the slab after its last pool's deferred GPU retirement.
     const uint64_t slab = start & ~(kSlab - 1);
-    if (batch && g->viewed && start + size <= slab + kSlab &&
+    if (batch && g->viewed && slabs_on() && start + size <= slab + kSlab &&
         slab >= mem::kHeapBase && slab + kSlab <= mem::kHeapBase + mem::heap_reserved()) {
         std::lock_guard<std::mutex> lock(g_slabs_mu);
         auto& entry = g_slabs[slab];
