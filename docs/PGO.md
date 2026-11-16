@@ -130,3 +130,30 @@ pwsh -File game-build\scripts\build_fefw.ps1
   keeps it. Profile again after large runtime changes.
 - An exe built with `/clang:-march=native` runs only on CPUs with the same instruction sets.
 - Back to the generic runtime: `set NX_RT_FLAGS=` and run `build_fefw.ps1`.
+
+## A release runtime (fefw_rt.dll with a profile, and ThinLTO)
+
+A release ships the runtime as `fefw_rt.dll`, built on this machine; players link `ObeliskChamber.exe` against it on their own PC. The DLL can be
+built with the runtime's profile and ThinLTO, so every player gets a profile-guided render thread without building anything differently. The
+lifted game code on the players' side is unchanged (Set up compiles it with the bundled Zig, without a profile).
+
+1. Record the runtime's profile with the developer build, as in "The runtime" above, but **without** `/clang:-march=native` in either step.
+   Play broadly: several chapters, battles, menus, cutscenes, a save and a load. Merge the runs into one `rt.profdata`. A profile from the
+   developer build fits the DLL: it is the same runtime source with the same flags (only `fefw_main.cpp` differs, by `FEFW_RT_DLL`).
+2. Build the DLL with it, in its own build folder:
+   ```
+   set NX_RT_FLAGS=-fprofile-instr-use=C:\pgo\rt.profdata -flto=thin
+   pwsh -File game-build\scripts\build_fefw.ps1 -Target fefw_rt -BuildDir build\rtdll -CMakeArgs "-DFEFW_RT_DLL=ON -DNXRT_DAV1D_ASM=ON"
+   ```
+   Leave out `-flto=thin` for a profile alone. With it, the configure says `fefw_rt: ThinLTO link`, and the link takes longer (a cache in
+   `build\rtdll\lto-cache` makes the next one quick). `NX_LTO_JOBS` limits its parallel jobs, as for the exe.
+3. Pack it as usual: `pwsh game-build\scripts\make-release.ps1 -Version <x.y.z>`.
+4. Before publishing, compare it with the previous release on the same route (the release's own Set up, the same settings): average fps,
+   1% lows and frames over 20 ms.
+
+- The configure stops if `NX_RT_FLAGS` names an instruction set (`-march=`, `-mcpu=`, `/arch:`, `-mavx`, `-mfma`): the release also runs on
+  CPUs without AVX or FMA3 (Set up's compat build), and a DLL built for this machine would crash there.
+- `-fprofile-instr-generate` in `NX_RT_FLAGS` builds an instrumented DLL (the configure warns). It is only for recording a profile from a
+  release-style game folder, never for a release.
+- Afterwards set `NX_RT_FLAGS=` again before other builds: the variable applies to every `build_fefw.ps1` run.
+- A runtime change since the profile only costs the changed functions their profile data. Record again when much of the render code changed.
