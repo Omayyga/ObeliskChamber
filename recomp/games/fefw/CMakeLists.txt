@@ -31,7 +31,7 @@ set(FEFW_SHARDS_SUBSDK2 3 CACHE STRING "translation units of subsdk2, movie (136
 set(FEFW_SITES "${CMAKE_CURRENT_LIST_DIR}/main.sites" CACHE FILEPATH "hook sites of main for this build")
 # the launcher's Set up passes main.sites plus the installed mods' exefs/*.sites (launcher/src-tauri/src/setup.rs lift_sites_file)
 if(NOT "$ENV{FEFW_SITES}" STREQUAL "")
-  set(FEFW_SITES "$ENV{FEFW_SITES}" CACHE FILEPATH "hook sites of main for this build" FORCE)
+  set(FEFW_SITES "$ENV{FEFW_SITES}")  # this run only: a later build without it lifts with main.sites again
 endif()
 # a copy beside the libraries: the game build puts it next to ObeliskChamber.exe as ObeliskChamber.sites, the list the runtime checks
 # hooks and mods' sites against (runtime/src/services/mods_dll.cpp)
