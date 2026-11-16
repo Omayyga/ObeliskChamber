@@ -23,22 +23,23 @@ contributors. Goldoire wrote, when publishing the last version (0.2.0), that the
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
 How much comes from where, measured on 2026-11-15 by the lines of the repository's own text files as `git blame` attributes them
-over the full history (third-party folders and lock files left out, 401,198 lines). Earlier versions of this table gave too few
-lines to the original's contributors; this count fixes that.
+over the full history (third-party folders and lock files left out, 401,708 lines).
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 386,682 | 96.4% |
-| The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,155 | 1.5% |
+| The original fefw-recomp: Goldoire | 386,730 | 96.3% |
+| The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,140 | 1.5% |
 | [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 490 | 0.1% |
-| Obelisk Chamber (this fork) | 7,871 | 2.0% |
+| Obelisk Chamber (this fork): its maintainer | 7,971 | 2.0% |
+| Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 377 | 0.1% |
 
-So about **97.9% of the code is the original's, 0.1% comes from Kompas9's fork and about 2.0% was added here**. By commits, not
-counting merges, the split is 85 from the original, 17 from Kompas9's fork and 77 from this fork. Lines are a rough measure of
+So about **97.8% of the code is the original's, 0.1% comes from Kompas9's fork and about 2.1% was added here**. By commits, not
+counting merges, the split is 84 from the original, 17 from Kompas9's fork, 84 from this fork's maintainer and 5 from its
+contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
 their share is inside the 97.9%).
 
-The changes made in this fork were written with Claude (Anthropic's AI model), directed and tested by the fork's maintainer.
+The maintainer's changes in this fork were written with Claude (Anthropic's AI model), directed and tested by the maintainer.
 
 ## Features
 
@@ -73,9 +74,15 @@ The changes made in this fork were written with Claude (Anthropic's AI model), d
 - A **Handheld** quality choice (the console's handheld reductions) beside Docked
 - Speakers: stereo or 5.1
 - Lower runtime overhead in three hot paths, and a corrected input-delay figure in the overlay
+- Movies decoded with dav1d's own assembly and a deeper decode buffer, so the 1440p cutscenes stay in step with their sound
+- Ultrawide: framed panels, the Stats / roster frame and the World Map picture keep their 16:9 shape while dims and full-screen
+  backgrounds still cover the whole screen, and the world / quest map's location dots and routes stay on the map
 
 **Mods**
 - Code patches (`.ips`, IPS32, `.pchtxt`) from a mod's `exefs` folder are applied when the game is built
+- DLL mods can bring hook sites of their own (`exefs/*.sites`, added by Set up; contributed by ranbinrang-rgb), give the game
+  functions to call, edit the game's data files as they are loaded, and open a list screen in the game's style (mod interface
+  versions 2 to 4)
 
 **Launcher**
 - Redesigned after the game's menus: a title-style list, framed panels with tabs, a help box and key help; keyboard and controller
@@ -295,7 +302,20 @@ game files or anything made from them.
 
 ## Building from source
 
-See [docs/BUILDING.md](docs/BUILDING.md). Contributions are welcome.
+See [docs/BUILDING.md](docs/BUILDING.md).
+
+## Contributing
+
+Contributions are welcome: open a pull request against `master`, or an [issue](../../issues) first for anything large.
+
+- Keep game files and anything made from them (dumps, extracted assets, decompiled code) out of the repository and out of pull
+  requests. Addresses, offsets and hook code are fine.
+- Don't copy code from other mods or ports unless its licence allows it; credit what you build on, as the [Credits](#credits) do.
+- A change to `recomp/games/fefw/main.sites` or to the code converter needs a new **Set up** to take effect; say so in the pull
+  request.
+- Describe what you tested and on what hardware. Releases get one person's testing on one PC, so a second setup helps.
+- Code mods that don't need a change here are best shared on their own (see [Mods](#mods) and
+  [mod_api.h](runtime/include/nxrt/mod_api.h)).
 
 ## Credits
 
@@ -327,7 +347,10 @@ commits, so the history shows them as the author:
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
   change on real hardware and made the releases.
-- **Claude** (Anthropic's AI model): wrote the fork's code changes under that direction.
+- **Claude** (Anthropic's AI model): wrote the maintainer's code changes under that direction.
+- **ranbinrang-rgb**: mods that bring their own hook sites (`exefs/*.sites`, lifted by Set up), with the checks around them: a
+  mod's sites are kept while it is switched off, hooks are checked against the lifted list, the Mods menu names mods that need
+  Set up, and Set up warns about midhook sites where the condition flags are still live.
 - The [Fortune's Weave decompilation project](https://code.vexcited.com/decompile/fefw): its function and class names helped find the
   game's menu code. No code from it is used.
 
