@@ -14,9 +14,12 @@
 //                the view gets wider at the same vertical field of view.
 //   UI           the 2D draw info's projection setter (0x5769d0) copies the layout's 4x4 at x0 + 0x10; a 1920x1080 ortho (1/960, +-1/540,
 //                no x translation, w 1) gets 1/(960k): the layout covers the centred 16:9 part of the output, the 3D picture the rest.
-//   backdrops    a picture or window that spans the whole 1920 layout width (dims, menu backdrops) gets x * k in the model-view its
-//                Calculate (0x595740, 0x5af080) puts in its constant buffer, so it still covers the output; a full-height one on one edge
-//                (side gradients) is stretched to the output's edge there. Children and text keep theirs. (Not in Kompas9's patch.)
+//   backdrops    a picture that spans the whole 1920 layout width (dims, menu backdrops, header bars) gets x * k in the model-view its
+//                Calculate (0x595740) puts in its constant buffer, so it still covers the output; a full-height one on one edge (side
+//                gradients) is stretched to the output's edge there. Children and text keep theirs. Not widened: Window panes (framed
+//                panels: quest windows, the world map's frame) and two pictures that are content, not backdrop: the world map's image
+//                (Img00, 1480x1080 on the right edge) and the Stats / roster screen's frame (a 1920x1080 Bg directly under the layout's
+//                root, its frame painted into the texture). (Not in Kompas9's patch.)
 //   scissor      the scissor pane (0x5975a0) works out its rectangle in viewport pixels from the layout size, not the matrix: when the
 //                draw info's x scale is ours the left edge and width are scaled by 1/k about the viewport's centre.
 //   markers      world-to-screen into 1920x1080 UI units (x * 960 + 960) at 13 sites: x * k, as the camera is k times wider. The
@@ -60,11 +63,13 @@ constexpr uint64_t kCamType = 0xc;                // u32: 0 = the perspective ca
 constexpr uint64_t kCamAspect = 0x70;             // f32 x2: aspect numerator, denominator (16, 9)
 constexpr uint64_t kProjSet = 0x576a10;           // `ret` of 0x5769d0: x0 + 0x10 = the 4x4 just copied (row major)
 constexpr uint64_t kPictureCalc = 0x595784;       // nn::ui2d Picture::Calculate (0x595740) after its LoadMtx: x19 = the pane, x20 = the draw info
-constexpr uint64_t kWindowCalc = 0x5af0b8;        // nn::ui2d Window::Calculate (0x5af080) after its LoadMtx: x20 = the pane, x19 = the draw info
+[[maybe_unused]] constexpr uint64_t kWindowCalc = 0x5af0b8;        // nn::ui2d Window::Calculate (0x5af080) after its LoadMtx: x20 = the pane, x19 = the draw info
 constexpr uint64_t kDrawModelView = 0x80;         // in the draw info: 3x4, the model-view of the pane being calculated
 constexpr uint64_t kPaneSize = 0x50;              // f32 w, h
 constexpr uint64_t kPaneBase = 0x5b;              // u8: base position, bits 0-1 horizontal (0 centre, 1 left, 2 right)
 constexpr uint64_t kPaneGlbMtx = 0x70;            // 3x4 row major
+constexpr uint64_t kPaneParent = 0x18;            // nn::ui2d::Pane*: the parent (null at the root)
+constexpr uint64_t kPaneName = 0xb0;              // char[24 + 1] (0x56fd88 compares it with "RootPane" while walking up through +0x18)
 constexpr uint64_t kScissor = 0x5976d4;           // in 0x5975a0: s3 viewport x, s2 viewport w, s5 left edge, s7 width; x1 = draw info
 constexpr uint64_t kMarkersS1[] = {0xb81bfc, 0xd939cc, 0xd943c4, 0xd94528, 0xd94670, 0xd947b8, 0xd94900, 0xd94a44,
                                    0xd94b88, 0xd94ccc, 0x1912700, 0x19131ec};   // `fmadd s1, s1, s2, s2` (s2 = 960)
@@ -174,7 +179,28 @@ void hook_projection(::Ctx* c, uint64_t, void*) {
                              static_cast<unsigned long long>(c->x[0]), 960.0 * w.k);
 }
 
-// A picture or window that spans the whole 1920 wide layout (a dim, a menu backdrop) is drawn k times wider, so it covers the output: its
+// The pane's name (nn::ui2d keeps it inline, at most 24 characters), compared with a C string.
+bool pane_named(uint64_t pane, const char* name) {
+    if (!pane) return false;
+    const char* n = reinterpret_cast<const char*>(pane + kPaneName);
+    return std::strncmp(n, name, 24) == 0;
+}
+
+// Pictures that span the layout but are content, not a backdrop, so they keep their 16:9 shape (found with a test mod that logged every
+// widened pane by name, size and parent on the Stats, roster, World Map and quest screens):
+//   Img00, 1480x1080   the world map's image (RootPane/Right/L_Img/Img00), on the right edge
+//   Bg, 1920x1080      the Stats / roster screen's frame, painted into the texture, directly under the root (RootPane or, while the layout
+//                      is built, __NewRoot__); the header bar Bg under the same root is 1920x200 and stays widened
+bool keep_16_9(uint64_t pane, float w, float h) {
+    if (pane_named(pane, "Img00")) return w == 1480.0f && h == 1080.0f;
+    if (pane_named(pane, "Bg") && w == 1920.0f && h == 1080.0f) {
+        const uint64_t parent = rdv<uint64_t>(pane + kPaneParent);
+        return pane_named(parent, "RootPane") || pane_named(parent, "__NewRoot__");
+    }
+    return false;
+}
+
+// A picture that spans the whole 1920 wide layout (a dim, a menu backdrop) is drawn k times wider, so it covers the output: its
 // Calculate copies the pane's global matrix into the draw info's model-view (LoadMtx) and from there into the pane's constant buffer; the
 // model-view's x row is scaled in between. The pane's own matrix, and so its children, stay as they are. Text boxes are not pictures.
 void widen_pane(uint64_t pane, uint64_t info) {
@@ -191,6 +217,7 @@ void widen_pane(uint64_t pane, uint64_t info) {
     const bool at_left = covers_width || std::fabs(left + 960.0f) <= 2.0f;
     const bool at_right = covers_width || std::fabs(right - 960.0f) <= 2.0f;
     if (!at_left && !at_right) return;
+    if (keep_16_9(pane, pw, rdv<float>(pane + kPaneSize + 4))) return;
     // x' = a x + b in layout units: a full-width pane scales about the centre; a full-height one on one edge reaches the output's edge there
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
@@ -207,7 +234,8 @@ void widen_pane(uint64_t pane, uint64_t info) {
                 static_cast<unsigned long long>(rdv<uint64_t>(pane) - w.base), pw, rdv<float>(pane + kPaneSize + 4), left, right, a * left + b, a * right + b);
 }
 void hook_picture_calc(::Ctx* c, uint64_t, void*) { widen_pane(c->x[19], c->x[20]); }
-void hook_window_calc(::Ctx* c, uint64_t, void*) { widen_pane(c->x[20], c->x[19]); }
+// Window::Calculate (kWindowCalc, still a site in main.sites) is no longer hooked: every full-width Window seen is a framed panel
+// (RootPane/Alpha/N_Menu/Wdw 1920x568, the world map's Right/L_Map/N_Top/Map_Base) that looked stretched when widened.
 
 void hook_scissor(::Ctx* c, uint64_t, void*) {
     Wide& w = ws();
@@ -389,7 +417,6 @@ void wide_install(uint64_t base, int out_w, int out_h) {
     if (on("ui")) add(kProjSet, &hook_projection);
     if (on("backdrop")) {
         add(kPictureCalc, &hook_picture_calc);
-        add(kWindowCalc, &hook_window_calc);
     }
     if (on("scissor")) add(kScissor, &hook_scissor);
     if (on("markers")) {
