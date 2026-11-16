@@ -23,6 +23,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <intrin.h>
+#include <bit>
 
 #include "nxrt/config.h"
 #include "nxrt/frame_limiter.h"
@@ -45,6 +46,7 @@
 #include "extras/fsr1_spatial.h"
 #include "extras/spatial_upscaler.h"
 #include "extras/temporal.h"
+#include "nvn_cmdq.h"
 #include "nvn_pipeline.h"
 #include "nvn_shaders.h"
 
@@ -2720,8 +2722,12 @@ void temporal_for_draw(const ProgLayout& pl) {
     dr.depth_aspect = true;
     VkImageView dv = tex_sampled_view(depth, dr);
     if (!src || !dv) return;
-    VkImageView out = extras::temporal_evaluate(&device(), F->cb, src, dv, tex_sampled_layout(depth), render, VkExtent2D{te.width, te.height},
-                                                S.depth_mode == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
+    VkImageView out;
+    {
+        cmdq::Direct direct;   // DLSS / FSR 2 / Streamline record through their own entry points
+        out = extras::temporal_evaluate(&device(), F->cb, src, dv, tex_sampled_layout(depth), render, VkExtent2D{te.width, te.height},
+                                        S.depth_mode == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
+    }
     g_dirty = kAllDirty;                                                  // the SDKs bind their own compute state
     if (out) {
         g_su_tex = best_r.tex;
@@ -2757,8 +2763,12 @@ void scene_upscale_for_draw(const ProgLayout& pl) {
         tex_transition(r.tex, *F, tex_sampled_layout(r.tex));
         VkImageView src = tex_sampled_view(r.tex, make_request(b, r));
         if (!src) return;
-        VkImageView up = su->upscale(F->cb, src, VkExtent2D{se.width, se.height}, VkExtent2D{se.width, se.height}, VkExtent2D{te.width, te.height}, true,
-                                     extras::scene_upscale_prescale(), extras::upscale_sharpness());
+        VkImageView up;
+        {
+            cmdq::Direct direct;   // the upscalers may record through their SDK's entry points
+            up = su->upscale(F->cb, src, VkExtent2D{se.width, se.height}, VkExtent2D{se.width, se.height}, VkExtent2D{te.width, te.height}, true,
+                             extras::scene_upscale_prescale(), extras::upscale_sharpness());
+        }
         if (up) {
             g_su_tex = r.tex;
             g_su_view = up;
@@ -2859,6 +2869,28 @@ bool alpha_test_wanted() {
     return true;
 }
 
+// [nvn] layout_cache (default on): the layouts of recently drawn programs by their stages, direct mapped, without prog_layout's lock and map
+// (~2 % of the render thread: a street frame switches programs ~1100 times). Layouts live until pipeline_shutdown (replay_shutdown clears it).
+struct LayoutCacheSlot { const ShaderInfo* st[6] = {}; const ProgLayout* pl = nullptr; };
+LayoutCacheSlot g_layout_cache[256];
+const ProgLayout* layout_cached(const ShaderInfo* const stages[6]) {
+    static const bool on = nxrt::config_get_bool("nvn", "layout_cache", true);
+    if (!on) return prog_layout(stages);
+    uint64_t h = 0;
+    for (int i = 0; i < 6; ++i) h = (h ^ reinterpret_cast<uint64_t>(stages[i])) * 0x9e3779b97f4a7c15ull;
+    LayoutCacheSlot& sl = g_layout_cache[(h >> 56) & 255];
+    if (sl.pl && std::memcmp(sl.st, stages, sizeof sl.st) == 0) {
+        if (rt_check()) chk(prog_layout(stages) == sl.pl, "layout cache");
+        return sl.pl;
+    }
+    const ProgLayout* pl = prog_layout(stages);
+    if (pl) {
+        std::memcpy(sl.st, stages, sizeof sl.st);
+        sl.pl = pl;
+    }
+    return pl;
+}
+
 bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* topo_out) {
     rs_start();
     const ShaderInfo* vs = S.stage[kVertex];
@@ -2885,7 +2917,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         // the layout of the same stages as at the last lookup is the same layout (layouts live until pipeline_shutdown): no lock, no map
         static const ShaderInfo* last_stages[6] = {};
         if (!g_pl || std::memcmp(stages, last_stages, sizeof stages) != 0) {
-            g_pl = prog_layout(stages);
+            g_pl = layout_cached(stages);
             std::memcpy(last_stages, stages, sizeof stages);
             ++g_rs.layouts;
         }
@@ -2945,6 +2977,7 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     rs_mark(kRsPrep);
     if (S.ncolor && fg_hudless_candidate(S.color_tex[0].get(), (S.color.blend_enable_mask & 1u) != 0)) {   // frame generation: the scene before the UI
         end_pass();
+        cmdq::Direct direct;   // frame generation SDKs record through their own entry points
         fg_hudless_capture(*F, S.color_tex[0].get());
     }
     if (g_fb_seen || (g_dirty & (kDesc | kPipe))) feedback_prepare(*pl);
@@ -4004,7 +4037,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         r.groups += indirect ? 0 : static_cast<uint64_t>(x) * y * z;
     }
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
-    const ProgLayout* pl = prog_layout(stages);
+    const ProgLayout* pl = layout_cached(stages);
     if (!pl) return;
     bool memo_quiet = false;
     if (cmemo::check(*cs, *pl, x, y, z, indirect, &memo_quiet)) {
@@ -4984,7 +5017,10 @@ void run_list(const CmdList& list, int depth) {
             case Op::EvaluateDlss:                                                    // the host upscaler (api_dlss_replay.cpp) binds its own compute state
                 end_pass();
                 TRACE("dlss evaluation (the scene is upscaled here; frame generation's inputs)");
-                dlss_replay(*F, r.payload<P_EvaluateDlss>().eval);
+                {
+                    cmdq::Direct direct;   // NGX / Streamline record through their own entry points
+                    dlss_replay(*F, r.payload<P_EvaluateDlss>().eval);
+                }
                 g_dirty = kAllDirty;
                 gstamp("dlss");
                 break;
@@ -5329,6 +5365,7 @@ void replay_shutdown() {
     dlss_replay_shutdown();
     pipeline_shutdown();
     g_pl = nullptr;                // the layouts are gone with the pipelines
+    for (LayoutCacheSlot& sl : g_layout_cache) sl = LayoutCacheSlot();
     S = GState();
     raw_binds_reset();
     P = Pass();
