@@ -678,9 +678,41 @@ void maybe_log_stats() {
 
 bool enabled() { return g_q != nullptr && g_running; }
 
+namespace {
+// Physical cores of the PC (SMT siblings counted once); 0 when Windows cannot say.
+int physical_cores() {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (!len) return 0;
+    std::string buf(len, '\0');
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &len)) return 0;
+    int n = 0;
+    for (DWORD off = 0; off < len;) {
+        auto* e = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+        if (e->Relationship == RelationProcessorCore) ++n;
+        off += e->Size;
+    }
+    return n;
+}
+// [nvn] replay_threads: `auto` (default) is 2 on a CPU with 6 or more physical cores and 1 below that. The worker is a busy thread (6-16 % of a
+// core in a 4K battle, plus up to ~100 us of spinning each time it runs dry): with 6+ cores it takes the render thread's driver time off the
+// frame; on 4 cores it would compete with the game's own threads. `1` or `2` choose it outright.
+int threads_wanted() {
+    std::string v = config_get_str("nvn", "replay_threads", "auto");
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "1") return 1;
+    if (v == "2") return 2;
+    const int cores = physical_cores();
+    const int t = cores >= 6 ? 2 : 1;
+    NXLOG_I(kTag, "[nvn] replay_threads = auto: %d physical cores, so %s", cores,
+            t == 2 ? "the recording worker is on" : "recording stays on the render thread (set 2 to try the worker)");
+    return t;
+}
+}  // namespace
+
 void install() {
     // read once; the back end may be brought up again (tests): the wrappers go in again whenever volk loaded fresh entry points
-    static const int threads = static_cast<int>(std::clamp<int64_t>(config_get_int("nvn", "replay_threads", 2), 1, 2));
+    static const int threads = threads_wanted();
     g_threads = threads;
     if (g_threads < 2 || g_running) return;
     if (!vkCmdDraw || !vkUpdateDescriptorSets || !vkEndCommandBuffer) {
