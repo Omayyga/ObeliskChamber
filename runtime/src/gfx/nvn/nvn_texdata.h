@@ -35,8 +35,6 @@ struct TexCaps {
     int encode_threads = 0;      // threads of an ASTC -> BC7 transcode (0: all hardware threads; background jobs use 1)
     bool provisional = false;    // render thread, texture needed now: a BC7 transcode without a cache entry uses the quickest preset (0), is not cached and
                                  // comes out with PreparedTexture::provisional set; a background job makes the real one, which replaces it (nvn_texprep.h)
-    bool skip_cache = false;     // with provisional, for a texture whose background job is still reading its cache entry ([nvn] tex_prep_standin): the cache is
-                                 // not read here, the stand-in is made at once and the job's result replaces it
     bool bc1 = false;            // [gfx] astc_bc = bc1 in effect (astc_bc1_active): an opaque ASTC texture comes out as BC1 when image_format allows it
     bool gpu_astc = false;       // [gfx] astc_gpu in effect (nvn_astc_gpu.h): a 2D ASTC texture without a usable cache entry is not transcoded here; it comes out as
                                  // its untiled ASTC blocks (PreparedTexture::gpu_astc) for the GPU layer to decode and encode. Wins over cache_only and provisional.
