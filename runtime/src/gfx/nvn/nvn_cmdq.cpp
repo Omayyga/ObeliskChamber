@@ -198,7 +198,8 @@ void do_sync() {
     X(vkCmdPipelineBarrier) X(vkCmdBeginRendering) X(vkCmdCopyBuffer) X(vkCmdCopyImage) X(vkCmdBlitImage) X(vkCmdCopyBufferToImage)      \
     X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage2) X(vkCmdCopyImageToBuffer2) X(vkCmdClearAttachments) X(vkCmdClearColorImage)     \
     X(vkCmdClearDepthStencilImage) X(vkCmdUpdateBuffer) X(vkCmdResolveImage) X(vkCmdBeginDebugUtilsLabelEXT)                             \
-    X(vkCmdBindTransformFeedbackBuffersEXT) X(vkCmdBeginTransformFeedbackEXT) X(vkCmdEndTransformFeedbackEXT) X(vkUpdateDescriptorSets)
+    X(vkCmdBindTransformFeedbackBuffersEXT) X(vkCmdBeginTransformFeedbackEXT) X(vkCmdEndTransformFeedbackEXT) X(vkUpdateDescriptorSets)  \
+    X(vkCmdSetFragmentShadingRateKHR)
 
 // Calls that need everything queued before them made first, then run on the calling thread.
 #define CMDQ_SYNC_LIST(X)                                                                                                                \
@@ -278,6 +279,17 @@ void VKAPI_PTR w_vkCmdSetBlendConstants(VkCommandBuffer cb, const float c[4]) {
     Writer w{q_begin(&x_SetBlendConstants, sz<A_Blend>())};
     A_Blend a{cb, {c[0], c[1], c[2], c[3]}};
     w.one(a);
+    q_commit();
+}
+
+// vkCmdSetFragmentShadingRateKHR ([nvn] shading_rate, ObeliskChamber): the extent and the two combiner ops are copied. Without its wrapper
+// the call would reach the command buffer before the calls queued ahead of it.
+struct A_Fsr { VkCommandBuffer cb; VkExtent2D e; VkFragmentShadingRateCombinerOpKHR ops[2]; };
+void x_SetFragmentShadingRateKHR(const uint8_t* p) { auto* a = reinterpret_cast<const A_Fsr*>(p); real_vkCmdSetFragmentShadingRateKHR(a->cb, &a->e, a->ops); }
+void VKAPI_PTR w_vkCmdSetFragmentShadingRateKHR(VkCommandBuffer cb, const VkExtent2D* e, const VkFragmentShadingRateCombinerOpKHR ops[2]) {
+    if (!t_q) return real_vkCmdSetFragmentShadingRateKHR(cb, e, ops);
+    Writer w{q_begin(&x_SetFragmentShadingRateKHR, sz<A_Fsr>())};
+    w.one(A_Fsr{cb, *e, {ops[0], ops[1]}});
     q_commit();
 }
 
