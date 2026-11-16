@@ -732,6 +732,8 @@ uint64_t split_ticks() {
     }();
     return t;
 }
+void cs_close();      // below: open dispatch barriers ([nvn] dispatch_barriers = tracked*)
+void wm_close();      // below: open batched-update barriers ([nvn] batch_ubo_updates)
 uint64_t qpc_now() {     // ns, steady
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
@@ -745,6 +747,10 @@ void maybe_split() {
     const int labels = g_dbg_depth;
     for (int i = 0; i < labels; ++i) vkCmdEndDebugUtilsLabelEXT(F->cb);     // labels cannot outlive their command buffer (later pops close nothing)
     if (labels) g_dbg_depth = 0;
+    // Barriers left open for a later command (tracked dispatches, batched buffer updates) go into this buffer now: their trackers take a
+    // different command buffer for "a full barrier lies between", which holds for a new submission but not for the second part of a split one.
+    cs_close();
+    wm_close();
     if (!split_submission(*F)) return;
     // the new command buffer has no state: everything is bound again
     g_bound_pipeline = VK_NULL_HANDLE;
@@ -752,6 +758,7 @@ void maybe_split() {
     g_topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
     g_restart_valid = false;
     g_vb_bound_in_cb = false;
+    vrs_reset();
     g_split_t0 = now;
     g_split_draws = 0;
 }
