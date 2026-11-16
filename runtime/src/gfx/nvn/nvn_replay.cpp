@@ -39,6 +39,7 @@
 #include "nvn_format.h"
 #include "nvn_mask_clear.h"
 #include "nvn_gpu_internal.h"
+#include "nvn_texprep.h"
 #include "nvn_tess_gen.h"
 #include "vk_gauges.h"
 #include "nxrt/lowlat.h"
@@ -1226,7 +1227,7 @@ void feedback_prepare(const ProgLayout& pl) {
         uint32_t lv_lo = 0, lv_hi = 0;
         fb_level_range(pl, r.tex, &lv_lo, &lv_hi);
         end_pass();
-        tex_ensure_current(r.tex, *F);                                    // storage the game wrote since the image was made reaches the copy too
+        tex_ensure_exact(r.tex, *F);                                      // storage the game wrote since the image was made reaches the copy too
         tex_transition(r.tex, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);   // the next pass moves it back to the attachment layout and loads it
         tex_transition(c, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         std::vector<VkImageCopy> regions;
@@ -1315,7 +1316,7 @@ void vol3d_prepare(const ProgLayout& pl) {
         if (e.copied != serial || r.tex->cpu_dirty.load()) {
             out_texture_read(r.tex);
             end_pass();
-            tex_ensure_current(r.tex, *F);
+            tex_ensure_exact(r.tex, *F);
             tex_transition(r.tex, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             tex_transition(c.get(), *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             std::vector<VkImageCopy> regions;
@@ -1343,6 +1344,10 @@ void vol3d_prepare(const ProgLayout& pl) {
     }
 }
 
+std::atomic<uint64_t> g_pool_uploads_deferred{0};
+std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which pacing last came back on after a load (note_frame_for_pacing)
+const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
+
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
 // Ends the pass when it has to touch images. The depth attachment itself is left to the pass.
 void prepare_textures(const ProgLayout& pl) {
@@ -1367,6 +1372,10 @@ void prepare_textures(const ProgLayout& pl) {
         if (b.nvn.source != NvnSource::SamplerBinding && b.nvn.source != NvnSource::HandleInUniform && b.nvn.source != NvnSource::ImageBinding) continue;
         const TexResolved& r = resolve_texture_ref(d, tmp);
         if (!r.tex) continue;
+        if (!r.tex->gpu && tex_first_upload_deferrable(r.tex)) {   // an asset with no image yet: made when its upload runs (it may wait)
+            need.push_back(r.tex);
+            continue;
+        }
         if (!tex_gpu(r.tex)) continue;
         // owned by the pass; a compute dispatch runs outside every pass, so the graphics attachments do not own what it samples
         if (shares_image(r.tex, S.depth_tex.get()) || (d.nvn_stage != kCompute && is_color_feedback(r.tex))) continue;
@@ -1375,28 +1384,133 @@ void prepare_textures(const ProgLayout& pl) {
             if (r.tex->cpu_dirty.load() && ft::on()) ft::mark(b.nvn.source == NvnSource::SamplerBinding ? "tx.dirty_bind" : "tx.dirty_uniform", r.tex->id);
         }
     }
+    size_t pool_from = need.size();   // need[pool_from..]: textures only needed because the pools hold them
     if (pl.has_set[kPoolSet]) {
         // a shader indexing the pools may sample any registered texture: those not ready, except what the pass renders to (their pool
         // elements hold the dummy meanwhile, nvn_pipeline.cpp)
         const bool compute = std::any_of(pl.bindings.begin(), pl.bindings.end(), [](const BindingDesc& d) { return d.nvn_stage == kCompute; });
         const size_t from = need.size();
+        pool_from = from;
         pool_textures_to_prepare(S.tpool.get(), need);
         need.erase(std::remove_if(need.begin() + static_cast<std::ptrdiff_t>(from), need.end(),
-                                  [&](Texture* t) { return shares_image(t, S.depth_tex.get()) || (!compute && is_color_feedback(t)); }),
+                                  [&](Texture* t) {
+                                      if (!t->gpu && tex_first_upload_deferrable(t)) return false;   // an asset with no image yet: not an attachment
+                                      return shares_image(t, S.depth_tex.get()) || (!compute && is_color_feedback(t));
+                                  }),
                    need.end());
     }
     // an image this op also writes (an NVN2 compute shader sampling its own image) stays in GENERAL, the layout both descriptors name
     need.erase(std::remove_if(need.begin(), need.end(),
-                              [&](Texture* t) { return std::any_of(storage_bound.begin(), storage_bound.end(), [&](Texture* s) { return shares_image(t, s); }); }),
+                              [&](Texture* t) {
+                                  if (!t->gpu && tex_first_upload_deferrable(t)) return false;
+                                  return std::any_of(storage_bound.begin(), storage_bound.end(), [&](Texture* s) { return shares_image(t, s); });
+                              }),
                need.end());
+    // [nvn] pool_upload_ms (default 24; 0 = no limit): the first uploads of asset textures that a draw needs only because a texture pool holds
+    // them (not bound by the draw itself) take at most this much render-thread time per presented frame; the rest stay not ready (their pool
+    // elements are the dummy) and go in the next frames. A load-in registers thousands of textures and uploaded them all before its first
+    // draw: 4378 uploads, 3.8 GB, an 8 s frame at 4K (x2-explore). Bound textures, rewrites of uploaded textures, render targets and
+    // uncompressed data are never held back.
+    // [nvn] pool_upload_ms (default 6) is the budget while only a few textures wait, so the frame stays near its usual time; with a backlog of
+    // more than [nvn] pool_upload_backlog (64) held back in the previous frame (a load-in, a fast travel) it is [nvn] pool_upload_burst_ms
+    // (24): the area streams in within a second or so at a lower frame rate. A flat 24 ms made walking through a cold area show twice the
+    // frames over 20 ms (s1-stutter1, hub_cold).
+    static const int64_t pool_ms = config_get_int("nvn", "pool_upload_ms", 6);
+    static const int64_t burst_ms = config_get_int("nvn", "pool_upload_burst_ms", 24);
+    static const int64_t backlog_n = config_get_int("nvn", "pool_upload_backlog", 64);
+    static uint64_t budget_present = ~0ull;
+    static std::chrono::steady_clock::duration spent{}, cap{};
+    static bool burst = false;
+    static std::unordered_set<Texture*> firsts_frame;   // distinct textures whose first upload the draws of this frame needed
+    const uint64_t now_p = counters().presents.load(std::memory_order_relaxed);
+    if (now_p != budget_present) {
+        budget_present = now_p;
+        spent = std::chrono::steady_clock::duration::zero();
+        firsts_frame.clear();
+        burst = static_cast<int64_t>(pool_held_backlog()) > backlog_n;
+        cap = std::chrono::milliseconds(std::max<int64_t>(0, burst ? std::max(pool_ms, burst_ms) : pool_ms));
+    }
+    // What the budget covers: the first uploads of pool-only asset textures (held for later frames, pool_hold), and the swaps of a stand-in
+    // on screen for its finished result ([nvn] pool_swap_budget, default on), bound or pool: the image already holds valid (approximate) data,
+    // so a swap can wait a frame anywhere; at a load-in a thousand results land within a second or two and their copies piled into one frame.
+    static const bool swap_budget = config_get_bool("nvn", "pool_swap_budget", true);
+    // [nvn] bound_upload_defer (default on): while a backlog streams in (burst), first uploads of asset textures a draw binds itself wait too;
+    // the draw samples the dummy texture until theirs is in (descriptor resolution below). A load-in's first frame still made 583 uploads, most
+    // of them bound, in 582 ms (s2-default). Outside a burst bound textures always go at once.
+    static const bool bound_defer = config_get_bool("nvn", "bound_upload_defer", true);
+    // more than pool_upload_burst_firsts first uploads needed by this frame's draws so far (the first frame after a loading screen, spread
+    // over many draws) start the burst at once; s3-default's load-in frame still made 576 uploads with a per-draw count
+    // [nvn] pool_upload_burst_firsts (default 256): the threshold of this count. 64 also fired while walking into a cold street (s4-default:
+    // a minute of 24 ms upload frames, 531 frames over 33 ms); a load-in needs several hundred at once.
+    static const int64_t firsts_n = config_get_int("nvn", "pool_upload_burst_firsts", 256);
+    // ... and in the first [nvn] pool_upload_loadin_frames (30) presents after a loading screen (pacing back on) pool_upload_backlog (64)
+    // is enough: the load-in frame starts the burst early (s5-default's, with 256, made 426 uploads in 361 ms; s4's, with 64, 173 in 295)
+    static const int64_t loadin_frames = config_get_int("nvn", "pool_upload_loadin_frames", 30);
+    const uint64_t on_at = g_pacing_on_present.load(std::memory_order_relaxed);
+    // The load-in frame itself is the present at which pacing comes back on: note_frame_for_pacing() runs at that present, after this
+    // frame's prepare_textures(), so frames while pacing is still off (a loading screen and its last frame) count as load-in too.
+    const bool loadin = (loadin_frames > 0 && nxrt::frame_limiter_unpaced()) ||
+                        (on_at && now_p >= on_at && now_p - on_at < static_cast<uint64_t>(std::max<int64_t>(0, loadin_frames)));
+    if (pool_ms > 0 && !burst) {
+        const size_t lim = static_cast<size_t>(std::max<int64_t>(0, loadin ? std::min(firsts_n, backlog_n) : firsts_n));
+        for (Texture* t : need)
+            if (tex_first_upload_deferrable(t)) {
+                firsts_frame.insert(t);
+                if (firsts_frame.size() > lim) break;
+            }
+        if (firsts_frame.size() > lim) {
+            burst = true;
+            cap = std::chrono::milliseconds(std::max(pool_ms, burst_ms));
+        }
+    }
+    // [nvn] burst_defer_uncompressed (default off): during a burst, pool-only first uploads of uncompressed textures (UI images, look-up
+    // tables: their pool element is the dummy meanwhile, which can show as a wrong colour for a few frames) wait as well
+    static const bool burst_uncompressed = config_get_bool("nvn", "burst_defer_uncompressed", false);
+    auto budgeted = [&](Texture* t, size_t i) {
+        return pool_ms > 0 && (((i >= pool_from || (burst && bound_defer)) && tex_first_upload_deferrable(t)) || (swap_budget && tex_standin_swap_pending(t)) ||
+                               (burst && burst_uncompressed && i >= pool_from && tex_first_upload_uncompressed_deferrable(t)));
+    };
+    if (pool_ms > 0 && !need.empty()) {
+        if (spent >= cap) {
+            // the frame's budget is spent: what it covers leaves the list before the pass is ended for it (each draw that indexes the pools
+            // would otherwise break the render pass for uploads it then skips); pool-only first uploads are held until the frame ends
+            size_t kept = 0, kept_before_pool = 0, dropped = 0;
+            for (size_t i = 0; i < need.size(); ++i) {
+                Texture* t = need[i];
+                if (budgeted(t, i)) {
+                    if (i >= pool_from) pool_hold(t);   // out of the lists the next draws of this frame look through
+                    ++dropped;
+                    continue;
+                }
+                if (i < pool_from) ++kept_before_pool;
+                need[kept++] = t;
+            }
+            need.resize(kept);
+            pool_from = kept_before_pool;
+            g_pool_uploads_deferred.fetch_add(dropped, std::memory_order_relaxed);
+        } else if (pool_from + 1 < need.size()) {
+            // the textures whose background result is ready go first: an upload buffer to adopt costs far less than a stand-in or a CPU untile,
+            // and the others get more time for their jobs
+            std::stable_partition(need.begin() + static_cast<std::ptrdiff_t>(pool_from), need.end(), [](Texture* t) { return texprep::has_result(t); });
+        }
+    }
     if (need.empty() && need_storage.empty()) return;
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
     end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
-    for (Texture* t : need) {
+    for (size_t i = 0; i < need.size(); ++i) {
+        Texture* t = need[i];
+        const bool slice = budgeted(t, i);
+        if (slice && spent >= cap) {
+            g_pool_uploads_deferred.fetch_add(1, std::memory_order_relaxed);
+            if (i >= pool_from) pool_hold(t);
+            continue;
+        }
+        const auto t0 = slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         tex_ensure_current(t, *F);
         tex_transition(t, *F, tex_sampled_layout(t));
+        if (slice) spent += std::chrono::steady_clock::now() - t0;
     }
     for (Texture* t : need_storage) {
         if (tex_scale(t) != 1.0f) tex_rescale(t, *F, 1.0f, "bound as a storage image");   // imageStore coordinates are not scaled (Ryujinx: ResScaleUnsupported)
@@ -2103,7 +2217,9 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
             }
             // a compute dispatch is never inside the graphics pass: a colour attachment of the last pass is an ordinary texture to it
             const bool feedback = r.tex && d.nvn_stage != kCompute && is_color_feedback(r.tex);
-            if (r.tex && tex_gpu(r.tex) && !feedback) {
+            // a first upload held back for a later frame ([nvn] bound_upload_defer): its image holds nothing yet, the dummy stands in
+            const bool waiting = r.tex && tex_layout(r.tex) == VK_IMAGE_LAYOUT_UNDEFINED && tex_first_upload_deferrable(r.tex);
+            if (r.tex && !waiting && tex_gpu(r.tex) && !feedback) {
                 ViewRequest q = make_request(b, r);
                 if (int_comp) q.component = int_comp;
                 VkImageView v = tex_sampled_view(r.tex, q);
@@ -4629,7 +4745,7 @@ void do_clear_texture(const P_ClearTexture& p) {
     if (!t || !tex_gpu(t)) return;
     end_pass();
     SubRes s = sub_of(p.view, p.has_view);
-    tex_ensure_current(t, *F);
+    tex_ensure_exact(t, *F);
     tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     tex_mark_gpu_written(t);
     if (p.has_region) {
@@ -4701,14 +4817,14 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
     BufRef br = to_texture ? held_or_pool(p.address, buf_bytes, kOutBufferRead, true) : resolve_buffer(p.address, buf_bytes);
     c.bufferOffset = br.offset;
     if (to_texture) {
-        tex_ensure_current(t, *F);
+        tex_ensure_exact(t, *F);
         tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         tev(t, "copy_buffer_to_texture", p.address, p.has_view ? 1 : 0);
         for (uint32_t i = 0; i < c.imageSubresource.layerCount; ++i) tex_sparse_before_copy(t, c.imageSubresource.baseArrayLayer + i, s.level);
         tex_mark_gpu_written(t);
         vkCmdCopyBufferToImage(F->cb, br.buffer, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     } else {
-        tex_ensure_current(t, *F);
+        tex_ensure_exact(t, *F);
         tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         vkCmdCopyImageToBuffer(F->cb, tex_image(t), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, br.buffer, 1, &c);
         gpu_wrote(p.address, stride * ((rh + bh - 1) / bh) * rd, kWriteImageCopy);
@@ -4747,8 +4863,8 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
     ss.level -= tex_level_drop(s);   // image levels from here on
     ds.level -= tex_level_drop(d);
     if (sr.w <= 0 || sr.h <= 0 || dr.w <= 0 || dr.h <= 0) return;
-    tex_ensure_current(s, *F);
-    if (s != d) tex_ensure_current(d, *F);
+    tex_ensure_exact(s, *F);
+    if (s != d) tex_ensure_exact(d, *F);
     const bool same = s == d;
     tex_transition(s, *F, same ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     if (!same) tex_transition(d, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -5538,6 +5654,7 @@ void note_frame_for_pacing() {
     const bool want = low >= 3 && now - last_stall < std::chrono::milliseconds(1500);
     if (want != nxrt::frame_limiter_unpaced()) {
         nxrt::frame_limiter_set_unpaced(want);
+        if (!want) g_pacing_on_present.store(p, std::memory_order_relaxed);   // a load just ended (prepare_textures' load-in burst)
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
         NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),
                 static_cast<unsigned long long>(per));
