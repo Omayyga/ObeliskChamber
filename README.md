@@ -384,6 +384,8 @@ are brought in here with his commits, so the history shows him as the author, an
   registers), whole-register vector writes, and temporary guest registers in locals. On his PC the game's main thread used
   about 25% less CPU time and arrival frames after fast travel dropped from 485 to about 320 ms. His profile-guided build
   options (`fefw_build.py --pgo-gen` / `--pgo-use`) are there for developers; releases do not use them.
+- Long submissions handed to the GPU in parts at render pass boundaries, so the GPU starts on a frame while the render thread
+  still records the rest (`[nvn] split_submit_ms`, off by default), with the GPU's busy time per frame in `[prof] gpu_stats`.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
