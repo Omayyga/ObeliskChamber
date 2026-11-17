@@ -340,6 +340,11 @@ struct Renderer::Impl {
             extras::HdrState hs = extras::hdr_state();
             hs.output = k;
             if (k == extras::OutputKind::Sdr8) hs.peak_ratio = 1.0f;
+            if (hs.game_pq && k != extras::OutputKind::Hdr10) {
+                // the game's own PQ picture needs an HDR10 swapchain; without one the game keeps its SDR picture (it is only told HDR with HDR10)
+                hs.game_pq = false;
+                NXLOG_W(kTag, "HDR game: the swapchain is %s, not HDR10: the game is told the display is SDR", extras::output_kind_name(k));
+            }
             extras::hdr_set_state(hs);
         }
     }
@@ -351,7 +356,7 @@ struct Renderer::Impl {
         const extras::HdrState hs = extras::hdr_state();
         md_serial = hs.metadata_serial;
         if (headless || !swapchain || kind == extras::OutputKind::Sdr8 || !dev->features().hdr_metadata) return;
-        const bool native = extras::settings().hdr.mode == extras::HdrMode::Native;
+        const bool native = extras::settings().hdr.mode == extras::HdrMode::Native || hs.game_pq;
         VkHdrMetadataEXT md = {VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
         md.displayPrimaryRed = {0.708f, 0.292f};       // BT.2020
         md.displayPrimaryGreen = {0.170f, 0.797f};
@@ -383,7 +388,9 @@ struct Renderer::Impl {
         hs.game_max_fall = prev.game_max_fall;
         hs.game_display_max_nits = prev.game_display_max_nits;
         hs.metadata_serial = prev.metadata_serial + 1;
-        const bool forced = es.hdr.mode == extras::HdrMode::On || es.hdr.mode == extras::HdrMode::Native;   // Native: the game's HDR TV path, forced like On
+        // Native: the game's HDR TV levels, forced like On. Game: the game's own PQ picture, forced like On, and HDR10 if the surface offers it.
+        const bool game = es.hdr.mode == extras::HdrMode::Game;
+        const bool forced = es.hdr.mode == extras::HdrMode::On || es.hdr.mode == extras::HdrMode::Native || game;
         wanted = extras::OutputKind::Sdr8;
         if (es.hdr.mode != extras::HdrMode::Off) {
             bool o10 = false, osc = false;
@@ -408,11 +415,14 @@ struct Renderer::Impl {
                 if (o10 || osc) NXLOG_I(kTag, "HDR: the surface lists HDR formats but Windows does not report HDR on for this monitor (%s): SDR output (set [hdr] mode = on to force HDR)", di.how);
                 o10 = osc = false;
             }
-            const bool pick10 = es.hdr.format == extras::HdrFormat::Hdr10 ? o10 : es.hdr.format == extras::HdrFormat::ScRgb ? false : o10;
-            const bool pickSc = es.hdr.format == extras::HdrFormat::ScRgb ? osc : es.hdr.format == extras::HdrFormat::Hdr10 ? false : (!o10 && osc);
+            const bool pick10 = game ? o10 : es.hdr.format == extras::HdrFormat::Hdr10 ? o10 : es.hdr.format == extras::HdrFormat::ScRgb ? false : o10;
+            const bool pickSc = game ? (!o10 && osc) : es.hdr.format == extras::HdrFormat::ScRgb ? osc : es.hdr.format == extras::HdrFormat::Hdr10 ? false : (!o10 && osc);
             if (pick10) wanted = extras::OutputKind::Hdr10;
             else if (pickSc) wanted = extras::OutputKind::ScRgb;
-            hs.scene_hdr = wanted != extras::OutputKind::Sdr8 || forced;
+            // Game with HDR10: the game renders PQ itself, so no HDR scene pipeline (float targets, tone-map patch); otherwise it falls back to On
+            hs.game_pq = game && wanted == extras::OutputKind::Hdr10;
+            if (game && !hs.game_pq) NXLOG_W(kTag, "HDR game: the surface offers no HDR10 format: the HDR scene pipeline (as [hdr] mode = on) is used instead");
+            hs.scene_hdr = !hs.game_pq && (wanted != extras::OutputKind::Sdr8 || forced);
             hs.display_hdr = di.hdr_enabled;
             hs.display_peak_nits = di.valid ? di.max_nits : 0.0f;
             hs.display_sdr_white_nits = di.valid ? di.sdr_white_nits : 80.0f;
@@ -425,7 +435,8 @@ struct Renderer::Impl {
         }
         hs.output = extras::OutputKind::Sdr8;     // the swapchain sets the real one
         extras::hdr_set_state(hs);
-        NXLOG_I(kTag, "HDR: mode %d, scene %s, wanted output %s, paper white %.0f nits, peak %.0f nits, peak ratio %.2f", static_cast<int>(es.hdr.mode), hs.scene_hdr ? "HDR" : "SDR",
+        NXLOG_I(kTag, "HDR: mode %d, scene %s%s, wanted output %s, paper white %.0f nits, peak %.0f nits, peak ratio %.2f", static_cast<int>(es.hdr.mode),
+                hs.scene_hdr ? "HDR" : "SDR", hs.game_pq ? " (the game's own PQ picture)" : "",
                 extras::output_kind_name(wanted), hs.paper_white_nits, hs.peak_nits, hs.peak_ratio);
     }
 

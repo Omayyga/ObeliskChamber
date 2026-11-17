@@ -106,7 +106,7 @@ bool pick_word(const std::string& k, const std::string& v, const std::vector<con
 }
 
 // The words the file uses for the display extras enums, indexed by the enum value (the first word of each list is the default's).
-const std::vector<const char*> kHdrModeWords = {"off", "auto", "on", "native"};
+const std::vector<const char*> kHdrModeWords = {"off", "auto", "on", "native", "game"};
 const std::vector<const char*> kHdrFormatWords = {"auto", "hdr10", "scrgb"};
 const std::vector<const char*> kUpscaleWords = {"off", "fsr1", "fsr3", "dlss", "xess", "nis", "dlaa"};
 const std::vector<const char*> kUpscaleQualityWords = {"native", "quality", "balanced", "performance", "ultra_performance", "custom"};

@@ -273,11 +273,13 @@ int OutputPass::record(VkCommandBuffer cb, VkImageView dst_view, VkFormat dst_fo
     int mode = 0;
     switch (p.out) {
         case OutputKind::Sdr8: mode = p.src_linear ? 1 : 0; break;
-        case OutputKind::Hdr10: mode = 2; break;
+        case OutputKind::Hdr10: mode = p.src_pq ? 0 : 2; break;   // a PQ source into an HDR10 swapchain: a plain copy (mode 0)
         case OutputKind::ScRgb: mode = 3; break;
     }
 
-    const float* pic = p.picture ? p.pic : nullptr;
+    // the picture controls work on display-referred SDR values, not on PQ code values: off for the game's own PQ picture
+    const bool pq_copy = p.src_pq && p.out == OutputKind::Hdr10;
+    const float* pic = p.picture && !pq_copy ? p.pic : nullptr;
 
     // FSR 1: only when the picture on screen is larger than the source crop and the crop starts at the origin
     const int32_t sw = static_cast<int32_t>(p.src_extent.width), sh = static_cast<int32_t>(p.src_extent.height);

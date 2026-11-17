@@ -176,6 +176,15 @@ void present_on_render_thread(Window* w, int index, bool again) {
         tex_transition(t, f, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         src = tex_present_view(t);
     }
+    if (extras::hdr_game_pq()) {
+        // [hdr] mode = game: the format the game presents its own HDR picture in, once per change (PQ in 10-bit UNORM is expected; 8-bit would band)
+        static VkFormat s_logged = VK_FORMAT_UNDEFINED;
+        if (const VkFormat vf = tex_vk_format(t); vf != s_logged) {
+            s_logged = vf;
+            const VkExtent3D le = tex_image_extent(t, 0);
+            NXLOG_I("nvn", "HDR game: the game presents a %ux%u texture, VkFormat %d", le.width, le.height, static_cast<int>(vf));
+        }
+    }
     NXFT("present.record");
     const VkExtent3D e = tex_image_extent(t, 0);     // a scaled target is presented whole (its crop in image texels)
     int32_t crop[4] = {w->crop[0], w->crop[1], w->crop[2], w->crop[3]};
@@ -196,6 +205,7 @@ void present_on_render_thread(Window* w, int index, bool again) {
             prm.keep_aspect = keep_aspect();
             prm.flip_y = window_origin_mode() == NVN_WINDOW_ORIGIN_MODE_LOWER_LEFT;
             prm.src_linear = hs.scene_hdr;
+            prm.src_pq = hs.game_pq && hs.output == extras::OutputKind::Hdr10;
             prm.out = hs.output;
             prm.paper_white_nits = hs.paper_white_nits;
             prm.peak_nits = hs.peak_nits;
