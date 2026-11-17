@@ -147,6 +147,7 @@ private:
     uint32_t want_rate_ = 0, want_channels_ = 0;   // the format the caller opened (0: closed by the caller)
     bool follow_default_ = false;          // opened on the default endpoint: follow it when it moves
     std::wstring opened_default_id_;       // the default endpoint when the device was opened
+    std::string opened_want_;              // [audio] device when the device was opened: a menu that changes it reopens (follow_device)
     ULONGLONG next_device_check_ms_ = 0;
     bool com_owned_ = false;          // this sink called CoInitializeEx successfully and must balance it
     DWORD com_thread_ = 0;            // the thread that did, so CoUninitialize runs there
@@ -208,7 +209,8 @@ bool XAudio2Sink::open(uint32_t sample_rate, uint32_t channels) {
     engine_->RegisterForCallbacks(&engine_callback_);
     const std::vector<OutputDevice> devices = list_output_devices();
     log_devices(devices);
-    const std::wstring device_id = pick_device(devices, config_get_str("audio", "device", "default"));
+    opened_want_ = config_get_str("audio", "device", "default");
+    const std::wstring device_id = pick_device(devices, opened_want_);
     follow_default_ = device_id.empty();
     opened_default_id_.clear();
     for (const OutputDevice& d : devices)
@@ -291,11 +293,13 @@ void XAudio2Sink::follow_device() {
     if (now < next_device_check_ms_) return;
     next_device_check_ms_ = now + 1000;
     const bool lost = lost_.load(std::memory_order_relaxed) || !source_;   // !source_: an earlier attempt found no device
-    if (!lost && !follow_default_) return;
+    const bool chosen = config_get_str("audio", "device", "default") != opened_want_;   // a menu picked another device ([audio] device)
+    if (!lost && !chosen && !follow_default_) return;
     const std::wstring def = default_output_id();
     if (def.empty()) return;                                               // no output device at all: look again in a second
-    if (!lost && def == opened_default_id_) return;
-    NXLOG_I("audio", "xaudio2: %s: opening the output device again", lost ? "the output device was lost" : "the default output device changed");
+    if (!lost && !chosen && def == opened_default_id_) return;
+    NXLOG_I("audio", "xaudio2: %s: opening the output device again",
+            lost ? "the output device was lost" : chosen ? "another output device was chosen" : "the default output device changed");
     open(want_rate_, want_channels_);
 }
 

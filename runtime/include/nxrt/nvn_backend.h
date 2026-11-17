@@ -56,6 +56,11 @@ void backend_dynres_on(bool on);   // after backend_dynres_enable: off puts the 
 // The upscalers' tuning values, live: the TAAU history weight (2..64) and the SDK upscalers' sharpening (0..1). A negative value keeps the
 // one in force.
 void backend_upscale_tuning(double history_weight, double sharpness);
+// [dlss] upscaler, live: "taau", "bilinear", "fsr3", "dlss", "xess" or "auto" (an unknown word: the ini's). TAAU, bilinear and FSR 3 switch at
+// the next evaluation; DLSS needs Streamline started before the Vulkan instance and XeSS a device made for it, both at start, so either one
+// falls back to TAAU in a run that did not start with it (backend_upscaler_ready says which). The upscaler's history starts again.
+void backend_set_upscaler(const char* word);
+bool backend_upscaler_ready(const char* word);   // the upscaler can run in this run without a restart
 int backend_dynres_scale_percent();
 
 // The size and NVNmemoryPoolFlags of the initialized memory pool behind a guest NVNmemoryPool object. False when `guest_pool` is not a live

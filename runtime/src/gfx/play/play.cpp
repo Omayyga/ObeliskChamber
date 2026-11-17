@@ -323,8 +323,17 @@ const char* window_mode_name(platform::FullscreenMode m) {
     return "?";
 }
 
-// Master volume (live). The mute while the window has no focus is set every frame (update_hook) and on focus changes.
-void apply_audio(const AudioSettings& a) { audio::set_master_volume(static_cast<float>(a.volume)); }
+// Master volume and the output device (live). The mute while the window has no focus is set every frame (update_hook) and on focus changes.
+// The device goes to [audio] device, which the XAudio2 sink checks once a second and opens again when it changed (audio_xaudio2.cpp
+// follow_device); a device set by the environment (NXRT_AUDIO_DEVICE) stays.
+void apply_audio(const AudioSettings& a) {
+    audio::set_master_volume(static_cast<float>(a.volume));
+    const std::string want = a.device.empty() ? std::string("default") : a.device;
+    if (std::strcmp(config_source("audio", "device"), "env") != 0 && config_get_str("audio", "device", "default") != want) {
+        config_set("audio", "device", want.c_str());
+        NXLOG_I(kTag, "audio output device: %s (the sink opens it within a second)", want.c_str());
+    }
+}
 
 void apply_unfocused_mute() {
     G& st = g();
@@ -1043,6 +1052,13 @@ int update_hook(::Ctx*, uint64_t, void*) {
     }
     if (!playing) input::mouse_delta_take();         // aim only counts what arrives while the game is playing (not under one of its menus)
 
+    {   // [play] log_status, live: the F1 menu writes it; read again every two seconds
+        static uint64_t checked = 0;
+        if (now - checked > 2000 * kMs) {
+            checked = now;
+            st.log_status = config_get_bool("play", "log_status", false);
+        }
+    }
     if (st.log_status && now - st.last_status_ns > 1000 * kMs) {
         st.last_status_ns = now;
         GameStatus gs;

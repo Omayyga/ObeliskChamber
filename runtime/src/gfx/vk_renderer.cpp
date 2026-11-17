@@ -1004,7 +1004,8 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
     s.st.frames++;
     s.frame_number++;
     {   // [gfx] log_fps = 1: one line per second with the presented frame rate and the GPU time of the present command buffer (output pass, FSR 1)
-        static const bool log_fps = config_get_bool("gfx", "log_fps", false);
+        static bool log_fps = config_get_bool("gfx", "log_fps", false);
+        if ((s.frame_number & 127) == 0) log_fps = config_get_bool("gfx", "log_fps", false);   // live: the F1 menu writes it
         static uint64_t last_ns = 0, last_frames = 0;
         if (log_fps) {
             const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());

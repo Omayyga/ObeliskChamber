@@ -17,13 +17,19 @@ const SECTIONS = [
   {
     title: 'settings.sec.picture', tab: 'settings.tab.picture', icon: 'monitor', file: 'game',
     fields: [
-      { id: 'output', type: 'select', label: 'settings.output.label', sec: 'fefw', key: 'output', def: 'console',
-        options: [['console', 'settings.output.console'], ['720p', '720p'], ['1080p', '1080p'], ['1440p', '1440p'], ['2160p', '2160p (4K)'],
-          ['2560x1080', 'settings.output.uw2560'], ['3440x1440', 'settings.output.uw3440'], ['5120x1440', 'settings.output.uw5120'],
-          ['window', 'settings.output.window']],
+      // Low / Medium / High / Ultra: render scale, shadow map size and quality together (PRESETS below). Not a key of its own: it shows the preset
+      // those three hold, Custom when they hold anything else, as the F1 menu and Recomp Options do (games/ObeliskChamber/ObeliskChamber_presets.h).
+      { id: 'preset', type: 'preset', label: 'settings.preset.label', hint: 'settings.preset.hint' },
+      // grouped by shape ('--' starts a group): an ultrawide monitor needs a 21:9 or 32:9 size here, not a wide window
+      { id: 'output', type: 'select', label: 'settings.output.label', sec: 'fefw', key: 'output', def: 'console', note: 'output',
+        options: [['--', 'settings.output.group169'], ['720p', '1280 x 720'], ['1080p', '1920 x 1080'], ['1440p', '2560 x 1440'], ['2160p', '3840 x 2160 (4K)'],
+          ['--', 'settings.output.group219'], ['2560x1080', '2560 x 1080'], ['3440x1440', '3440 x 1440'], ['3840x1600', '3840 x 1600'],
+          ['5120x2160', 'settings.output.uw5120x2160'],
+          ['--', 'settings.output.group329'], ['3840x1080', '3840 x 1080'], ['5120x1440', 'settings.output.uw5120'],
+          ['--', 'settings.output.groupOther'], ['console', 'settings.output.console'], ['window', 'settings.output.window']],
         hint: 'settings.output.hint' },
       { id: 'ultrawide', type: 'toggle', label: 'settings.ultrawide.label', sec: 'fefw', key: 'ultrawide', def: 'auto', on: 'auto', off: 'off',
-        onLabel: 'settings.ultrawide.auto', offLabel: 'settings.ultrawide.off', hint: 'settings.ultrawide.hint' },
+        onLabel: 'settings.ultrawide.auto', offLabel: 'settings.ultrawide.off', hint: 'settings.ultrawide.hint', note: 'ultrawide' },
       { id: 'render_ratio', type: 'select', label: 'settings.renderRatio.label', sec: 'fefw', key: 'render_ratio', def: '0',
         options: [['0', 'settings.renderRatio.game'], ['0.5', '50%'], ['0.67', '67%'], ['0.75', '75%'], ['1.0', 'settings.renderRatio.full']],
         hint: 'settings.renderRatio.hint' },
@@ -32,6 +38,11 @@ const SECTIONS = [
           ['0.59', 'settings.srTier.balanced'], ['0.67', 'settings.srTier.quality'], ['0.75', 'settings.srTier.ultraQuality'],
           ['0.85', 'settings.srTier.highQuality'], ['1.0', 'settings.srTier.dlaa']],
         hint: 'settings.srTier.hint' },
+      { id: 'quality', type: 'select', label: 'settings.quality.label', sec: 'fefw', key: 'quality', def: 'console',
+        options: [['console', 'settings.quality.console'], ['docked', 'settings.quality.docked'], ['handheld', 'settings.quality.handheld']] },
+      { id: 'shadow_size', type: 'select', label: 'settings.shadowSize.label', sec: 'fefw', key: 'shadow_size', def: '0',
+        options: [['0', 'settings.shadowSize.game'], ['1024', '1024'], ['1536', '1536'], ['2048', '2048'], ['3072', '3072'], ['4096', '4096'],
+          ['6144', '6144'], ['8192', '8192']] },
       { id: 'upscaler', type: 'select', label: 'settings.upscaler.label', sec: 'dlss', key: 'upscaler', def: 'taau',
         options: [['taau', 'settings.upscaler.taau'], ['dlss', 'settings.upscaler.dlss'], ['fsr3', 'settings.upscaler.fsr3'],
           ['xess', 'settings.upscaler.xess'], ['bilinear', 'settings.upscaler.bilinear'], ['auto', 'settings.upscaler.auto']],
@@ -42,10 +53,6 @@ const SECTIONS = [
         hint: 'settings.dlssDll.hint' },
       { id: 'xess_dll', type: 'path', label: 'settings.xessDll.label', sec: 'upscale', key: 'xess_dll', def: '', placeholder: 'settings.xessDll.placeholder', status: 'xess',
         hint: 'settings.xessDll.hint' },
-      { id: 'quality', type: 'select', label: 'settings.quality.label', sec: 'fefw', key: 'quality', def: 'console',
-        options: [['console', 'settings.quality.console'], ['docked', 'settings.quality.docked']] },
-      { id: 'shadow_size', type: 'select', label: 'settings.shadowSize.label', sec: 'fefw', key: 'shadow_size', def: '0',
-        options: [['0', 'settings.shadowSize.game'], ['2048', '2048'], ['4096', '4096'], ['8192', '8192']] },
       { id: 'texture_detail', type: 'select', label: 'settings.textureDetail.label', sec: 'gfx', key: 'texture_detail', def: 'auto',
         options: [['auto', 'settings.textureDetail.auto'], ['full', 'settings.textureDetail.full'], ['half', 'settings.textureDetail.half']],
         hint: 'settings.textureDetail.hint' },
@@ -153,6 +160,48 @@ const SECTIONS = [
   },
 ];
 
+// The graphics presets: the same table as runtime/games/ObeliskChamber/ObeliskChamber_presets.h (and runtime/docs/CONFIG.md). A preset sets
+// these fields of the Picture tab; render_ratio and sr_tier are one key shown twice, so both move.
+const PRESETS = [
+  ['low', 'settings.preset.low', { render_ratio: '0.5', shadow_size: '1024', quality: 'handheld' }],
+  ['medium', 'settings.preset.medium', { render_ratio: '0', shadow_size: '0', quality: 'console' }],
+  ['high', 'settings.preset.high', { render_ratio: '0.67', shadow_size: '4096', quality: 'docked' }],
+  ['ultra', 'settings.preset.ultra', { render_ratio: '1.0', shadow_size: '8192', quality: 'docked' }],
+];
+const sameNum = (a, b) => Number(a) === Number(b);
+/** The preset the Picture fields hold now ('' = Custom). */
+const presetOf = (m) => {
+  const hit = PRESETS.find(([, , v]) => sameNum(m.render_ratio, v.render_ratio) && sameNum(m.shadow_size, v.shadow_size)
+    && String(m.quality).trim().toLowerCase() === v.quality);
+  return hit ? hit[0] : '';
+};
+
+/** An [fefw] output value as a size (console: the docked 1440p; window: unknown until the game starts). */
+function outputSize(v) {
+  const o = String(v).trim().toLowerCase();
+  const named = { console: [2560, 1440], '720p': [1280, 720], '1080p': [1920, 1080], '1440p': [2560, 1440], '2160p': [3840, 2160], '4k': [3840, 2160] };
+  if (named[o]) return named[o];
+  const m = /^(\d+)\s*x\s*(\d+)$/.exec(o);
+  return m ? [parseInt(m[1], 10), parseInt(m[2], 10)] : null;
+}
+const isWide = (w, h) => w * 9 > h * 16 * 1.01;
+/** A size's shape as the menus name it: 16:9, 16:10, 21:9 (2.2 to 2.5), 32:9 (3.4 and up), else W.WW:1. */
+function shapeOf(w, h) {
+  const a = w / h;
+  if (a > 1.76 && a < 1.8) return '16:9';
+  if (a > 1.58 && a < 1.62) return '16:10';
+  if (a >= 2.2 && a < 2.5) return '21:9';
+  if (a >= 3.4 && a < 3.7) return '32:9';
+  return `${a.toFixed(2)}:1`;
+}
+/** The monitor the launcher is on, in pixels (the game's window usually opens on the same one). */
+function monitorSize() {
+  const r = window.devicePixelRatio || 1;
+  const w = Math.round((window.screen?.width || 0) * r) & ~1;
+  const h = Math.round((window.screen?.height || 0) * r) & ~1;
+  return w > 0 && h > 0 ? [w, h] : null;
+}
+
 // the tab that was open, kept while the launcher runs (the page is rendered anew after a save)
 let openTab = 0;
 
@@ -186,6 +235,7 @@ export async function render(el, ctx) {
     text: (f) => get(f, f.key, f.def),
     number: (f) => String(get(f, f.key, f.def)),
     language: () => getLang(),
+    preset: () => '',   // shown from the fields it sets (presetOf), never stored
   };
   const WRITE = {
     select: (f, x) => [[f.sec, f.key, x]],
@@ -201,6 +251,7 @@ export async function render(el, ctx) {
     text: (f, x) => [[f.sec, f.key, String(x).trim()]],
     number: (f, x) => [[f.sec, f.key, String(clamp(parseInt(x, 10) || 0, f.min, f.max))]],
     language: () => [],
+    preset: () => [],
   };
 
   const all = SECTIONS.flatMap((s) => s.fields.map((f) => ({ ...f, file: s.file })));
@@ -210,14 +261,42 @@ export async function render(el, ctx) {
     model[f.id] = READ[f.type](f);
     orig[f.id] = JSON.stringify(model[f.id]);
   }
-  const dirtyFields = () => all.filter((f) => JSON.stringify(model[f.id]) !== orig[f.id]);
+  const dirtyFields = () => all.filter((f) => f.type !== 'preset' && JSON.stringify(model[f.id]) !== orig[f.id]);
+  const monitor = monitorSize();
 
   // ----- markup -----
   const dis = (f) => (exists[f.file] ? '' : 'disabled');
   const CONTROL = {
+    // ['--', label] starts an option group. The output list also offers the monitor the launcher is on: marked on the entry of its size,
+    // or added to the last group when the list has no such size.
     select: (f, x) => {
-      const opts = f.options.some(([v]) => String(v) === String(x)) ? f.options : [...f.options, [x, x]];
-      return `<select data-f="${f.id}" ${dis(f)}>${opts.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(x) ? 'selected' : ''}>${esc(optName(l))}</option>`).join('')}</select>`;
+      let opts = f.options;
+      const mark = {};
+      if (f.id === 'output' && monitor) {
+        const v = `${monitor[0]}x${monitor[1]}`;
+        const label = t('settings.output.monitor', { size: `${monitor[0]} x ${monitor[1]}`, shape: shapeOf(monitor[0], monitor[1]) });
+        const same = opts.find(([o]) => o !== '--' && String(outputSize(o)) === String(monitor) && o !== 'console');
+        if (same) mark[same[0]] = t('settings.output.thisMonitor');
+        else opts = [...opts, [v, label]];
+      }
+      if (!opts.some(([v]) => v !== '--' && String(v) === String(x))) opts = [...opts, [x, x]];
+      let open = false;
+      const html = opts.map(([v, l]) => {
+        if (v === '--') {
+          const start = `${open ? '</optgroup>' : ''}<optgroup label="${esc(optName(l))}">`;
+          open = true;
+          return start;
+        }
+        const name = optName(l) + (mark[v] ? ` \u2014 ${mark[v]}` : '');
+        return `<option value="${esc(v)}" ${String(v) === String(x) ? 'selected' : ''}>${esc(name)}</option>`;
+      }).join('') + (open ? '</optgroup>' : '');
+      return `<select data-f="${f.id}" ${dis(f)}>${html}</select>`;
+    },
+    preset: (f) => {
+      const cur = presetOf(model);
+      const opts = PRESETS.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${esc(t(l))}</option>`).join('');
+      const custom = cur ? '' : `<option value="" selected disabled>${esc(t('settings.preset.custom'))}</option>`;
+      return `<select data-f="${f.id}" ${dis(f)}>${custom}${opts}</select>`;
     },
     rate: (f, x) => CONTROL.select(f, x),
     toggle: (f, x) => `<label class="switch"><input type="checkbox" data-f="${f.id}" ${x ? 'checked' : ''} ${dis(f)}>${esc(t(x ? f.onLabel || 'common.on' : f.offLabel || 'common.off'))}</label>`,
@@ -233,10 +312,41 @@ export async function render(el, ctx) {
   // One tab per section, as the game's Settings; the open one survives a redraw.
   let tab = Math.min(openTab, SECTIONS.length - 1);
   const step = (dir) => `<button class="step" tabindex="-1" data-step="${dir}" aria-hidden="true">${dir < 0 ? '\u00AB' : '\u00BB'}</button>`;
-  const stepped = (f) => ['select', 'rate', 'toggle', 'language'].includes(f.type);
+  const stepped = (f) => ['select', 'rate', 'toggle', 'language', 'preset'].includes(f.type);
+
+  // A line under a field that says what the chosen values mean together (warn: shown as a warning).
+  const NOTES = {
+    output: () => {
+      const v = String(model.output).trim().toLowerCase();
+      if (v === 'window') return { text: t('settings.note.window') };
+      const size = outputSize(v);
+      if (!size) return null;
+      const [w, h] = size;
+      const shape = shapeOf(w, h);
+      if (isWide(w, h)) {
+        if (!model.ultrawide) return { text: t('settings.note.wideOff', { shape }), warn: true };
+        const drawn = w > 3840 || h > 2160 ? Math.min(3840 / w, 2160 / h) : 1;
+        const at = drawn < 1 ? t('settings.note.drawnAt', { size: `${Math.round(w * drawn / 2) * 2} x ${Math.round(h * drawn / 2) * 2}` }) : '';
+        return { text: `${t('settings.note.wideOn', { shape })}${at}` };
+      }
+      if (monitor && isWide(monitor[0], monitor[1]))
+        return { text: t('settings.note.monitorWide', { size: `${monitor[0]} x ${monitor[1]}`, shape: shapeOf(monitor[0], monitor[1]) }), warn: true };
+      return null;
+    },
+    ultrawide: () => {
+      const size = outputSize(model.output);
+      if (model.ultrawide || !size || !isWide(size[0], size[1])) return null;
+      return { text: t('settings.note.wideOff', { shape: shapeOf(size[0], size[1]) }), warn: true };
+    },
+  };
+  const noteHtml = (f) => {
+    const n = f.note && NOTES[f.note] ? NOTES[f.note]() : null;
+    // shown under the name as the file checks are (data-status); a warning in the warning colour
+    return n ? `<span class="hint" data-status="note-${f.id}">${n.warn ? `<span class="status-warn">${esc(n.text)}</span>` : esc(n.text)}</span>` : '';
+  };
   const fieldHtml = (f) => `
     <div class="field" data-help="${esc(f.hint ? t(f.hint) : '')}">
-      <label class="name">${esc(t(f.label))}${f.hint ? `<span class="hint">${esc(t(f.hint))}</span>` : ''}${f.status ? `<span class="hint" data-status="${f.status}">${esc(t('settings.files.checking'))}</span>` : ''}</label>
+      <label class="name">${esc(t(f.label))}${f.hint ? `<span class="hint">${esc(t(f.hint))}</span>` : ''}${noteHtml(f)}${f.status ? `<span class="hint" data-status="${f.status}">${esc(t('settings.files.checking'))}</span>` : ''}</label>
       <div class="control">${stepped(f) ? step(-1) : ''}${CONTROL[f.type](f, model[f.id])}${stepped(f) ? step(1) : ''}</div>
     </div>`;
 
@@ -286,6 +396,8 @@ export async function render(el, ctx) {
       } else if (f.type === 'toggle') {
         const c = el.querySelector(`[data-f="${f.id}"]`);
         if (c) c.checked = !!x;
+      } else if (f.type === 'preset') {
+        // drawn from the fields it sets
       } else {
         const c = el.querySelector(`[data-f="${f.id}"]`);
         if (c) c.value = x;
@@ -369,6 +481,19 @@ export async function render(el, ctx) {
           liveLang(v);
           return;
         }
+        if (f.type === 'preset') {
+          const p = PRESETS.find(([id]) => id === v);
+          if (p) {
+            model.render_ratio = model.sr_tier = p[2].render_ratio;
+            model.shadow_size = p[2].shadow_size;
+            model.quality = p[2].quality;
+          }
+          draw();
+          return;
+        }
+        // Render scale and Upscaling tier are one key ([fefw] render_ratio): moving one moves the other
+        if (f.id === 'render_ratio') model.sr_tier = model.render_ratio;
+        if (f.id === 'sr_tier') model.render_ratio = model.sr_tier;
         if (f.type === 'range') {
           el.querySelector(`[data-readout="${f.id}"]`).textContent = `${model[f.id]}${optName(f.unit || '%')}`;
           updateBar();
@@ -413,7 +538,9 @@ export async function render(el, ctx) {
         if (!input || input.disabled) return;
         if (input.tagName === 'SELECT') {
           const n = input.options.length;
-          input.selectedIndex = (input.selectedIndex + Number(b.dataset.step) + n) % n;
+          let i = input.selectedIndex;
+          do i = (i + Number(b.dataset.step) + n) % n; while (input.options[i].disabled && i !== input.selectedIndex);
+          input.selectedIndex = i;
           input.dispatchEvent(new Event('change', { bubbles: true }));
         } else {
           input.click();
