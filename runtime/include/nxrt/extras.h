@@ -13,6 +13,7 @@
 //             camera matrices and the game's own projection jitter (src/gfx/extras/temporal.h, docs/S14.md). XeSS through libxess.dll (temporal_xess.cpp).
 //   Latency   NVIDIA Reflex (VK_NV_low_latency2) and AMD Anti-Lag 2 (VK_AMD_anti_lag) markers and sleeps around input sampling.
 #pragma once
+#include <cctype>
 #include <cstdint>
 #include <string>
 
@@ -100,8 +101,28 @@ UpscaleMode upscale_mode();
 float upscale_sharpness();
 int dlss_preset();                 // the DLSS model preset in use (0 = default): a game's own choice ([dlss] preset, set_dlss_preset_override) or [upscale] dlss_preset
 void set_dlss_preset_override(int preset);   // -1: none
-int dlss_preset_from_word(const std::string& w);   // "default", "e" .. "m"; -1 when unknown
-const char* dlss_preset_word(int preset);
+// The presets a current DLSS library still has: E and F (the older convolutional models, the lightest), J and K (transformer), L and M
+// (second transformer generation). The other letters fall back to the default inside DLSS. Inline: the launcher's settings code
+// (play_config.cpp, linked into mpr_launcher without the graphics library) uses them too.
+inline int dlss_preset_from_word(const std::string& w) {   // "default", "e" .. "m"; -1 when unknown
+    if (w.empty() || w == "default" || w == "auto" || w == "0") return 0;
+    if (w.size() == 1) {
+        const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(w[0])));
+        if (c == 'e' || c == 'f' || (c >= 'j' && c <= 'm')) return c - 'a' + 1;
+    }
+    return -1;
+}
+inline const char* dlss_preset_word(int preset) {
+    switch (preset) {
+        case 5: return "e";
+        case 6: return "f";
+        case 10: return "j";
+        case 11: return "k";
+        case 12: return "l";
+        case 13: return "m";
+        default: return "default";
+    }
+}
 int upscale_scene_scale();          // percent, 100 = off (a temporal mode with a quality preset other than Custom: the preset's percent)
 UpscaleQuality upscale_quality();
 bool upscale_temporal();            // the mode is FSR 3, DLSS, DLAA or XeSS
