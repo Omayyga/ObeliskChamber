@@ -51,7 +51,7 @@ bool ensure(Img& i, VkExtent2D e, VkFormat fmt, VkImageUsageFlags usage, const c
     if (i.img.image && i.img.extent.width == e.width && i.img.extent.height == e.height && i.img.format == fmt) return true;
     if (i.img.image) {
         gfx::Image old = i.img;
-        defer_destroy([old]() mutable { device().destroy_image(old); });
+        defer_destroy_vk([old]() mutable { device().destroy_image(old); });
     }
     i = Img();
     gfx::ImageDesc d;

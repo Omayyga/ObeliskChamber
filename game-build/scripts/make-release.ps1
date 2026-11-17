@@ -78,6 +78,29 @@ if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_ASTC
 if (Select-String -Path (Join-Path $RtDir 'fefw_rt.dll') -SimpleMatch 'NXRT_DAV1D_ASM=OFF' -Quiet) {
     throw "fefw_rt.dll was built without dav1d's assembly (NXRT_DAV1D_ASM=OFF): install NASM 2.14+ and reconfigure with -DNXRT_DAV1D_ASM=ON"
 }
+# The runtime profile the DLL was built with (CMake writes rt_profile.txt next to it) against the source it was trained on (its stamp,
+# tools/perf/pgo_stamp.py): a profile from older runtime code still helps the functions that did not change, so this only warns.
+$rtProfile = Join-Path $RtDir 'rt_profile.txt'
+if (-not (Test-Path $rtProfile)) {
+    Write-Warning "fefw_rt.dll was built without a runtime profile (docs/PGO.md, 'A release runtime')"
+} else {
+    $prof = (Get-Content $rtProfile -TotalCount 1).Trim()
+    $stampFile = "$prof.stamp.txt"
+    if (-not (Test-Path $stampFile)) {
+        Write-Warning "the runtime profile $prof has no stamp: run python tools\perf\pgo_stamp.py `"$prof`" after recording, so its age can be checked"
+    } else {
+        $stamp = @{}
+        foreach ($line in Get-Content $stampFile) { if ($line -match '^(\w+)=(.*)$') { $stamp[$Matches[1]] = $Matches[2] } }
+        $now = (git -C $root rev-parse HEAD:runtime).Trim()
+        if ($stamp['runtime_tree'] -and $stamp['runtime_tree'] -ne $now) {
+            $diff = (git -C $root diff --shortstat $stamp['runtime_tree'] $now) -join ' '
+            Write-Warning "the runtime profile was recorded on older runtime code (commit $($stamp['commit']), $($stamp['written'])); runtime/ has changed since: $diff. Changed functions lose their profile; record it again if much of the render code changed."
+        } else {
+            Write-Host "runtime profile $prof matches the runtime source (recorded $($stamp['written']))"
+        }
+        if ($stamp['dirty'] -eq '1') { Write-Warning "the runtime profile was recorded with uncommitted changes in runtime/" }
+    }
+}
 if ($buildLauncher) {
     # Rust keeps source paths for panic messages: map the user profile (cargo registry, rustup) and the checkout to neutral names
     $env:RUSTFLAGS = "--remap-path-prefix=$($env:USERPROFILE)=~ --remap-path-prefix=$root=."

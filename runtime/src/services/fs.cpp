@@ -886,6 +886,19 @@ void fs_reset() {
 
 void set_save_path_hook(SavePathHook hook) { g_save_path_hook.store(hook); }
 
+bool read_romfs_file(const std::string& path, std::vector<uint8_t>& out, uint64_t max_bytes) {
+    out.clear();
+    const std::shared_ptr<fs::RomfsImage> img = rom_image();
+    uint64_t off = 0, size = 0;
+    if (!img || !img->file_extent(path, &off, &size) || size > max_bytes) return false;
+    out.resize(static_cast<size_t>(size));
+    if (size && !img->read(off, out.data(), size)) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
 namespace fsapi {
 
 uint32_t ensure_account_save(uint64_t uid_hi, uint64_t uid_lo, bool* created) {

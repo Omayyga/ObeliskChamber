@@ -328,10 +328,7 @@ uint32_t rd32(const std::vector<uint8_t>& b, size_t o) {
     return o + 4 <= b.size() ? static_cast<uint32_t>(b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (static_cast<uint32_t>(b[o + 3]) << 24)) : 0;
 }
 
-bool read_zst(const std::filesystem::path& p, std::vector<uint8_t>& out) {
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    std::vector<uint8_t> comp((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+bool unzst(const std::vector<uint8_t>& comp, std::vector<uint8_t>& out) {
     const unsigned long long n = ZSTD_getFrameContentSize(comp.data(), comp.size());
     if (n == ZSTD_CONTENTSIZE_ERROR || n == ZSTD_CONTENTSIZE_UNKNOWN || n > (64ull << 20)) return false;
     out.resize(static_cast<size_t>(n));
@@ -339,11 +336,21 @@ bool read_zst(const std::filesystem::path& p, std::vector<uint8_t>& out) {
     return !ZSTD_isError(r) && r == n;
 }
 
+bool read_zst(const std::filesystem::path& p, std::vector<uint8_t>& out) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return false;
+    std::vector<uint8_t> comp((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return unzst(comp, out);
+}
+
 // FFNT 4.x: FINF (glyph, width and map pointers), TGLP (cells and the sheet: a BNTX with one BRTI and its BRTD data), CMAP chain.
 bool load_font(Font& f, const std::string& romfs) {
-    std::vector<uint8_t> b;
+    std::vector<uint8_t> b, comp;
     const std::filesystem::path p = std::filesystem::path(romfs) / "Font" / f.file;
-    if (!read_zst(p, b) || b.size() < 0x40 || std::memcmp(b.data(), "FFNT", 4) != 0) {
+    // Through the RomFS image first, so a packed .nup RomFS (and a RomFS mod's font) works; the folder path is the fallback.
+    // (Reading through the image: technique from EmblemWeave's fefw_prompts.cpp.)
+    const bool got = (services::read_romfs_file(std::string("/Font/") + f.file, comp) && unzst(comp, b)) || read_zst(p, b);
+    if (!got || b.size() < 0x40 || std::memcmp(b.data(), "FFNT", 4) != 0) {
         NXLOG_W(kTag, "%s: cannot read the font", p.string().c_str());
         return false;
     }

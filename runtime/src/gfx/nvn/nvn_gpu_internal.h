@@ -104,6 +104,12 @@ uint64_t split_count();   // command buffers handed over early so far
 
 // Destruction: fn runs once every submission made so far (and the one being recorded) has completed.
 void defer_destroy(std::function<void()> fn);
+// The same for a closure that only calls Vulkan / VMA destroy functions (and atomic gauges) on objects nothing else refers to any more: with
+// [nvn] reaper on, it runs on a low-priority thread instead of the render thread. Anything that touches the back end's own tables (texture
+// and pool records, view caches, maps) must use defer_destroy.
+void defer_destroy_vk(std::function<void()> fn);
+// fn (Vulkan / VMA destroy calls only, on objects the GPU is already done with) runs on the reaper with [nvn] reaper on, else here.
+void reap_vk(std::function<void()> fn);
 uint64_t completed_serial();      // cached timeline value; call poll_completed() for a fresh read
 uint64_t poll_completed();
 uint64_t current_serial();        // the serial of the submission being recorded (or the last one)

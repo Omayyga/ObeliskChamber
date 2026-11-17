@@ -140,6 +140,9 @@ lifted game code on the players' side is unchanged (Set up compiles it with the 
 1. Record the runtime's profile with the developer build, as in "The runtime" above, but **without** `/clang:-march=native` in either step.
    Play broadly: several chapters, battles, menus, cutscenes, a save and a load. Merge the runs into one `rt.profdata`. A profile from the
    developer build fits the DLL: it is the same runtime source with the same flags (only `fefw_main.cpp` differs, by `FEFW_RT_DLL`).
+   Then stamp it, from the same checkout: `python tools\perf\pgo_stamp.py C:\pgo\rt.profdata` writes `rt.profdata.stamp.txt` with
+   the git tree of `runtime/` it was trained on. `make-release.ps1` compares it with the source it packs and warns when the runtime has
+   changed since (with how much), or when the profile has no stamp.
 2. Build the DLL with it, in its own build folder:
    ```
    set NX_RT_FLAGS=-fprofile-instr-use=C:\pgo\rt.profdata -flto=thin

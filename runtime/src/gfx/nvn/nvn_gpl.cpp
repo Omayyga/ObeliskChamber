@@ -995,7 +995,7 @@ void gpl_take_upgrade(VkPipeline& current, VkPipeline& alt, std::shared_ptr<Pipe
         } else {
             const VkPipeline old = current;
             current = fresh;
-            defer_destroy([old] { vkDestroyPipeline(vkdev(), old, nullptr); });      // the frame being recorded may have bound it
+            defer_destroy_vk([old] { vkDestroyPipeline(vkdev(), old, nullptr); });      // the frame being recorded may have bound it
         }
         std::lock_guard<std::mutex> lk(g_mu);
         ++g_stats.upgrades_taken;

@@ -1063,13 +1063,13 @@ void drop_work(Work& w) {
     State& s = S();
     if (w.staged) {
         gfx::Buffer b = w.staged;
-        defer_destroy([b]() mutable { device().destroy_buffer(b); });   // commands recorded earlier may still read it
+        defer_destroy_vk([b]() mutable { device().destroy_buffer(b); });   // commands recorded earlier may still read it
         w.staged = gfx::Buffer{};
     }
     if (w.rb) {
         gfx::Buffer b = w.rb;
         s.readback_bytes.fetch_sub(b.size);
-        defer_destroy([b]() mutable { device().destroy_buffer(b); });
+        defer_destroy_vk([b]() mutable { device().destroy_buffer(b); });
         w.rb = gfx::Buffer{};
     }
 }
@@ -1103,7 +1103,7 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
     const bool last = end == w.j.rg.size();
     const std::vector<Chunk> chunks = plan_chunks(j);
     const gfx::Buffer before = s.sc.buf;
-    if (!scratch_fit(s.sc, chunks, [](gfx::Buffer old) { defer_destroy([old]() mutable { device().destroy_buffer(old); }); })) {
+    if (!scratch_fit(s.sc, chunks, [](gfx::Buffer old) { defer_destroy_vk([old]() mutable { device().destroy_buffer(old); }); })) {
         update_work();
         return Pass::Failed;
     }
@@ -1352,7 +1352,7 @@ void astc_gpu_pump(Frame& f) {
     }
     if (s.q.empty() && s.sc.buf && now - s.sc_used_at > kScratchIdlePresents) {
         gfx::Buffer old = s.sc.buf;
-        defer_destroy([old]() mutable { device().destroy_buffer(old); });
+        defer_destroy_vk([old]() mutable { device().destroy_buffer(old); });
         s.sc = Scratch();
         ++s.sc_gen;
         log_stats(true);

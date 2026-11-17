@@ -125,6 +125,9 @@ uint64_t language_code_u64(Language l);  // the same string as the little-endian
 // use) and the folder save data lives in ([fs] save_dir, default %APPDATA%\<game save folder>\save, nxrt/game.h).
 std::string romfs_dir();
 std::string save_dir();
+// A file of the game's RomFS as the game sees it (a packed .nup or a folder, with RomFS mods and code mods' edits applied), by its path in
+// the image ("/Font/x.bffnt.zst", case sensitive). False when it is not there, is larger than max_bytes or cannot be read.
+bool read_romfs_file(const std::string& path, std::vector<uint8_t>& out, uint64_t max_bytes = 64ull << 20);
 
 // The mods folder ([fs] mods) as a list, for a mod menu: every mod found (a folder holding romfs/ or exefs/), with the switches of its
 // mod.ini (romfs = on|off, exefs = on|off; missing = on). A part that is off is left out of the run as if it were not there: RomFS

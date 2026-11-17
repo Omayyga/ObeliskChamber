@@ -102,7 +102,84 @@ struct GpuStats {
 struct Deferred {
     uint64_t serial;
     std::function<void()> fn;
+    bool reap = false;   // defer_destroy_vk: may run on the reaper thread
 };
+
+// [nvn] reaper (default true): deferred destruction made through defer_destroy_vk (images, image and buffer views, buffers, pipelines) runs on
+// a low-priority thread instead of the render thread. On NVIDIA's Windows driver vmaDestroyImage and vkFreeMemory are kernel calls of a
+// millisecond or more, and a camera turn or an area arrival retires many textures at once (ProjectReLink 3168901 / 5224e82 measured
+// frames over 25 ms 59.5 -> 47.0 with the same change). The objects are already past their last submission, as before; only the thread
+// that destroys them changes. false: everything runs in retire() on the render thread, as before.
+bool reaper_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "reaper", true);
+    return on;
+}
+struct Reaper {
+    std::mutex mu;
+    std::condition_variable cv, idle;
+    std::deque<std::function<void()>> q;
+    bool busy = false, stop = false, started = false;
+    std::thread th;
+};
+Reaper& reaper() {
+    static Reaper* r = new Reaper;   // never destroyed: a joinable thread in a static destructor would end the process
+    return *r;
+}
+void reaper_loop() {
+    log_set_thread_name("nvn-reap");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    Reaper& r = reaper();
+    std::unique_lock<std::mutex> lk(r.mu);
+    for (;;) {
+        r.cv.wait(lk, [&] { return r.stop || !r.q.empty(); });
+        if (r.q.empty()) break;   // stop with nothing left
+        std::deque<std::function<void()>> batch;
+        batch.swap(r.q);
+        r.busy = true;
+        lk.unlock();
+        for (auto& fn : batch) {
+            fn();
+            g_gauge_deferred.sub(1);
+        }
+        lk.lock();
+        r.busy = false;
+        if (r.q.empty()) r.idle.notify_all();
+    }
+    r.busy = false;
+    r.idle.notify_all();
+}
+void reaper_push(std::function<void()> fn) {
+    Reaper& r = reaper();
+    {
+        std::lock_guard<std::mutex> lk(r.mu);
+        if (!r.started) {
+            r.started = true;
+            r.th = std::thread(reaper_loop);
+            NXLOG_I(kTag, "reaper: Vulkan objects past their last submission are destroyed on a low-priority thread ([nvn] reaper)");
+        }
+        r.q.push_back(std::move(fn));
+    }
+    r.cv.notify_one();
+}
+// Blocks until everything handed to the reaper so far has been destroyed (shutdown, device idle paths).
+void reaper_flush() {
+    Reaper& r = reaper();
+    std::unique_lock<std::mutex> lk(r.mu);
+    if (!r.started) return;
+    r.idle.wait(lk, [&] { return r.q.empty() && !r.busy; });
+}
+void reaper_stop() {
+    Reaper& r = reaper();
+    {
+        std::lock_guard<std::mutex> lk(r.mu);
+        if (!r.started || r.stop) return;
+        r.stop = true;
+    }
+    r.cv.notify_all();
+    if (r.th.joinable()) r.th.join();
+    std::lock_guard<std::mutex> lk(r.mu);
+    r.started = r.stop = false;   // a back end installed again later starts a new one
+}
 
 // [nvn] staging_ring_mb (default 256, 0 = off): texture upload data goes into one persistent host-visible buffer used as a ring, released
 // as the submissions that read it complete, instead of a new staging buffer per texture. A first visit uploads hundreds of megabytes to
@@ -174,6 +251,7 @@ struct Gpu {
     // deferred destruction
     std::mutex dmu;
     std::vector<std::function<void()>> pending_destroy;   // from any thread, assigned a serial by the render thread
+    std::vector<std::function<void()>> pending_reap;      // the same, from defer_destroy_vk
     std::deque<Deferred> deferred;                        // render thread
 
     PresentPass present;
@@ -207,21 +285,29 @@ uint64_t read_completed() {
 }
 
 void drain_pending_destroy() {
-    std::vector<std::function<void()>> pend;
+    std::vector<std::function<void()>> pend, reap;
     {
         std::lock_guard<std::mutex> lk(g->dmu);
         pend.swap(g->pending_destroy);
+        reap.swap(g->pending_reap);
     }
     const uint64_t s = g->recording ? g->recording : g->submitted;
-    for (auto& fn : pend) g->deferred.push_back({s, std::move(fn)});
+    for (auto& fn : pend) g->deferred.push_back({s, std::move(fn), false});
+    for (auto& fn : reap) g->deferred.push_back({s, std::move(fn), true});
 }
 
 void retire() {
     drain_pending_destroy();
     const uint64_t done = read_completed();
+    const bool to_reaper = reaper_on();
     while (!g->deferred.empty() && g->deferred.front().serial <= done) {
         auto fn = std::move(g->deferred.front().fn);
+        const bool reap = g->deferred.front().reap;
         g->deferred.pop_front();
+        if (reap && to_reaper) {
+            reaper_push(std::move(fn));   // the reaper takes the gauge down when it has run it
+            continue;
+        }
         g_gauge_deferred.sub(1);
         fn();
     }
@@ -793,6 +879,25 @@ void defer_destroy(std::function<void()> fn) {
     }
     std::lock_guard<std::mutex> lk(g->dmu);
     g->pending_destroy.push_back(std::move(fn));
+    g_gauge_deferred.add(1);
+}
+
+void reap_vk(std::function<void()> fn) {
+    if (!g || !reaper_on()) {
+        fn();
+        return;
+    }
+    g_gauge_deferred.add(1);   // the reaper takes it down when it has run it
+    reaper_push(std::move(fn));
+}
+
+void defer_destroy_vk(std::function<void()> fn) {
+    if (!g) {
+        fn();
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g->dmu);
+    g->pending_reap.push_back(std::move(fn));
     g_gauge_deferred.add(1);
 }
 
@@ -1552,8 +1657,10 @@ void tear_down() {
         }
         wait_serial_blocking(gp->submitted);
         retire();
+        reaper_flush();   // what retire() handed to the reaper is gone before the back end's own teardown
         replay_shutdown();
         tex_shutdown();
+        reaper_flush();   // the textures' images (tex_destroy hands them to the reaper) before the pools' memory goes
         pool_shutdown();
         while (!gp->deferred.empty()) {
             auto fn = std::move(gp->deferred.front().fn);
@@ -1564,6 +1671,8 @@ void tear_down() {
         drain_pending_destroy();
         for (auto& d : gp->deferred) { d.fn(); g_gauge_deferred.sub(1); }
         gp->deferred.clear();
+        reaper_flush();
+        reaper_stop();
         gp->present.shutdown();
         gp->output.shutdown();
     });

@@ -27,7 +27,22 @@ namespace {
 
 const std::string kSpvDirStr = nxtest::project_path("work/shader_cache/spirv");
 const char* kSpvDir = kSpvDirStr.c_str();
-const char* kSpirvVal = "C:\\VulkanSDK\\1.4.363.0\\Bin\\spirv-val.exe";
+// spirv-val of the Vulkan SDK: %VULKAN_SDK%\Bin (set by the SDK installer), else the newest C:\VulkanSDK\<version>\Bin.
+std::string find_spirv_val() {
+    std::error_code ec;
+    if (const char* sdk = std::getenv("VULKAN_SDK"); sdk && *sdk) {
+        const fs::path p = fs::path(sdk) / "Bin" / "spirv-val.exe";
+        if (fs::exists(p, ec)) return p.string();
+    }
+    fs::path best;
+    for (const auto& e : fs::directory_iterator("C:\\VulkanSDK", ec)) {
+        const fs::path p = e.path() / "Bin" / "spirv-val.exe";
+        if (fs::exists(p, ec) && (best.empty() || e.path().filename().string() > best.parent_path().parent_path().filename().string())) best = p;
+    }
+    return best.empty() ? std::string("spirv-val.exe (not found)") : best.string();
+}
+const std::string kSpirvValStr = find_spirv_val();
+const char* kSpirvVal = kSpirvValStr.c_str();
 const char* kVertexHash = "a656883b0cdb8ebc";      // position only, no varyings
 const char* kConstFragHash = "062cfa5657f5388d";   // constant colour fragment shader, no Location 1 output
 
@@ -40,7 +55,7 @@ const char* absent_input() {
     std::error_code ec;
     if (!fs::exists(fs::path(kSpvDir) / (std::string(kVertexHash) + ".spv"), ec))
         return "shader cache absent (a656883b0cdb8ebc.spv not under work/shader_cache/spirv)";
-    if (!fs::exists(kSpirvVal, ec)) return "spirv-val not found at C:\\VulkanSDK\\1.4.363.0\\Bin";
+    if (!fs::exists(kSpirvVal, ec)) return "spirv-val not found (VULKAN_SDK\\Bin or C:\\VulkanSDK\\<version>\\Bin)";
     return nullptr;
 }
 
@@ -68,7 +83,10 @@ bool write_words(const std::string& path, const std::vector<uint32_t>& w) {
 int run_spirv_val(const std::vector<uint32_t>& w, const std::string& tag, std::string& log) {
     const std::string spv = tag + ".spv", txt = tag + ".log";
     if (!write_words(spv, w)) return -1;
-    const std::string cmd = std::string(kSpirvVal) + " --target-env vulkan1.3 " + spv + " > " + txt + " 2>&1";
+    // a path with spaces is quoted, and the whole line again: cmd /c drops the outer pair of quotes
+    const std::string exe = kSpirvValStr.find(' ') == std::string::npos ? kSpirvValStr : "\"" + kSpirvValStr + "\"";
+    std::string cmd = exe + " --target-env vulkan1.3 " + spv + " > " + txt + " 2>&1";
+    if (exe[0] == '"') cmd = "\"" + cmd + "\"";
     const int rc = std::system(cmd.c_str());
     std::ifstream f(txt);
     std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -581,4 +599,52 @@ NXTEST(predict_int_fetches_retypes_the_light_grid) {
     REQUIRE(load_hash(kConstFragHash, plain));
     CHECK(gpu::spirv_predict_int_fetches(plain).empty());
     CHECK(gpu::spirv_predict_int_fetches(std::vector<uint32_t>{1u, 2u}).empty());
+}
+
+// The compute shader that adds floats to a buffer through the translator's compare-and-swap loop (issue #81 test build, big win #14):
+// the loop's CAS becomes OpAtomicFAddEXT through a float alias of set 1 binding 0, and the module stays valid.
+NXTEST(native_float_add_on_real_compute_shader) {
+    const char* kFloatAddHash = "ef6da91df3826bd7";
+    std::error_code ec;
+    if (!fs::exists(fs::path(kSpvDir) / (std::string(kFloatAddHash) + ".spv"), ec)) {
+        nxtest::skip("ef6da91df3826bd7.spv not under work/shader_cache/spirv");
+        return;
+    }
+    std::vector<uint32_t> in;
+    REQUIRE(load_hash(kFloatAddHash, in));
+    const std::vector<uint32_t> before = in;
+    std::vector<uint32_t> out;
+    CHECK_EQ(gpu::spirv_native_float_add(in, out), 1);
+    CHECK(in == before);
+    int cas = 0, fadd = 0;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16;
+        REQUIRE(len && i + len <= out.size());
+        if ((out[i] & 0xffff) == 230) ++cas;
+        if ((out[i] & 0xffff) == 6035) ++fadd;
+        i += len;
+    }
+    CHECK_EQ(fadd, 1);
+    CHECK_EQ(cas, 0);
+    std::vector<uint32_t> again = {7u};
+    CHECK_EQ(gpu::spirv_native_float_add(out, again), 0);   // nothing left to rewrite: out untouched
+    CHECK_EQ(again.size(), size_t(1));
+    if (!fs::exists(kSpirvVal, ec)) {
+        nxtest::skip("spirv-val not found (VULKAN_SDK\\Bin or C:\\VulkanSDK\\<version>\\Bin)");
+        return;
+    }
+    std::string log;
+    const int rc = run_spirv_val(out, "spirv_patch_fadd", log);
+    CHECK_MSG(rc == 0, "spirv-val exit " + std::to_string(rc) + ": " + log);
+}
+
+NXTEST(native_float_add_ignores_other_modules) {
+    std::vector<uint32_t> out = {7u};
+    CHECK_EQ(gpu::spirv_native_float_add(std::vector<uint32_t>{0x07230203u, 0x10300u, 0, 1, 0}, out), 0);
+    CHECK_EQ(gpu::spirv_native_float_add(std::vector<uint32_t>{1u, 2u}, out), 0);
+    CHECK_EQ(out.size(), size_t(1));
+    if (absent_input()) return;
+    std::vector<uint32_t> vs;
+    REQUIRE(load_hash(kVertexHash, vs));
+    CHECK_EQ(gpu::spirv_native_float_add(vs, out), 0);
 }

@@ -167,28 +167,6 @@ int dlss_preset() {
     return o >= 0 ? o : g_dlss_preset.load(std::memory_order_relaxed);
 }
 void set_dlss_preset_override(int preset) { g_dlss_preset_over.store(preset < 0 ? -1 : preset); }
-// The presets a current DLSS library still has: E and F (the older convolutional models, the lightest), J and K (transformer), L and M
-// (second transformer generation). The other letters fall back to the default inside DLSS.
-int dlss_preset_from_word(const std::string& w) {
-    if (w.empty() || w == "default" || w == "auto" || w == "0") return 0;
-    if (w.size() == 1) {
-        const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(w[0])));
-        if (c == 'e' || c == 'f' || (c >= 'j' && c <= 'm')) return c - 'a' + 1;
-    }
-    return -1;
-}
-const char* dlss_preset_word(int preset) {
-    switch (preset) {
-        case 5: return "e";
-        case 6: return "f";
-        case 10: return "j";
-        case 11: return "k";
-        case 12: return "l";
-        case 13: return "m";
-        default: return "default";
-    }
-}
-
 int upscale_scene_scale() {
     upscale_mode();      // reads the settings once
     if (upscale_mode() == UpscaleMode::Dlaa) return 100;
