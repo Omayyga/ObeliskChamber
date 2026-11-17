@@ -31,6 +31,7 @@ struct OutputParams {
     bool keep_aspect = true;                 // letterbox instead of stretching
     bool flip_y = false;                     // lower-left window origin
     bool src_linear = false;                 // scene-linear float source (HDR scene) rather than sRGB-encoded bytes
+    bool src_pq = false;                     // the source is already HDR10 PQ (the game's own HDR picture, [hdr] mode = native): copied into an HDR10 destination unchanged
     OutputKind out = OutputKind::Sdr8;       // what the destination carries
     float paper_white_nits = 203, peak_nits = 1000;
     bool fsr1 = false;                       // upscale with FSR 1 when the picture is larger than the source

@@ -511,7 +511,8 @@ bool apply_fixed(Sec sec, const std::string& k, const std::string& v, Settings* 
             extras::HdrSettings& h = s->extras.hdr;
             if (k == "mode") {
                 int i = 0;
-                if (!pick_word(k, v, kHdrModeWords, &i, msg)) return false;
+                // "game" (a 0.3.0 test build's word for the game's own HDR picture) is Native now
+                if (!pick_word(k, lower(v) == "game" ? std::string("native") : v, kHdrModeWords, &i, msg)) return false;
                 h.mode = static_cast<extras::HdrMode>(i);
                 return true;
             }

@@ -612,8 +612,8 @@ void hdr_group(Page& p) {
 
     const int mode = static_cast<int>(h.mode);
     const bool mode_open = ImGui::BeginCombo("Mode##hdr_mode", kHdrModeNames[mode]);
-    tip("Off keeps the SDR picture, Auto uses HDR when the display and Windows offer it, On runs the HDR pipeline even without an HDR display. "
-        "Native is On with the levels the game declares for an HDR TV on Switch 2.");
+    tip("Off keeps the SDR picture. Auto and On turn the game's SDR picture into HDR (Auto when the display and Windows offer HDR, On always). "
+        "Native is the game's own HDR picture, as on a Switch 2 with an HDR TV (its Brightness options apply); it needs an HDR10 signal, else it works as On.");
     if (mode_open) {
         for (int i = 0; i < 4; ++i) {
             if (ImGui::Selectable(kHdrModeNames[i], i == mode) && i != mode) {

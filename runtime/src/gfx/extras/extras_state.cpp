@@ -50,7 +50,7 @@ const char* output_kind_name(OutputKind k) {
 Settings settings_from_config() {
     Settings s;
     const std::string hm = lower(config_get_str("hdr", "mode", "auto"));
-    s.hdr.mode = hm == "off" || hm == "0" || hm == "false" ? HdrMode::Off : hm == "on" || hm == "1" || hm == "true" ? HdrMode::On : hm == "native" ? HdrMode::Native : HdrMode::Auto;
+    s.hdr.mode = hm == "off" || hm == "0" || hm == "false" ? HdrMode::Off : hm == "on" || hm == "1" || hm == "true" ? HdrMode::On : hm == "native" || hm == "game" ? HdrMode::Native : HdrMode::Auto;
     const std::string hf = lower(config_get_str("hdr", "format", "auto"));
     s.hdr.format = hf == "hdr10" ? HdrFormat::Hdr10 : hf == "scrgb" ? HdrFormat::ScRgb : HdrFormat::Auto;
     s.hdr.peak_nits = std::clamp(config_get_double("hdr", "peak_nits", 0.0), 0.0, 10000.0);
@@ -220,14 +220,9 @@ void hdr_set_state(const HdrState& s) {
 
 void hdr_refresh_levels() {
     HdrState hs = hdr_state();
-    if (!hs.scene_hdr) return;
+    if (!hs.scene_hdr && !hs.game_pq) return;
     const Settings es = settings();
     hdr_resolve_levels(es.hdr, hs.display_hdr, hs.display_peak_nits, hs.display_sdr_white_nits, &hs.paper_white_nits, &hs.peak_nits);
-    if (es.hdr.mode == HdrMode::Native && es.hdr.paper_white_nits <= 0 && hs.game_standard_nits >= 80.0f) {
-        // the game's SDR-graded range is what a Switch 2 shows at the TV's paper white; [hdr] paper_white_nits, when set, still wins
-        hs.paper_white_nits = std::clamp(hs.game_standard_nits, 80.0f, 500.0f);
-        hs.peak_nits = std::max(hs.peak_nits, hs.paper_white_nits);
-    }
     hs.peak_ratio = hs.output == OutputKind::Sdr8 ? 1.0f : peak_ratio(hs.peak_nits, hs.paper_white_nits, static_cast<float>(es.hdr.highlight_boost));
     hdr_set_state(hs);
 }
@@ -248,8 +243,8 @@ const char* output_space_name(OutputKind k) {
 // After a declaration: levels, a metadata resend, and the one decision line (again only when what it says changes).
 void after_note() {
     hdr_refresh_levels();
-    if (!hdr_mode_native()) return;
     const HdrState hs = hdr_state();
+    if (!hs.game_pq) return;
     char line[512];
     std::snprintf(line, sizeof line,
                   "HDR native: game path on (vi layer luminance standard %.0f, extended %.0f nits; NVN window colour space %d, content max %.0f), "

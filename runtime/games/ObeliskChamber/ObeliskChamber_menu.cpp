@@ -842,7 +842,7 @@ void hdr_group(UiHost& host, Menu& m) {
     extras::HdrSettings& h = m.edit.extras.hdr;
     section("HDR");
     if (begin_rows("hdr")) {
-        row(m, "HDR output", When::Restart, "Off keeps SDR; Auto uses HDR when the display and Windows offer it; On runs the HDR pipeline anyway; Native uses the levels the game declares for an HDR TV.");
+        row(m, "HDR output", When::Restart, "Off keeps SDR; Auto and On turn the game's SDR picture into HDR (Auto when the display and Windows offer it); Native is the game's own HDR picture (HDR10 only).");
         int mode = static_cast<int>(h.mode);
         if (combo(m, "##hm", &mode, kHdrModeNames, 4)) {
             h.mode = static_cast<extras::HdrMode>(mode);

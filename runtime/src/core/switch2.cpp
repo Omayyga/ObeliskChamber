@@ -123,7 +123,7 @@ void vi_get_native_window(::Ctx* c) {
 
 // nn::vi::SetLayerNext{Extended,Standard}ContentLuminanceRangeMetadata(Layer*, uint16_t min, uint16_t max): what the game declares about its
 // picture for an HDR TV (Pokopia: extended 0..400, standard 0..300 nits, from its graphics-system defaults, every time it makes the layer). The
-// values go to the HDR extras ([hdr] mode = native uses them); nn::Result 0.
+// values go to the HDR extras ([hdr] mode = native sends them in the swapchain metadata); nn::Result 0.
 void vi_layer_extended_luminance(::Ctx* c) {
     extras::hdr_note_layer_luminance(true, static_cast<uint16_t>(c->x[1]), static_cast<uint16_t>(c->x[2]));
     c->x[0] = 0;
@@ -180,10 +180,32 @@ void vi_query_buffer_max_resolution(::Ctx* c) {
 // update at main 0x826C04) takes its nits from the paper white when the format is 1, but asks for the paper white only with HDR on, so
 // they came out 0 (main+0x21A75C0..CC): NaN in its push constants (+0x40), a NaN bloom threshold and a black picture. With format 0 it
 // keeps its 300-nit SDR base (225/300/400/300), as under Eden; the peak is stored but not read then.
+//
+// [hdr] mode = native with an HDR10 swapchain: HDR on, format 1 (PQ), peak = the [hdr] peak. The game then asks for the paper white
+// (vi_query_hdr_paper_white below), renders PQ BT.2020 itself and the present copies it unchanged. hdr_state().game_pq is set when the
+// output is decided, before the game asks (the swapchain clears it if it is not HDR10, so a later ask answers SDR again).
+uint16_t nits_u16(float v) { return static_cast<uint16_t>(v < 1.0f ? 1.0f : v > 10000.0f ? 10000.0f : v + 0.5f); }
+
 void vi_query_hdr_status_sdr(::Ctx* c) {
-    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = 0;
-    if (c->x[1]) *reinterpret_cast<uint32_t*>(c->x[1]) = 0;
-    if (c->x[2]) *reinterpret_cast<uint16_t*>(c->x[2]) = 400;
+    const extras::HdrState hs = extras::hdr_state();
+    const bool hdr = hs.game_pq;
+    const uint16_t peak = hdr ? nits_u16(hs.peak_nits) : 400;
+    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = hdr ? 1 : 0;
+    if (c->x[1]) *reinterpret_cast<uint32_t*>(c->x[1]) = hdr ? 1 : 0;
+    if (c->x[2]) *reinterpret_cast<uint16_t*>(c->x[2]) = peak;
+    static std::atomic<int> logged{-1};
+    if (logged.exchange(hdr ? 1 : 0) != (hdr ? 1 : 0))
+        NXLOG_I("switch2", "nn::vi::QueryDisplayHdrStatus -> %s, peak %u nits", hdr ? "HDR on, format 1 (the game's own PQ picture)" : "HDR off, format 0", peak);
+    c->x[0] = 0;
+}
+
+// nn::vi::QueryDisplayHdrPaperWhite(uint16_t* nits, const Display*): the [hdr] paper white (the game asks only after HDR on). Never 0:
+// a 0 paper white is the NaN and black picture described above.
+void vi_query_hdr_paper_white(::Ctx* c) {
+    const uint16_t pw = nits_u16(extras::hdr_state().paper_white_nits);
+    if (c->x[0]) *reinterpret_cast<uint16_t*>(c->x[0]) = pw;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) NXLOG_I("switch2", "nn::vi::QueryDisplayHdrPaperWhite -> %u nits", pw);
     c->x[0] = 0;
 }
 
@@ -229,6 +251,9 @@ void install_switch2_hle() {
         const char* sym = "_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE";
         hle_register(sym, vi_query_hdr_status_sdr);
         module_override_symbol(sym);
+        const char* pw = "_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE";
+        hle_register(pw, vi_query_hdr_paper_white);
+        module_override_symbol(pw);
     }
     if (!media::video_codec_enabled() && !media::movie_decoder_enabled()) {
         const bool at_open = game::info().movie_fail_at_open;

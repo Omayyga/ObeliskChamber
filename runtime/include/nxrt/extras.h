@@ -20,8 +20,11 @@
 namespace nxrt::extras {
 
 // ---- settings --------------------------------------------------------------------------------------------------------------------
-// Auto: HDR when the display offers it. On: the HDR scene pipeline even without an HDR display. Native: as On, and the levels follow what the game
-// declares for an HDR TV on Switch 2 (nn::vi layer content luminance ranges, NVN2 window colour space and HDR metadata); see docs/S14.md.
+// Auto: HDR when the display offers it. On: the HDR scene pipeline even without an HDR display (the runtime expands the game's SDR picture).
+// Native: the game's own HDR picture, as on a Switch 2 with an HDR TV: with an HDR10 swapchain the display is reported to the game as HDR
+// (nn::vi::QueryDisplayHdrStatus, QueryDisplayHdrPaperWhite), the game renders PQ-encoded BT.2020 and the present passes it through unchanged
+// (no HDR scene pipeline, no tone-map patch); the swapchain metadata carries the levels the game declares. Without HDR10 it behaves like On.
+// (Before 0.3.0 Native was the HDR scene pipeline with the game's declared levels; "game" is read as Native too.)
 enum class HdrMode : uint8_t { Off = 0, Auto, On, Native };
 enum class HdrFormat : uint8_t { Auto = 0, Hdr10, ScRgb };     // swapchain flavour (Auto: HDR10 when offered, else scRGB)
 
@@ -150,13 +153,14 @@ struct HdrState {
     bool display_hdr = false;        // Windows reports HDR on for the monitor (informational)
     float display_peak_nits = 0;
     float display_sdr_white_nits = 80;
-    // What the game declares about its own output (0 / -1: not declared). Used by HdrMode::Native.
+    // What the game declares about its own output (0 / -1: not declared). Used by HdrMode::Native (the swapchain metadata).
     float game_standard_nits = 0;    // nn::vi::SetLayerNextHdrStandardContentLuminanceRangeMetadata: the SDR-graded (paper white) range's maximum
     float game_extended_nits = 0;    // nn::vi::SetLayerNextHdrExtendedContentLuminanceRangeMetadata: the content's highlight maximum
     int game_color_space = -1;       // nvnWindowBuilderSetColorSpace value (NVN2 enum, raw)
     float game_max_cll = 0, game_max_fall = 0;   // nvnWindow(Builder)SetHdrContentMetadata
     float game_display_max_nits = 0; // nvnWindow(Builder)SetHdrDisplayMetadata maximum luminance
     uint32_t metadata_serial = 0;    // bumped whenever the swapchain's HDR metadata should be sent again
+    bool game_pq = false;            // HdrMode::Native with an HDR10 swapchain: the game renders PQ itself, the present passes it through
 };
 // Readable from any thread (a copy of a snapshot behind a lock-free sequence).
 HdrState hdr_state();
@@ -167,11 +171,13 @@ inline bool hdr_scene_active() { return hdr_state().scene_hdr; }
 // The swapchain's output kind and scene_hdr never change here (they are decided when the renderer is created).
 void hdr_refresh_levels();
 
-// The game's declarations (HdrMode::Native). Thread-safe; each call refreshes the levels and the swapchain metadata, and logs the native decision once.
+// The game's declarations (HdrMode::Native). Thread-safe; each call refreshes the swapchain metadata and logs the native decision once.
 void hdr_note_layer_luminance(bool extended, unsigned min_nits, unsigned max_nits);
 // color_space: the NVN2 value (-1 = not set); display: 10 floats (red, green, blue, white x/y, max, min luminance) or null; content: max CLL, max FALL or null.
 void hdr_note_window_hdr(int color_space, const float* display, const float* content);
 bool hdr_mode_native();
+// HdrMode::Native is in effect: an HDR10 swapchain, and the game is told the display is HDR (core/switch2.cpp).
+inline bool hdr_game_pq() { const HdrState s = hdr_state(); return s.game_pq && s.output == OutputKind::Hdr10; }
 
 // Resolves the numbers the settings leave at 0 ("auto") against what the display reports.
 void hdr_resolve_levels(const HdrSettings& s, bool display_hdr, float display_peak_nits, float display_sdr_white_nits, float* paper, float* peak);
