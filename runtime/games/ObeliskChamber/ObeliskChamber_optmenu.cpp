@@ -271,6 +271,7 @@ void smooth_after() {
     const std::string v = norm(ini("fefw", "smooth_step", "auto"));
     play_set_smooth(v == "1" ? 1 : v == "0" ? 0 : -1);
 }
+void upscaler_after() { nxrt::nvn::backend_set_upscaler(ini("dlss", "upscaler", "taau").c_str()); }
 void preset_after() { nxrt::extras::set_dlss_preset_override(std::max(0, nxrt::extras::dlss_preset_from_word(lower(ini("dlss", "preset", "default"))))); }
 void rate_after() { nxrt::nvn::backend_set_shading_rate(lower(ini("nvn", "shading_rate", "off")).c_str()); }
 // Output Size: the shared list (ObeliskChamber_presets.h kOutputChoices), then "Monitor WxH" (the display the window is on) when known.
@@ -436,8 +437,8 @@ const Row kRows[] = {
             kShadowNames, kShadowVals, rebuild_after),
     INI_ROW(kPageGraphics, "Quality", "Docked: the docked shadows and effects always. Handheld: the lighter handheld ones, for frame rate. Applies with two short pauses.", "fefw", "quality", "console",
             kQualityNames, kQualityVals, rebuild_after),
-    INI_ROW(kPageGraphics, "Upscaler", "What fills the picture from the render size. One that cannot run falls back to TAAU. Applies on restart.", "dlss",
-            "upscaler", "taau", kUpscalerNames, kUpscalerVals, nullptr),
+    INI_ROW(kPageGraphics, "Upscaler", "Applies at once. DLSS and XeSS only when the game started with them; otherwise TAAU until the next start.", "dlss",
+            "upscaler", "taau", kUpscalerNames, kUpscalerVals, upscaler_after),
     INI_ROW(kPageGraphics, "DLSS Model", "K, J, L and M are the transformer models. E and F are older and lighter. Used with DLSS.", "dlss", "preset", "default",
             kPresetNames, kPresetVals, preset_after),
     INI_ROW(kPageGraphics, "Scene Shading Rate", "Shades 3D surfaces once per 2 or 4 pixels. Edges and the UI stay sharp.", "nvn", "shading_rate", "off",
@@ -464,7 +465,7 @@ const Row kRows[] = {
     FN_ROW(kPageAudio, "Master Volume", "Everything the game plays. Above 100% is a boost with a limiter.", volume_count, volume_get, volume_set, volume_name),
     FN_ROW(kPageAudio, "Mute in Background", "Silent while the window is not in focus.", two, [] { return settings().audio.mute_unfocused ? 1 : 0; },
            [](int i) { edit([i](play::Settings& s) { s.audio.mute_unfocused = i == 1; }); }, onoff),
-    FN_ROW(kPageAudio, "Output Device", "The game opens its audio device once. Applies on restart.", device_count, device_get,
+    FN_ROW(kPageAudio, "Output Device", "Where the sound plays. A change opens the new device within a second.", device_count, device_get,
            [](int i) { edit([i](play::Settings& s) { s.audio.device = i == 0 ? std::string("default") : devices()[static_cast<size_t>(i - 1)]; }); },
            device_name),
     FN_ROW(kPageAudio, "Speakers", "Stereo, or 5.1 surround for a receiver or surround headset. Applies on restart.", two,
