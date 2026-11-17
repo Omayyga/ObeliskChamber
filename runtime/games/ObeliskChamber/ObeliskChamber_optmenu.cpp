@@ -229,6 +229,12 @@ constexpr const char* kWideNames[] = {"Auto", "Off"};
 constexpr const char* kWideVals[] = {"auto", "off"};
 constexpr const char* kRatioNames[] = {"Game default", "33%", "50%", "59%", "67%", "75%", "85%", "100%"};
 constexpr const char* kRatioVals[] = {"0", "0.33", "0.5", "0.59", "0.67", "0.75", "0.85", "1.0"};
+constexpr const char* kReflNames[] = {"Full", "Reduced", "Off"};
+constexpr const char* kReflVals[] = {"full", "reduced", "off"};
+constexpr const char* kOnOffAoNames[] = {"On", "Off"};
+constexpr const char* kOnOffAoVals[] = {"1", "0"};
+constexpr const char* kDetailNames[] = {"Full", "Reduced"};
+constexpr const char* kDetailVals[] = {"full", "reduced"};
 constexpr const char* kOffOnNames[] = {"Off", "On"};
 constexpr const char* kOffOnVals[] = {"0", "1"};
 constexpr const char* kTargetNames[] = {"Paused", "60 fps", "72 fps", "80 fps", "90 fps", "100 fps", "110 fps", "120 fps", "144 fps"};
@@ -313,10 +319,9 @@ int preset_count() { return kGraphicsPresetCount; }
 int preset_get() { return graphics_preset_current(); }
 void preset_set(int i) {
     const GraphicsPreset& p = kGraphicsPresets[std::clamp(i, 0, kGraphicsPresetCount - 1)];
-    ini_write("fefw", "render_ratio", p.render_ratio);
-    ini_write("fefw", "shadow_size", p.shadow_size);
-    ini_write("fefw", "quality", p.quality);
-    NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s", p.name, p.render_ratio, p.shadow_size, p.quality);
+    for (int k = 0; k < 7; ++k) ini_write("fefw", kPresetKeys[k], preset_value(p, k));
+    NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s, reflections %s, ambient_occlusion %s, crowd_detail %s, scenery_detail %s", p.name,
+                p.render_ratio, p.shadow_size, p.quality, p.reflections, p.ambient_occlusion, p.crowd_detail, p.scenery_detail);
     rebuild_after();     // one live rebuild for all three
 }
 void preset_name(int i, char* out, size_t n) { std::snprintf(out, n, "%s", i >= 0 && i < kGraphicsPresetCount ? kGraphicsPresets[i].name : "Custom"); }
@@ -438,6 +443,14 @@ const Row kRows[] = {
             kShadowNames, kShadowVals, rebuild_after),
     INI_ROW(kPageGraphics, "Quality", "Docked: the docked shadows and effects always. Handheld: the lighter handheld ones, for frame rate. Applies with two short pauses.", "fefw", "quality", "console",
             kQualityNames, kQualityVals, rebuild_after),
+    INI_ROW(kPageGraphics, "Reflections", "Reflections on floors and water. Reduced takes 8 rays instead of 32 and helps in the hubs. Applies on restart.", "fefw",
+            "reflections", "full", kReflNames, kReflVals, nullptr),
+    INI_ROW(kPageGraphics, "Ambient Occlusion", "The soft shading in corners. Off saves GPU time everywhere, with flatter lighting. Applies on restart.", "fefw",
+            "ambient_occlusion", "1", kOnOffAoNames, kOnOffAoVals, nullptr),
+    INI_ROW(kPageGraphics, "Crowd Detail", "Reduced: crowds switch to simpler models twice as soon, for busy towns and battles. Applies on restart.", "fefw",
+            "crowd_detail", "full", kDetailNames, kDetailVals, nullptr),
+    INI_ROW(kPageGraphics, "Scenery Detail", "Reduced: scenery switches to simpler versions at 60% of the distance. Applies on restart.", "fefw",
+            "scenery_detail", "full", kDetailNames, kDetailVals, nullptr),
     INI_ROW(kPageGraphics, "Upscaler", "Applies at once. DLSS and XeSS only when the game started with them; otherwise TAAU until the next start.", "dlss",
             "upscaler", "taau", kUpscalerNames, kUpscalerVals, upscaler_after),
     INI_ROW(kPageGraphics, "DLSS Model", "K, J, L and M are the transformer models. E and F are older and lighter. Used with DLSS.", "dlss", "preset", "default",

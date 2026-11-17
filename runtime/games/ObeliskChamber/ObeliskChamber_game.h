@@ -65,6 +65,11 @@ struct FrameFixInfo {
 FrameFixInfo frame_info();
 const char* frame_group_name(int g);
 
+// ObeliskChamber_detail.cpp: [fefw] reflections / ambient_occlusion / crowd_detail / scenery_detail, edits of the game's graphics settings
+// files as the RomFS is set up (play mode install, before the game starts; applies at the next start)
+void detail_install();
+std::string detail_summary();      // "" when nothing is changed
+
 // ObeliskChamber_menu.cpp: the F1 menu (GamePlay::settings_menu)
 void settings_menu(play::UiHost& host, gfx::Overlay& overlay);
 

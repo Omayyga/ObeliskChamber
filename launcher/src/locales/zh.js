@@ -186,7 +186,7 @@ export const zh = {
 
     // 画面
     'settings.preset.label': "画质预设",
-    'settings.preset.hint': "同时设置渲染比例、阴影贴图尺寸与画质。低：50% 渲染、1024 阴影、掌机特效，适合较慢的显卡。中：主机画面（默认值）。高：67% 渲染、4096 阴影、底座特效。极高：原生渲染（DLAA）、8192 阴影、底座特效，约多占 1.3 GB 显存。之后单独修改其中一项会显示为“自定义”。不会改动输出分辨率与超分方式。游戏内的 Recomp Options 与 F1 菜单中有相同的预设。",
+    'settings.preset.hint': "同时设置渲染比例、阴影贴图尺寸、画质与四项细节设置。低：50% 渲染、1024 阴影、掌机特效、降低反射、关闭环境光遮蔽、简化人群与场景，适合较慢的显卡（细节设置在下次启动时生效）。中：主机画面（默认值）。高：67% 渲染、4096 阴影、底座特效。极高：原生渲染（DLAA）、8192 阴影、底座特效，约多占 1.3 GB 显存。之后单独修改其中任何一项会显示为“自定义”。不会改动输出分辨率与超分方式。游戏内的 Recomp Options 与 F1 菜单中有相同的预设。",
     'settings.preset.low': "低",
     'settings.preset.medium': "中（主机）",
     'settings.preset.high': "高",
@@ -246,6 +246,19 @@ export const zh = {
     'settings.quality.docked': '始终使用底座画质',
     'settings.quality.handheld': "始终使用掌机画质（更轻）",
     'settings.shadowSize.label': '阴影贴图尺寸',
+    'settings.reflections.label': "反射",
+    'settings.reflections.reduced': "降低（8 条光线，略有颗粒感）",
+    'settings.reflections.hint': "地面和水面的屏幕空间反射。降低时使用 8 条光线代替 32 条，主要在据点中提升帧率。下次启动时生效。",
+    'settings.ao.label': "环境光遮蔽",
+    'settings.ao.hint': "角落中的柔和阴影。关闭后在所有场景中节省 GPU 时间，光照会显得更平。下次启动时生效。",
+    'settings.crowdDetail.label': "人群细节",
+    'settings.crowdDetail.hint': "降低：人群角色提前一倍切换为简化模型，减轻热闹城镇和战斗的负担。下次启动时生效。",
+    'settings.sceneryDetail.label': "场景细节",
+    'settings.sceneryDetail.hint': "降低：场景在 60% 的距离处切换为简化版本（50 米变为 30 米）。下次启动时生效。",
+    'settings.detail.full': "完整",
+    'settings.detail.reduced': "降低",
+    'settings.detail.on': "开",
+    'settings.detail.off': "关",
     'settings.shadowSize.game': '游戏原生',
 
     // 游戏语言

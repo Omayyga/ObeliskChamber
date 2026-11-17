@@ -17,8 +17,8 @@ const SECTIONS = [
   {
     title: 'settings.sec.picture', tab: 'settings.tab.picture', icon: 'monitor', file: 'game',
     fields: [
-      // Low / Medium / High / Ultra: render scale, shadow map size and quality together (PRESETS below). Not a key of its own: it shows the preset
-      // those three hold, Custom when they hold anything else, as the F1 menu and Recomp Options do (games/ObeliskChamber/ObeliskChamber_presets.h).
+      // Low / Medium / High / Ultra: render scale, shadow map size, quality and the four detail keys together (PRESETS below). Not a key of its
+      // own: it shows the preset those seven hold, Custom when they hold anything else, as the F1 menu and Recomp Options do (games/ObeliskChamber/ObeliskChamber_presets.h).
       { id: 'preset', type: 'preset', label: 'settings.preset.label', hint: 'settings.preset.hint' },
       // grouped by shape ('--' starts a group): an ultrawide monitor needs a 21:9 or 32:9 size here, not a wide window
       { id: 'output', type: 'select', label: 'settings.output.label', sec: 'fefw', key: 'output', def: 'console', note: 'output',
@@ -43,6 +43,15 @@ const SECTIONS = [
       { id: 'shadow_size', type: 'select', label: 'settings.shadowSize.label', sec: 'fefw', key: 'shadow_size', def: '0',
         options: [['0', 'settings.shadowSize.game'], ['1024', '1024'], ['1536', '1536'], ['2048', '2048'], ['3072', '3072'], ['4096', '4096'],
           ['6144', '6144'], ['8192', '8192']] },
+      // the game's own graphics data, edited as it loads (games/ObeliskChamber/ObeliskChamber_detail.cpp): applies at the next start
+      { id: 'reflections', type: 'select', label: 'settings.reflections.label', sec: 'fefw', key: 'reflections', def: 'full',
+        options: [['full', 'settings.detail.full'], ['reduced', 'settings.reflections.reduced'], ['off', 'settings.detail.off']], hint: 'settings.reflections.hint' },
+      { id: 'ambient_occlusion', type: 'select', label: 'settings.ao.label', sec: 'fefw', key: 'ambient_occlusion', def: '1',
+        options: [['1', 'settings.detail.on'], ['0', 'settings.detail.off']], hint: 'settings.ao.hint' },
+      { id: 'crowd_detail', type: 'select', label: 'settings.crowdDetail.label', sec: 'fefw', key: 'crowd_detail', def: 'full',
+        options: [['full', 'settings.detail.full'], ['reduced', 'settings.detail.reduced']], hint: 'settings.crowdDetail.hint' },
+      { id: 'scenery_detail', type: 'select', label: 'settings.sceneryDetail.label', sec: 'fefw', key: 'scenery_detail', def: 'full',
+        options: [['full', 'settings.detail.full'], ['reduced', 'settings.detail.reduced']], hint: 'settings.sceneryDetail.hint' },
       { id: 'upscaler', type: 'select', label: 'settings.upscaler.label', sec: 'dlss', key: 'upscaler', def: 'taau',
         options: [['taau', 'settings.upscaler.taau'], ['dlss', 'settings.upscaler.dlss'], ['fsr3', 'settings.upscaler.fsr3'],
           ['xess', 'settings.upscaler.xess'], ['bilinear', 'settings.upscaler.bilinear'], ['auto', 'settings.upscaler.auto']],
@@ -162,17 +171,22 @@ const SECTIONS = [
 
 // The graphics presets: the same table as runtime/games/ObeliskChamber/ObeliskChamber_presets.h (and runtime/docs/CONFIG.md). A preset sets
 // these fields of the Picture tab; render_ratio and sr_tier are one key shown twice, so both move.
+const DETAIL_FULL = { reflections: 'full', ambient_occlusion: '1', crowd_detail: 'full', scenery_detail: 'full' };
 const PRESETS = [
-  ['low', 'settings.preset.low', { render_ratio: '0.5', shadow_size: '1024', quality: 'handheld' }],
-  ['medium', 'settings.preset.medium', { render_ratio: '0', shadow_size: '0', quality: 'console' }],
-  ['high', 'settings.preset.high', { render_ratio: '0.67', shadow_size: '4096', quality: 'docked' }],
-  ['ultra', 'settings.preset.ultra', { render_ratio: '1.0', shadow_size: '8192', quality: 'docked' }],
+  ['low', 'settings.preset.low', { render_ratio: '0.5', shadow_size: '1024', quality: 'handheld',
+    reflections: 'reduced', ambient_occlusion: '0', crowd_detail: 'reduced', scenery_detail: 'reduced' }],
+  ['medium', 'settings.preset.medium', { render_ratio: '0', shadow_size: '0', quality: 'console', ...DETAIL_FULL }],
+  ['high', 'settings.preset.high', { render_ratio: '0.67', shadow_size: '4096', quality: 'docked', ...DETAIL_FULL }],
+  ['ultra', 'settings.preset.ultra', { render_ratio: '1.0', shadow_size: '8192', quality: 'docked', ...DETAIL_FULL }],
 ];
+const DETAIL_KEYS = ['reflections', 'crowd_detail', 'scenery_detail'];
+const aoOn = (x) => !['0', 'false', 'off', 'no'].includes(String(x).trim().toLowerCase());
 const sameNum = (a, b) => Number(a) === Number(b);
 /** The preset the Picture fields hold now ('' = Custom). */
 const presetOf = (m) => {
   const hit = PRESETS.find(([, , v]) => sameNum(m.render_ratio, v.render_ratio) && sameNum(m.shadow_size, v.shadow_size)
-    && String(m.quality).trim().toLowerCase() === v.quality);
+    && String(m.quality).trim().toLowerCase() === v.quality
+    && DETAIL_KEYS.every((k) => String(m[k]).trim().toLowerCase() === v[k]) && aoOn(m.ambient_occlusion) === (v.ambient_occlusion === '1'));
   return hit ? hit[0] : '';
 };
 
@@ -487,6 +501,7 @@ export async function render(el, ctx) {
             model.render_ratio = model.sr_tier = p[2].render_ratio;
             model.shadow_size = p[2].shadow_size;
             model.quality = p[2].quality;
+            for (const k of [...DETAIL_KEYS, 'ambient_occlusion']) model[k] = p[2][k];
           }
           draw();
           return;

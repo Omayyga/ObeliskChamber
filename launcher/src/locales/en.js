@@ -190,7 +190,7 @@ export const en = {
 
     // picture
     'settings.preset.label': "Graphics preset",
-    'settings.preset.hint': "Sets Render scale, Shadow map size and Quality together. Low: 50% render, 1024 shadows, handheld effects, for a slower GPU. Medium: the console's picture (the defaults). High: 67% render, 4096 shadows, docked effects. Ultra: native render (DLAA), 8192 shadows, docked effects, about 1.3 GB more video memory. Changing one of the three afterwards shows Custom. Output resolution and the upscaler are not changed. The same presets are in the game's Recomp Options and the F1 menu.",
+    'settings.preset.hint': "Sets Render scale, Shadow map size, Quality and the four detail settings together. Low: 50% render, 1024 shadows, handheld effects, reduced reflections, no ambient occlusion, simpler crowds and scenery, for a slower GPU (the detail settings apply at the next start). Medium: the console's picture (the defaults). High: 67% render, 4096 shadows, docked effects. Ultra: native render (DLAA), 8192 shadows, docked effects, about 1.3 GB more video memory. Changing one of them afterwards shows Custom. Output resolution and the upscaler are not changed. The same presets are in the game's Recomp Options and the F1 menu.",
     'settings.preset.low': "Low",
     'settings.preset.medium': "Medium (console)",
     'settings.preset.high': "High",
@@ -270,6 +270,19 @@ export const en = {
     'settings.quality.docked': 'Always docked quality',
     'settings.quality.handheld': "Always handheld quality (lighter)",
     'settings.shadowSize.label': 'Shadow map size',
+    'settings.reflections.label': "Reflections",
+    'settings.reflections.reduced': "Reduced (8 rays, a little grainier)",
+    'settings.reflections.hint': "Screen-space reflections on floors and water. Reduced takes 8 rays instead of 32 and mostly helps in the hubs. Applies at the next start.",
+    'settings.ao.label': "Ambient occlusion",
+    'settings.ao.hint': "The soft shading in corners. Off saves GPU time everywhere, with flatter lighting. Applies at the next start.",
+    'settings.crowdDetail.label': "Crowd detail",
+    'settings.crowdDetail.hint': "Reduced: crowd characters switch to their simpler models twice as soon, lightening busy towns and battles. Applies at the next start.",
+    'settings.sceneryDetail.label': "Scenery detail",
+    'settings.sceneryDetail.hint': "Reduced: scenery switches to its simpler versions at 60% of the distance (50 m becomes 30 m). Applies at the next start.",
+    'settings.detail.full': "Full",
+    'settings.detail.reduced': "Reduced",
+    'settings.detail.on': "On",
+    'settings.detail.off': "Off",
     'settings.shadowSize.game': "Game's own",
 
     // game language
