@@ -215,6 +215,22 @@ bool keep_16_9(uint64_t pane, float w, float h) {
     return false;
 }
 
+// [fefw] ultrawide_images: what a picture covering the whole 1920x1080 layout (an illustration, a loading or title screen) becomes on a wider
+// output. fill (default): scaled by k in both directions about the centre, so it covers the output at its own shape (the top and bottom
+// each lose (1 - 1/k) / 2 of it); fit: left at 16:9 in the centre, like the movies; stretch: x * k only (before this setting).
+enum class ImageMode { Fill, Fit, Stretch };
+ImageMode image_mode() {
+    static const ImageMode m = [] {
+        std::string v = config_get_str("fefw", "ultrawide_images", "fill");
+        for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (v == "fit") return ImageMode::Fit;
+        if (v == "stretch") return ImageMode::Stretch;
+        if (v != "fill") NXLOG_W(kTag, "[fefw] ultrawide_images = %s is not known: fill", v.c_str());
+        return ImageMode::Fill;
+    }();
+    return m;
+}
+
 // A picture that spans the whole 1920 wide layout (a dim, a menu backdrop) is drawn k times wider, so it covers the output: its
 // Calculate copies the pane's global matrix into the draw info's model-view (LoadMtx) and from there into the pane's constant buffer; the
 // model-view's x row is scaled in between. The pane's own matrix, and so its children, stay as they are. Text boxes are not pictures.
@@ -233,6 +249,22 @@ void widen_pane(uint64_t pane, uint64_t info) {
     const bool at_right = covers_width || std::fabs(right - 960.0f) <= 2.0f;
     if (!at_left && !at_right) return;
     if (keep_16_9(pane, pw, rdv<float>(pane + kPaneSize + 4))) return;
+    const uint64_t mv = info + kDrawModelView;
+    // A picture covering the whole layout in both directions and centred (an illustration, a loading or title screen) keeps its shape
+    // instead of being stretched sideways by k ([fefw] ultrawide_images; technique from EmblemWeave cd38152, moistman7).
+    const float ph = rdv<float>(pane + kPaneSize + 4), m11 = rdv<float>(m + 0x14), m13 = rdv<float>(m + 0x1c);
+    const bool full_screen = covers_width && std::fabs(ph * m11) >= 1070.0f && std::fabs(m13) <= 20.0f && std::fabs(m03) <= 20.0f;
+    if (full_screen && image_mode() != ImageMode::Stretch) {
+        if (image_mode() == ImageMode::Fill) {
+            for (int i = 0; i < 4; ++i) wrv<float>(mv + 4 * i, rdv<float>(mv + 4 * i) * w.k);                 // x row
+            for (int i = 0; i < 4; ++i) wrv<float>(mv + 0x10 + 4 * i, rdv<float>(mv + 0x10 + 4 * i) * w.k);   // y row
+        }
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            NXLOG_I(kTag, "ultrawide: full-screen picture (vtable 0x%llx, %.0fx%.0f) %s", static_cast<unsigned long long>(rdv<uint64_t>(pane) - w.base), pw,
+                    ph, image_mode() == ImageMode::Fill ? "zoomed to fill the output at its own shape" : "kept at 16:9 in the centre");
+        return;
+    }
     // x' = a x + b in layout units: a full-width pane scales about the centre; a full-height one on one edge reaches the output's edge there
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
@@ -241,7 +273,6 @@ void widen_pane(uint64_t pane, uint64_t info) {
         if (at_left) a = (right + edge) / (right - left), b = right - a * right;
         else a = (right - left + (edge - right)) / (right - left), b = left - a * left;   // keeps the left edge, the right one goes to +edge
     }
-    const uint64_t mv = info + kDrawModelView;
     for (int i = 0; i < 3; ++i) wrv<float>(mv + 4 * i, rdv<float>(mv + 4 * i) * a);
     wrv<float>(mv + 0xc, rdv<float>(mv + 0xc) * a + b);
     if (first(kCBackdrop))

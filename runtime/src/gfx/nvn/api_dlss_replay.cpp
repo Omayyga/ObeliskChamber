@@ -186,7 +186,7 @@ NetGpu* net_gpu(DlssNet& net) {
 void retire(Img& i) {
     if (!i.img) return;
     gfx::Image old = i.img;
-    gpu::defer_destroy([old]() mutable { device().destroy_image(old); });
+    gpu::defer_destroy_vk([old]() mutable { device().destroy_image(old); });
     i = Img();
 }
 

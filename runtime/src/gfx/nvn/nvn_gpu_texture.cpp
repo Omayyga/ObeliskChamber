@@ -1984,7 +1984,7 @@ bool tex_rescale(Texture* t, Frame& f, float to, const char* why) {
     for (auto& kv : g->views) views.push_back(kv.second);
     g->views.clear();
     g->last_view = VK_NULL_HANDLE;
-    defer_destroy([old, views]() mutable {
+    defer_destroy_vk([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
     });
@@ -2082,7 +2082,7 @@ uint64_t tex_demote(Texture* t, TexGpu* g, Frame& f) {
     g->views.clear();
     g->last_view = VK_NULL_HANDLE;
     g->last_key = {};
-    defer_destroy([old, views]() mutable {
+    defer_destroy_vk([old, views]() mutable {
         for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
         device().destroy_image(old);
     });
@@ -2438,7 +2438,7 @@ bool gpu_untile_impl(Texture* t, TexGpu& g, Frame& f, const char** why, bool may
     if (!e.scratch || e.scratch.size < lin) {
         if (e.scratch) {
             gfx::Buffer old = e.scratch;
-            defer_destroy([old]() mutable { device().destroy_buffer(old); });
+            defer_destroy_vk([old]() mutable { device().destroy_buffer(old); });
             e.scratch = gfx::Buffer{};
         }
         if (device().create_buffer(lin, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, gfx::MemoryUse::GpuOnly, &e.scratch, "nvn untile") != VK_SUCCESS) {
@@ -3133,15 +3133,19 @@ void tex_destroy(TexGpu* g) {
     }
     g_gauge_textures_live.sub(1);
     if (g->presented) device().wait_idle();
-    for (auto& kv : g->views) { vkDestroyImageView(vkdev(), kv.second, nullptr); vk_gauge_image_views().sub(1); }
-    g->views.clear();
     if (g->img) g_live_images.fetch_sub(1);
-    device().destroy_image(g->img);
-    if (g->sparse) {
-        for (VkDeviceMemory m : g->sparse->chunks) vkFreeMemory(vkdev(), m, nullptr);
-        delete g->sparse;
-    }
-    delete g;
+    // The record is out of every table now; what is left are Vulkan objects the GPU is done with (tex_destroy runs from retire(), or at
+    // shutdown after the device is idle). With [nvn] reaper they go on the reaper thread: vmaDestroyImage and vkFreeMemory are the slow part.
+    reap_vk([g] {
+        for (auto& kv : g->views) { vkDestroyImageView(vkdev(), kv.second, nullptr); vk_gauge_image_views().sub(1); }
+        g->views.clear();
+        device().destroy_image(g->img);
+        if (g->sparse) {
+            for (VkDeviceMemory m : g->sparse->chunks) vkFreeMemory(vkdev(), m, nullptr);
+            delete g->sparse;
+        }
+        delete g;
+    });
 }
 
 // Per-load census ([diag] load_census; render thread): the images of the live textures by kind and by when a draw last sampled them, with the
@@ -3661,7 +3665,7 @@ void forget_buffer_views(VkBuffer buffer) {
         }
     }
     if (!gone.empty())
-        defer_destroy([gone]() { for (VkBufferView v : gone) vkDestroyBufferView(vkdev(), v, nullptr); });
+        defer_destroy_vk([gone]() { for (VkBufferView v : gone) vkDestroyBufferView(vkdev(), v, nullptr); });
 }
 
 VkBufferView tex_buffer_view(Texture* t, const TextureViewInfo* view, int component, VkFormat shader_format, bool storage,

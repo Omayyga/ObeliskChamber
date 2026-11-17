@@ -172,9 +172,31 @@ sl::float4x4 mat(const float* cm) {   // column-major column-vector matrix -> St
     return m;
 }
 
+// [upscale] dlss_preset_auto (default true): with no model preset chosen ([upscale] dlss_preset / [dlss] preset left at default), RTX 20 and 30
+// cards (Turing, Ampere) get the convolutional preset E instead of the library's default. DLSS 310 picks its transformer models by default,
+// which Turing and Ampere run slowly: Savage Wind measured an RTX 3060 at 5.1 ms a frame in Quality (11 ms in Performance at 4K) against
+// 2.0 ms with preset E. RTX 40 and later keep the library's default. A preset the player chose always wins. false: the library's default.
+std::atomic<int> g_gen_preset{0};   // 0: none (the library's default)
+void note_gpu_generation(const char* device_name) {
+    if (!config_get_bool("upscale", "dlss_preset_auto", true) || !device_name) return;
+    const std::string n = device_name;
+    const bool rtx = n.find("RTX") != std::string::npos;
+    // GeForce RTX 40 / 50, RTX PRO and the "Ada Generation" workstation cards are newer; Quadro RTX 4000 / 5000 are Turing, hence "GeForce"
+    const bool newer = n.find("GeForce RTX 4") != std::string::npos || n.find("GeForce RTX 5") != std::string::npos ||
+                       n.find("RTX PRO") != std::string::npos || n.find("Ada") != std::string::npos || n.find("Blackwell") != std::string::npos;
+    if (!rtx || newer) return;   // RTX 20 / 30, TITAN RTX, Quadro RTX, RTX A-series: Turing and Ampere
+    const int e = dlss_preset_from_word("e");
+    if (g_gen_preset.exchange(e) != e)
+        NXLOG_I(kTag, "DLSS: %s is Turing or Ampere: model preset E (convolutional) unless one is chosen ([upscale] dlss_preset_auto)", device_name);
+}
+int effective_preset() {
+    const int p = dlss_preset();
+    return p != 0 ? p : g_gen_preset.load(std::memory_order_relaxed);
+}
+
 class Dlss final : public TemporalBackend {
 public:
-    explicit Dlss(gfx::Device& dev) : dev_(&dev) {}
+    explicit Dlss(gfx::Device& dev) : dev_(&dev) { note_gpu_generation(dev.properties().deviceName); }
     const char* name() const override { return dlaa_ ? "DLAA" : "DLSS"; }
     void set_dlaa(bool on) { dlaa_ = on; }
 
@@ -188,7 +210,7 @@ public:
         // The mode: kept while the input size stays in its dynamic range (the game may change its render size per frame), else the one
         // whose scale is nearest the actual ratio and whose range holds the input (DLAA at the same size).
         const bool same_out = f.out.width == last_out_.width && f.out.height == last_out_.height;
-        if (!same_out || !in_range(range_, f.render) || extras::dlss_preset() != last_preset_) {   // also when the model preset changed (F1)
+        if (!same_out || !in_range(range_, f.render) || effective_preset() != last_preset_) {   // also when the model preset changed (F1)
             sl::DLSSMode m = sl::DLSSMode::eDLAA;
             Range rg{f.out.width, f.out.height, f.out.width, f.out.height};
             const double r = static_cast<double>(f.out.width) / static_cast<double>(f.render.width);
@@ -211,7 +233,7 @@ public:
                     }
                 }
             }
-            const int preset = extras::dlss_preset();
+            const int preset = effective_preset();
             const bool new_opts = m != last_mode_ || !same_out || preset != last_preset_;
             if (new_opts && s.set_options(vp, options(m, f.out)) != sl::Result::eOk) return fail("slDLSSSetOptions");
             {
@@ -283,7 +305,7 @@ private:
         o.colorBuffersHDR = sl::Boolean::eTrue;
         o.useAutoExposure = sl::Boolean::eTrue;
         // [upscale] dlss_preset (F1: DLSS model): the same model for every mode; 0 leaves the library's default (K for DLAA and Quality)
-        const sl::DLSSPreset pr = static_cast<sl::DLSSPreset>(extras::dlss_preset());
+        const sl::DLSSPreset pr = static_cast<sl::DLSSPreset>(effective_preset());
         o.dlaaPreset = o.qualityPreset = o.balancedPreset = o.performancePreset = o.ultraPerformancePreset = o.ultraQualityPreset = pr;
         return o;
     }

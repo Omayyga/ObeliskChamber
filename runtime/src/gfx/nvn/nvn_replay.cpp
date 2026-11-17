@@ -1963,7 +1963,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     const uint64_t key = addr ^ (static_cast<uint64_t>(size) << 40) ^ (static_cast<uint64_t>(size) >> 24);
     Shadow& sh = g_shadows[key];
     if (!sh.buf || sh.size != size) {
-        if (sh.buf) { gfx::Buffer old = sh.buf; forget_buffer_views(old.buffer); defer_destroy([old]() mutable { device().destroy_buffer(old); }); sh.buf = gfx::Buffer{}; }
+        if (sh.buf) { gfx::Buffer old = sh.buf; forget_buffer_views(old.buffer); defer_destroy_vk([old]() mutable { device().destroy_buffer(old); }); sh.buf = gfx::Buffer{}; }
         const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
                                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         if (device().create_buffer(size, usage, gfx::MemoryUse::GpuOnly, &sh.buf, "nvn compute shadow") != VK_SUCCESS) {
@@ -2027,7 +2027,7 @@ void shadows_after_dispatch() {
             if (F->serial - it->second.last > 600) {
                 gfx::Buffer old = it->second.buf;
                 forget_buffer_views(old.buffer);
-                defer_destroy([old]() mutable { device().destroy_buffer(old); });
+                defer_destroy_vk([old]() mutable { device().destroy_buffer(old); });
                 it = g_shadows.erase(it);
             } else {
                 ++it;
@@ -2045,7 +2045,39 @@ bool tsr_jitter(uint32_t* words, size_t n_words) {
     Texture* d = S.depth_tex.get();
     if (!d || !tex_gpu(d)) return false;
     const VkExtent3D e = tex_image_extent(d, 0);
-    return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    if (n_words < 68) return extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    // Most draws of a frame bind the same camera block, and the parse behind the jitter (68 finite checks, a 4x4 inverse, two products)
+    // reads only words 0..67 and writes only 0..15. The last answer is kept per thread, keyed on those words, the target size and the
+    // jitter phase, so it runs once per distinct block instead of once per draw. Technique from EmblemWeave #46 (moistman7).
+    struct Memo {
+        uint32_t in[68];
+        uint32_t out[16];
+        uint64_t frame;
+        uint32_t w, h;
+        bool ok, valid;
+    };
+    thread_local Memo m{};
+    if (m.valid && m.frame == g_tsr_frame && m.w == e.width && m.h == e.height && std::memcmp(m.in, words, sizeof m.in) == 0) {
+        if (m.ok) std::memcpy(words, m.out, sizeof m.out);
+        return m.ok;
+    }
+    std::memcpy(m.in, words, sizeof m.in);
+    m.ok = extras::temporal_jitter_block(words, n_words, e.width, e.height, g_tsr_frame);
+    if (m.ok) std::memcpy(m.out, words, sizeof m.out);
+    m.frame = g_tsr_frame;
+    m.w = e.width;
+    m.h = e.height;
+    m.valid = true;
+    return m.ok;
+}
+
+// [nvn] camera_patch_cached (default true): the temporal jitter and the ufs scale patch a copy of the block's first 68 words in cached memory,
+// and the copy goes to the upload ring once. The ring is write-combined (device-local through the resizable BAR on most GPUs), so reading
+// the block back from it for the patches stalled on every draw: EmblemWeave #46 measured over half the render thread in busy map scenes.
+// false: the patches read and write the ring as before.
+bool camera_patch_cached() {
+    static const bool on = nxrt::config_get_bool("nvn", "camera_patch_cached", true);
+    return on;
 }
 
 // build_set's vectors keep their capacity from call to call (allocated and freed for every set of every draw, they were ~10 % of the render
@@ -2146,7 +2178,25 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                             // the game's scale on some floats of this block (nxrt/gfx_tuning.h): bound from a patched copy in the upload ring
                             const VkDeviceSize n = std::min<VkDeviceSize>({bind.size ? bind.size : 65536, br.avail, 65536});
                             UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(align, 256));
-                            if (u) {
+                            if (u && camera_patch_cached()) {
+                                // the patches work on a cached copy of the block's head; the ring is only written (camera_patch_cached)
+                                const uint8_t* src = static_cast<const uint8_t*>(host_ptr(bind.addr));
+                                uint32_t head[68];
+                                const size_t hn = static_cast<size_t>(std::min<VkDeviceSize>(n, sizeof head));
+                                std::memcpy(head, src, hn);
+                                if (tsr && n >= 272) tsr_jitter(head, 68);   // temporal upscaling
+                                const uint32_t mask = ufs != 1.0f ? nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed) : 0u;
+                                for (uint32_t i = 0; i < 32; ++i) {
+                                    if (!(mask & (1u << i)) || (i + 1) * 4 > n) continue;
+                                    float v;
+                                    std::memcpy(&v, &head[i], 4);
+                                    v *= ufs;
+                                    std::memcpy(&head[i], &v, 4);
+                                }
+                                std::memcpy(u.ptr, head, hn);
+                                if (n > hn) std::memcpy(static_cast<uint8_t*>(u.ptr) + hn, src + hn, static_cast<size_t>(n - hn));
+                                bi = {u.buffer, u.offset, n};
+                            } else if (u) {
                                 std::memcpy(u.ptr, host_ptr(bind.addr), n);
                                 if (tsr && n >= 272) tsr_jitter(reinterpret_cast<uint32_t*>(u.ptr), static_cast<size_t>(n / 4));   // temporal upscaling
                                 const uint32_t mask = ufs != 1.0f ? nxrt::gfx::tuning().ufs_mask.load(std::memory_order_relaxed) : 0u;
@@ -2273,7 +2323,12 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     ii.imageView = v;
                     // GENERAL: the op also writes it as a storage image (prepare_textures left it there)
                     ii.imageLayout = tex_layout(r.tex) == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : tex_sampled_layout(r.tex);
-                    if (r.has_sampler) ii.sampler = sampler_for(int_comp ? unfiltered(r.smp) : r.smp);
+                    // Integer views (the integer sampler variant, and images the shader reads only as integer bits, reflected as uint) take the
+                    // unfiltered sampler: Vulkan has no linear filtering of integer formats (VUID-vkCmdDrawIndexed-magFilter-04553), and Maxwell
+                    // takes the nearest texel of them anyway. [nvn] int_view_nearest = false: the game's sampler as before.
+                    static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
+                    const bool int_view = int_comp || (int_nearest && component >= 2);
+                    if (r.has_sampler) ii.sampler = sampler_for(int_view ? unfiltered(r.smp) : r.smp);
                     if (r.tex == g_su_tex && g_su_view) {            // the upscaled scene replaces the small one for this draw (S14)
                         ii.imageView = g_su_view;
                         ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
