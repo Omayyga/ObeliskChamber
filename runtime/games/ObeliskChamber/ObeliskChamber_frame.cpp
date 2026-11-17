@@ -110,7 +110,8 @@ struct State {
     float tick_acc = 0.0f;                      // main thread (frame_step)
     std::atomic<uint64_t> applied[kGroups] = {};
     std::atomic<uint64_t> quake_held{0};
-    void (*quake_rest)(::Ctx*) = nullptr;       // f_11eb084
+    std::atomic<void (*)(::Ctx*)> quake_rest{nullptr};   // f_11eb084, looked up at the first quake (the modules register after play mode starts)
+    std::atomic<int> quake_state{0};            // 0 not looked up, 1 found, -1 missing
 };
 
 State& st() {
@@ -142,7 +143,18 @@ inline uint32_t f_bits(float f) {
     std::memcpy(&b, &f, 4);
     return b;
 }
-inline float ease(float k, float s) { return 1.0f - std::pow(std::clamp(1.0f - k, 0.0f, 1.0f), s); }
+// q^s with a small per-thread cache: the cloth hooks run for every cloth module every frame (about 500,000 calls a second at 120 fps), with
+// a handful of distinct factors and one s per frame
+float pow_cached(float q, float s) {
+    struct Entry { float q = -1.0f, s = -1.0f, r = 0.0f; };
+    thread_local Entry cache[16];
+    uint32_t qb;
+    std::memcpy(&qb, &q, 4);
+    Entry& e = cache[(qb ^ (qb >> 7) ^ (qb >> 15)) & 15];
+    if (e.q != q || e.s != s) e = Entry{q, s, std::pow(q, s)};
+    return e.r;
+}
+inline float ease(float k, float s) { return 1.0f - pow_cached(std::clamp(1.0f - k, 0.0f, 1.0f), s); }
 
 void hook_movk(::Ctx* c, uint64_t, void* user) {
     const MovkSite& m = *static_cast<const MovkSite*>(user);
@@ -174,7 +186,7 @@ void hook_cloth_blend(::Ctx* c, uint64_t, void*) {
     const float s = scale(kCloth);
     const float q = c->v[1].f[0];
     if (full(s) || !(q >= 0.0f && q <= 1.0f)) return;
-    const float qs = std::pow(q, s), k = 1.0f - qs;
+    const float qs = pow_cached(q, s), k = 1.0f - qs;
     c->v[1].f[0] = qs;
     if (mem::is_mapped(c->x[31] + 0x50, 4)) std::memcpy(reinterpret_cast<void*>(c->x[31] + 0x50), &k, 4);
     count(kCloth);
@@ -184,7 +196,7 @@ void hook_cloth_damp(::Ctx* c, uint64_t, void*) {
     const float s = scale(kCloth);
     const float q = c->v[2].f[0];
     if (full(s) || !(q >= 0.0f && q <= 1.0f)) return;
-    c->v[2].f[0] = std::pow(q, s);
+    c->v[2].f[0] = pow_cached(q, s);
     count(kCloth);
 }
 // the wind force added this step (v0, four lanes): an acceleration, x s^2
@@ -199,7 +211,7 @@ void hook_cloth_pull(::Ctx* c, uint64_t, void*) {
     const float s = scale(kCloth);
     const float q = c->v[2].f[0];
     if (full(s) || !(q >= 0.0f && q <= 1.0f)) return;
-    const float qs = std::pow(q, s);
+    const float qs = pow_cached(q, s);
     c->v[2].f[0] = qs;
     c->v[5].f[0] = 1.0f - qs;
     count(kCloth);
@@ -208,8 +220,18 @@ void hook_cloth_pull(::Ctx* c, uint64_t, void*) {
 // ---- cutscene quake (evt::demo::Seq 0x11e9b50): the block from 0x11ea5cc to 0x11eb084 runs on 30 Hz ticks -----------------------------------
 int hook_quake(::Ctx* c, uint64_t, void*) {
     State& s = st();
-    if (!s.quake_rest || full(scale(kQuake)) || s.tick.load(std::memory_order_relaxed)) return 0;
-    s.quake_rest(c);          // the function from the block's end, as when the block has nothing to do; it returns from the function
+    if (full(scale(kQuake)) || s.tick.load(std::memory_order_relaxed)) return 0;
+    int qs = s.quake_state.load(std::memory_order_acquire);
+    if (qs == 0) {
+        auto fn = reinterpret_cast<void (*)(::Ctx*)>(fn_lookup(s.base + kQuakeEnd));
+        s.quake_rest.store(fn, std::memory_order_relaxed);
+        qs = fn ? 1 : -1;
+        s.quake_state.store(qs, std::memory_order_release);
+        if (fn) NXLOG_I(kTag, "frame-rate fixes: the cutscene quake runs on 30 Hz ticks (f_11eb084 found)");
+        else NXLOG_W(kTag, "frame-rate fixes: no f_11eb084 in this build (main.sites midhook 0x71011eb084): the cutscene quake runs every frame");
+    }
+    if (qs < 0) return 0;
+    s.quake_rest.load(std::memory_order_relaxed)(c);          // the function from the block's end, as when the block has nothing to do; it returns from the function
     s.quake_held.fetch_add(1, std::memory_order_relaxed);
     count(kQuake);
     return 1;
@@ -342,14 +364,13 @@ void frame_install(uint64_t base) {
         {kStoreGameplay, hook_store_gameplay}, {kStoreMenuA, hook_store_menu}, {kStoreMenuB, hook_store_menu},
     };
     for (const auto& it : items) n += hook_add_inline(base + it.off, it.fn) ? 1 : 0;
-    // the quake's 30 Hz block needs the lifted rest of its function (the midhook site 0x11eb084 in main.sites); without it the block runs every frame
-    s.quake_rest = reinterpret_cast<void (*)(::Ctx*)>(fn_lookup(base + kQuakeEnd));
-    if (s.quake_rest) n += hook_add_mid(base + kQuakeStart, &hook_quake) ? 1 : 0;
+    // the quake's 30 Hz block needs the lifted rest of its function (the midhook site 0x11eb084 in main.sites), looked up at the first quake:
+    // the lifted modules are registered after play mode installs its hooks
+    n += hook_add_mid(base + kQuakeStart, &hook_quake) ? 1 : 0;
     std::string skipped;
     for (int g = 0; g < kGroups; ++g)
         if (s.skip >> g & 1u) skipped += std::string(skipped.empty() ? "" : ", ") + kGroupNames[g];
-    NXLOG_I(kTag, "frame-rate fixes ([fefw] frame_fixes = %d): %zu hooks%s%s%s", s.on.load() ? 1 : 0, n,
-            s.quake_rest ? "" : " (no f_11eb084 in this build: the cutscene quake runs every frame)", skipped.empty() ? "" : ", skipped: ",
+    NXLOG_I(kTag, "frame-rate fixes ([fefw] frame_fixes = %d): %zu hooks%s%s", s.on.load() ? 1 : 0, n, skipped.empty() ? "" : ", skipped: ",
             skipped.c_str());
 }
 
@@ -385,7 +406,7 @@ FrameFixInfo frame_info() {
     i.on = s.on.load(std::memory_order_relaxed);
     i.scale = s.s.load(std::memory_order_relaxed);
     i.native = s.native.load(std::memory_order_relaxed);
-    i.quake = s.quake_rest != nullptr;
+    i.quake = s.quake_state.load(std::memory_order_relaxed) > 0;
     for (int g = 0; g < kGroups; ++g) i.applied[g] = s.applied[g].load(std::memory_order_relaxed);
     i.quake_held = s.quake_held.load(std::memory_order_relaxed);
     return i;
