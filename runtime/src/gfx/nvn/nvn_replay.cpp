@@ -29,6 +29,7 @@
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
+#include "nxrt/gfx.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/log.h"
 #include "api_dlss.h"
@@ -222,7 +223,7 @@ bool ubo_only_rebind_on() {
 // measurement with [nvn] replay_stats in one run.
 bool g_lean = true;
 bool lean_setting() {
-    static const bool on = nxrt::config_get_bool("nvn", "lean_draws", true);
+    static const bool on = nxrt::config_get_bool("nvn", "lean_draws", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
     return on;
 }
 inline bool lean_on() { return g_lean; }
@@ -1231,7 +1232,7 @@ Texture* feedback_clone(Texture* t) {
 // instead of every level. A draw that renders a small mip while it samples the next larger one (a bloom or blur chain over one mipmapped
 // texture) then copies that one small level, not the whole chain from the full-size level 0 down.
 bool fb_levels_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "feedback_levels", true);
+    static const bool on = nxrt::config_get_bool("nvn", "feedback_levels", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
     return on;
 }
 
@@ -3149,7 +3150,7 @@ void cs_draw_index_range(uint64_t addr, uint64_t size);
 
 bool depth_ro_for_draw() {
     if (g_want_depth_ro) return true;
-    static const bool sticky = nxrt::config_get_bool("nvn", "depth_ro_sticky", true);
+    static const bool sticky = nxrt::config_get_bool("nvn", "depth_ro_sticky", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
     if (!sticky || !P.open || !P.depth_ro || !targets_match()) return false;
     const bool writes_depth = S.ds.depth_test && S.ds.depth_write;
     const bool writes_stencil = P.has_stencil && S.ds.stencil_test && (S.stencil_wmask[0] != 0 || S.stencil_wmask[1] != 0);
@@ -4327,7 +4328,7 @@ uint64_t g_cs_n = 0, g_cs_skipped = 0, g_cs_conflicts = 0, g_cs_untracked = 0;
 // draw that depends on an open dispatch, the pass ends and the barrier is recorded.
 int cs_mode() {
     static const int m = [] {
-        const std::string v = nxrt::config_get_str("nvn", "dispatch_barriers", "tracked");
+        const std::string v = nxrt::config_get_str("nvn", "dispatch_barriers", nxrt::gfx::gpu_quirks().intel_compat ? "full" : "tracked");   // [gfx] intel_compat: full
         return v == "tracked_draws" ? 2 : v == "tracked" ? 1 : 0;
     }();
     return m;
@@ -4532,7 +4533,7 @@ void cs_after_dispatch() {
 
 // Ops that record no GPU work (state and bindings) or that check the open dispatches themselves keep them open.
 bool game_barriers_tracked() {
-    static const bool tracked = nxrt::config_get_str("nvn", "game_barriers", "tracked") == "tracked";
+    static const bool tracked = nxrt::config_get_str("nvn", "game_barriers", nxrt::gfx::gpu_quirks().intel_compat ? "full" : "tracked") == "tracked";   // [gfx] intel_compat: full
     return tracked;
 }
 
@@ -5040,7 +5041,7 @@ uint64_t g_wm_mark = 0;                                    // memory_barrier_cou
 std::vector<std::pair<uint64_t, uint64_t>> g_wm_ranges;     // the open updates' [addr, end)
 
 bool wm_batch_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "batch_ubo_updates", true);
+    static const bool on = nxrt::config_get_bool("nvn", "batch_ubo_updates", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
     return on;
 }
 

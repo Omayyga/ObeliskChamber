@@ -154,6 +154,14 @@ struct GpuQuirks {
     // texture_detail = half does), so scene loads stop pushing video memory past the budget, where Windows moves it to system memory
     // and the frame rate halves (#49).
     bool pressure_detail = false;
+    // [gfx] intel_compat (auto: on for every Intel GPU, integrated or Arc): the paths that lost the device on Intel's driver, or were never
+    // tested there, default to off. Upstream fefw-recomp's matrix on an Arc B390 (their #18, 0c35aec / f906f7b by metrist38): with every
+    // path added after 0.1.7 off, [nvn] lean_draws on alone and [gfx] residency on alone each lost the device on the title screen, so
+    // turning off only one never helped (our #81 on an Arc B580: residency off, lean_draws on, still lost). They turn the two off on
+    // integrated GPUs; our B580 is discrete. Also as upstream does on every GPU but NVIDIA: [nvn] dispatch_barriers and game_barriers
+    // = full, batch_ubo_updates, feedback_levels and depth_ro_sticky = false (measured on NVIDIA only). A key set in the ini or the
+    // environment still wins.
+    bool intel_compat = false;
 };
 const GpuQuirks& gpu_quirks();
 uint64_t video_budget_bytes();      // the OS's video memory budget for this process on the largest device-local heap (0: no device yet)

@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "nxrt/config.h"
+#include "nxrt/gfx.h"
 #include "nxrt/log.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_shaders.h"
@@ -38,8 +39,9 @@ bool residency_on() {
     static const bool on = [] {
         std::string v = config_get_str("gfx", "residency", "auto");
         std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        const bool r = v == "auto" || v.empty() ? true : config_get_bool("gfx", "residency", true);
-        NXLOG_I(kTag, "texture residency ([gfx] residency = %s): %s", v.c_str(), r ? "the pool shaders mark what they sample; idle textures are demoted near the budget" : "off");
+        const bool auto_v = v == "auto" || v.empty();
+        const bool r = auto_v ? !nxrt::gfx::gpu_quirks().intel_compat : config_get_bool("gfx", "residency", true);   // [gfx] intel_compat: off
+        NXLOG_I(kTag, "texture residency ([gfx] residency = %s%s): %s", v.c_str(), auto_v && !r ? ", intel_compat" : "", r ? "the pool shaders mark what they sample; idle textures are demoted near the budget" : "off");
         return r;
     }();
     return on;
