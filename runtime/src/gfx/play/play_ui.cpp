@@ -557,7 +557,7 @@ void fps_group(UiHost& host, Page& p) {
 // ---- Display page groups (HDR, upscaling, low latency) ----------------------------------------------------------------------------------
 
 // HDR output, upscaling and low latency (nxrt/extras.h). Items that apply at the next start say so in their labels, as the Display tab does.
-constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native", "Game"};
+constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native"};
 constexpr const char* kHdrFormatNames[] = {"Auto", "HDR10", "scRGB"};
 constexpr const char* kLatencyModeNames[] = {"Off", "Auto", "On", "Boost"};
 constexpr const char* kUpscaleNames[] = {"Off", "FSR 1 (spatial)", "FSR 3", "DLSS", "XeSS", "NIS (spatial)", "DLAA"};   // indexed by extras::UpscaleMode
@@ -612,11 +612,10 @@ void hdr_group(Page& p) {
 
     const int mode = static_cast<int>(h.mode);
     const bool mode_open = ImGui::BeginCombo("Mode##hdr_mode", kHdrModeNames[mode]);
-    tip("Off keeps the SDR picture, Auto uses HDR when the display and Windows offer it, On runs the HDR pipeline even without an HDR display. "
-        "Native is On with the levels the game declares for an HDR TV on Switch 2. Game lets the game make its own HDR picture "
-        "(it is told the display is HDR, and its Brightness options apply); it needs an HDR10 signal, else it works as On.");
+    tip("Off keeps the SDR picture. Auto and On turn the game's SDR picture into HDR (Auto when the display and Windows offer HDR, On always). "
+        "Native is the game's own HDR picture, as on a Switch 2 with an HDR TV (its Brightness options apply); it needs an HDR10 signal, else it works as On.");
     if (mode_open) {
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (ImGui::Selectable(kHdrModeNames[i], i == mode) && i != mode) {
                 h.mode = static_cast<extras::HdrMode>(i);
                 mark(p);

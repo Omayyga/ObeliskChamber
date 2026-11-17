@@ -123,7 +123,7 @@ void vi_get_native_window(::Ctx* c) {
 
 // nn::vi::SetLayerNext{Extended,Standard}ContentLuminanceRangeMetadata(Layer*, uint16_t min, uint16_t max): what the game declares about its
 // picture for an HDR TV (Pokopia: extended 0..400, standard 0..300 nits, from its graphics-system defaults, every time it makes the layer). The
-// values go to the HDR extras ([hdr] mode = native uses them); nn::Result 0.
+// values go to the HDR extras ([hdr] mode = native sends them in the swapchain metadata); nn::Result 0.
 void vi_layer_extended_luminance(::Ctx* c) {
     extras::hdr_note_layer_luminance(true, static_cast<uint16_t>(c->x[1]), static_cast<uint16_t>(c->x[2]));
     c->x[0] = 0;
@@ -181,7 +181,7 @@ void vi_query_buffer_max_resolution(::Ctx* c) {
 // they came out 0 (main+0x21A75C0..CC): NaN in its push constants (+0x40), a NaN bloom threshold and a black picture. With format 0 it
 // keeps its 300-nit SDR base (225/300/400/300), as under Eden; the peak is stored but not read then.
 //
-// [hdr] mode = game with an HDR10 swapchain: HDR on, format 1 (PQ), peak = the [hdr] peak. The game then asks for the paper white
+// [hdr] mode = native with an HDR10 swapchain: HDR on, format 1 (PQ), peak = the [hdr] peak. The game then asks for the paper white
 // (vi_query_hdr_paper_white below), renders PQ BT.2020 itself and the present copies it unchanged. hdr_state().game_pq is set when the
 // output is decided, before the game asks (the swapchain clears it if it is not HDR10, so a later ask answers SDR again).
 uint16_t nits_u16(float v) { return static_cast<uint16_t>(v < 1.0f ? 1.0f : v > 10000.0f ? 10000.0f : v + 0.5f); }

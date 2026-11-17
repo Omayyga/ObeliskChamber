@@ -575,7 +575,7 @@ constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NV
 constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "xess", "bilinear", "auto"};
 constexpr const char* kFgNames[] = {"Off", "DLSS Frame Generation (RTX 40 or newer)", "FSR 3 frame generation"};
 constexpr const char* kFgVals[] = {"0", "dlss", "fsr3"};
-constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native", "Game"};
+constexpr const char* kHdrModeNames[] = {"Off", "Auto", "On", "Native"};
 constexpr const char* kHdrFormatNames[] = {"Auto", "HDR10", "scRGB"};
 
 // The output size an [fefw] output value means (0 x 0: the config's own), as ObeliskChamber_res.cpp works it out: a window is fitted to 16:9 unless
@@ -842,9 +842,9 @@ void hdr_group(UiHost& host, Menu& m) {
     extras::HdrSettings& h = m.edit.extras.hdr;
     section("HDR");
     if (begin_rows("hdr")) {
-        row(m, "HDR output", When::Restart, "Off keeps SDR; Auto uses HDR when the display and Windows offer it; On runs the HDR pipeline anyway; Native uses the levels the game declares for an HDR TV; Game lets the game make its own HDR picture (HDR10 only).");
+        row(m, "HDR output", When::Restart, "Off keeps SDR; Auto and On turn the game's SDR picture into HDR (Auto when the display and Windows offer it); Native is the game's own HDR picture (HDR10 only).");
         int mode = static_cast<int>(h.mode);
-        if (combo(m, "##hm", &mode, kHdrModeNames, 5)) {
+        if (combo(m, "##hm", &mode, kHdrModeNames, 4)) {
             h.mode = static_cast<extras::HdrMode>(mode);
             apply(host, m);
         }

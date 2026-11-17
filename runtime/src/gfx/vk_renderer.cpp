@@ -343,20 +343,20 @@ struct Renderer::Impl {
             if (hs.game_pq && k != extras::OutputKind::Hdr10) {
                 // the game's own PQ picture needs an HDR10 swapchain; without one the game keeps its SDR picture (it is only told HDR with HDR10)
                 hs.game_pq = false;
-                NXLOG_W(kTag, "HDR game: the swapchain is %s, not HDR10: the game is told the display is SDR", extras::output_kind_name(k));
+                NXLOG_W(kTag, "HDR native: the swapchain is %s, not HDR10: the game is told the display is SDR", extras::output_kind_name(k));
             }
             extras::hdr_set_state(hs);
         }
     }
 
-    // The swapchain's HDR metadata (VK_EXT_hdr_metadata): the display's peak; in [hdr] mode = native the content levels are the game's own
+    // The swapchain's HDR metadata (VK_EXT_hdr_metadata): the display's peak; with the game's own PQ picture ([hdr] mode = native) the content levels are the game's own
     // declarations (NVN window content metadata, else the nn::vi extended content range). Sent again when HdrState::metadata_serial moves.
     uint32_t md_serial = 0;
     void apply_hdr_metadata() {
         const extras::HdrState hs = extras::hdr_state();
         md_serial = hs.metadata_serial;
         if (headless || !swapchain || kind == extras::OutputKind::Sdr8 || !dev->features().hdr_metadata) return;
-        const bool native = extras::settings().hdr.mode == extras::HdrMode::Native || hs.game_pq;
+        const bool native = hs.game_pq;
         VkHdrMetadataEXT md = {VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
         md.displayPrimaryRed = {0.708f, 0.292f};       // BT.2020
         md.displayPrimaryGreen = {0.170f, 0.797f};
@@ -388,9 +388,9 @@ struct Renderer::Impl {
         hs.game_max_fall = prev.game_max_fall;
         hs.game_display_max_nits = prev.game_display_max_nits;
         hs.metadata_serial = prev.metadata_serial + 1;
-        // Native: the game's HDR TV levels, forced like On. Game: the game's own PQ picture, forced like On, and HDR10 if the surface offers it.
-        const bool game = es.hdr.mode == extras::HdrMode::Game;
-        const bool forced = es.hdr.mode == extras::HdrMode::On || es.hdr.mode == extras::HdrMode::Native || game;
+        // Native: the game's own PQ picture, forced like On, and HDR10 whenever the surface offers it ([hdr] format is not read).
+        const bool game = es.hdr.mode == extras::HdrMode::Native;
+        const bool forced = es.hdr.mode == extras::HdrMode::On || game;
         wanted = extras::OutputKind::Sdr8;
         if (es.hdr.mode != extras::HdrMode::Off) {
             bool o10 = false, osc = false;
@@ -421,16 +421,12 @@ struct Renderer::Impl {
             else if (pickSc) wanted = extras::OutputKind::ScRgb;
             // Game with HDR10: the game renders PQ itself, so no HDR scene pipeline (float targets, tone-map patch); otherwise it falls back to On
             hs.game_pq = game && wanted == extras::OutputKind::Hdr10;
-            if (game && !hs.game_pq) NXLOG_W(kTag, "HDR game: the surface offers no HDR10 format: the HDR scene pipeline (as [hdr] mode = on) is used instead");
+            if (game && !hs.game_pq) NXLOG_W(kTag, "HDR native: the surface offers no HDR10 format: the HDR scene pipeline (as [hdr] mode = on) is used instead");
             hs.scene_hdr = !hs.game_pq && (wanted != extras::OutputKind::Sdr8 || forced);
             hs.display_hdr = di.hdr_enabled;
             hs.display_peak_nits = di.valid ? di.max_nits : 0.0f;
             hs.display_sdr_white_nits = di.valid ? di.sdr_white_nits : 80.0f;
             extras::hdr_resolve_levels(es.hdr, di.valid && di.hdr_enabled, di.valid ? di.max_nits : 0.0f, di.sdr_white_nits, &hs.paper_white_nits, &hs.peak_nits);
-            if (es.hdr.mode == extras::HdrMode::Native && es.hdr.paper_white_nits <= 0 && hs.game_standard_nits >= 80.0f) {
-                hs.paper_white_nits = std::clamp(hs.game_standard_nits, 80.0f, 500.0f);
-                hs.peak_nits = std::max(hs.peak_nits, hs.paper_white_nits);
-            }
             hs.peak_ratio = wanted == extras::OutputKind::Sdr8 ? 1.0f : extras::peak_ratio(hs.peak_nits, hs.paper_white_nits, static_cast<float>(es.hdr.highlight_boost));
         }
         hs.output = extras::OutputKind::Sdr8;     // the swapchain sets the real one

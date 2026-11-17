@@ -177,12 +177,12 @@ void present_on_render_thread(Window* w, int index, bool again) {
         src = tex_present_view(t);
     }
     if (extras::hdr_game_pq()) {
-        // [hdr] mode = game: the format the game presents its own HDR picture in, once per change (PQ in 10-bit UNORM is expected; 8-bit would band)
+        // [hdr] mode = native: the format the game presents its own HDR picture in, once per change (PQ in 10-bit UNORM is expected; 8-bit would band)
         static VkFormat s_logged = VK_FORMAT_UNDEFINED;
         if (const VkFormat vf = tex_vk_format(t); vf != s_logged) {
             s_logged = vf;
             const VkExtent3D le = tex_image_extent(t, 0);
-            NXLOG_I("nvn", "HDR game: the game presents a %ux%u texture, VkFormat %d", le.width, le.height, static_cast<int>(vf));
+            NXLOG_I("nvn", "HDR native: the game presents a %ux%u texture, VkFormat %d", le.width, le.height, static_cast<int>(vf));
         }
     }
     NXFT("present.record");
