@@ -313,6 +313,32 @@ class Env:
 TAILS = ('return;', 'goto', '{ jt', '{ f_', '{ h_', '{ call_indirect', 'switch (', '{ nx_')
 
 
+# opt 'loopbar' (big win #7): a polling loop (it reads guest memory, writes none and calls nothing) gets a compiler memory barrier on its
+# back edge (NX_LOOP_EDGE, ctx.h), so the read happens again on every pass. Without one, once the opt passes keep flags and temporaries
+# in locals, clang may prove the loop changes no memory, hoist the load out and spin forever on a stale value (Savage Wind's hang at
+# boot). Only such loops, and only up to 64 instructions: a barrier makes the context registers the loop uses go back to memory each
+# pass, which a longer loop that stores anyway does not need. Acquire loads are never hoisted, so a loop of those is left alone too.
+_LOOP_GOTO = re.compile(r'\bgoto L_([0-9a-f]+);')
+_LOOP_READ = re.compile(r'\brd(?:8|16|32|64|128)\(')
+_LOOP_SIDE = re.compile(r'\b(?:wr(?:8|16|32|64|128)|f_[0-9a-f]+|call_indirect|host_import|guest_svc|nx_spin_hint|nx_site_inline|nx_site_midhook|'
+                        r'stx(?:p)?(?:8|16|32|64)|__atomic_\w+|guest_unimpl|guest_trap)\(')
+
+
+def loop_barriers(lines):
+    index = {pc: k for k, (pc, _) in enumerate(lines)}
+    out = list(lines)
+    for k, (pc, stmt) in enumerate(lines):
+        for m in _LOOP_GOTO.finditer(stmt):
+            t = int(m.group(1), 16)
+            if t > pc or t not in index or k - index[t] >= 64:
+                continue
+            body = [s for _, s in lines[index[t]:k + 1]]
+            if any(_LOOP_SIDE.search(s) for s in body) or not any(_LOOP_READ.search(s) for s in body):
+                continue
+            out[k] = (pc, out[k][1].replace(m.group(0), '{ NX_LOOP_EDGE(); %s }' % m.group(0), 1))
+    return out
+
+
 def lift_function(env, entry):
     """-> (text, instruction count, [(pc, word, reason)], [(pad, entry)])."""
     img = env.img
@@ -370,6 +396,8 @@ def lift_function(env, entry):
             stmt = '{ %s%s }' % (pre, stmt)
         lines.append((pc, stmt))
         pc += 4
+    if 'loopbar' in env.opt:
+        lines = loop_barriers(lines)
     pads = env.pads[bisect.bisect_left(env.pads, entry):bisect.bisect_left(env.pads, end)]
     two = bool(pads) or entry in env.catchers
     cold = ''

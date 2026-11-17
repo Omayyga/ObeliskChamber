@@ -25,7 +25,9 @@
 
 set(NXRECOMP_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH "recomp/ folder")
 set(NX_PYTHON "${NXRECOMP_ROOT}/../tools/.venv/Scripts/python.exe" CACHE FILEPATH "Python with the nxrecomp requirements")
-set(NX_OPT "/O1" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
+# /O2 by default (risk R17): upstream measured the culler threads at 29-49 % of a core with /O1 and 3-4 % with /O2; the release build
+# (fefw_build.py, zig) already compiles at -O2. An existing build folder keeps its cached value: pass -DNX_OPT=/O2 or delete CMakeCache.txt.
+set(NX_OPT "/O2" CACHE STRING "optimisation flag of the lifted code (clang-cl syntax)")
 set(NX_EXTRA_FLAGS "" CACHE STRING "more compile flags of the lifted code, space-separated (a profile-guided build: -fprofile-instr-generate, then -fprofile-instr-use=<file>)")
 option(NX_USE_LAUNCHER "wrap lifted-code compiles in cmake/nx_cc_launcher.py (time-limit fallback to optnone / -O0)" OFF)
 

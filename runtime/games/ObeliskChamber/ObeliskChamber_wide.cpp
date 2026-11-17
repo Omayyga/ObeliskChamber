@@ -39,8 +39,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
+#include <mutex>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -91,7 +93,7 @@ constexpr uint64_t kLinesEnd = 0x16bdfbc;         // where every path out of the
 // the 2D renderer's primitive buffer: vertices of 40 bytes (x, y f32 at +0, in 1920x1080 layout pixels), a push takes index count + 1
 // and writes the vertex only while count <= 0x3fffe
 constexpr uint64_t kPrimVerts = 0x4ac0;           // vertex array pointer
-constexpr uint64_t kPrimCount = 0x4b00;           // s32: the last index pushed
+constexpr uint64_t kPrimCount = 0x4b00;           // s32: the last index pushed, -1 while the frame's buffer is empty
 constexpr uint32_t kPrimMaxIndex = 0x3ffff;
 constexpr uint64_t kPrimStride = 40;
 constexpr uint64_t kMovieTarget = 0x1904b5c;      // in 0x1904aa0, after the target is set: [x19] = command wrapper, x20 + 0x10 = s32 w, h
@@ -122,6 +124,7 @@ struct Wide {
     uint32_t ui_scale = 0;          // the bits of 1/(960k) written into UI projections
     float cam_aspect_num = 16.0f;   // 9 * w / h
     std::vector<uint32_t> hooks;
+    bool map_diag = false;          // [fefw] ultrawide_map_diag: log what the map batches leave unsqueezed
     std::atomic<uint64_t> count[kCCount] = {};
     std::atomic<bool> logged[kCCount] = {};
 };
@@ -234,6 +237,21 @@ ImageMode image_mode() {
 // A picture that spans the whole 1920 wide layout (a dim, a menu backdrop) is drawn k times wider, so it covers the output: its
 // Calculate copies the pane's global matrix into the draw info's model-view (LoadMtx) and from there into the pane's constant buffer; the
 // model-view's x row is scaled in between. The pane's own matrix, and so its children, stay as they are. Text boxes are not pictures.
+// One log line per distinct pane the edge rule looks at (vtable, size, extent; at most 32), with what it did.
+void log_edge_pane(uint64_t pane, float pw, float ph, float left, float right, const char* what) {
+    static std::mutex mu;
+    static std::vector<uint64_t> seen;
+    const uint64_t vt = rdv<uint64_t>(pane) - ws().base;
+    const uint64_t key = vt * 0x9e3779b97f4a7c15ull ^ (static_cast<uint64_t>(std::lround(pw)) << 48) ^ (static_cast<uint64_t>(std::lround(ph)) << 32) ^
+                         (static_cast<uint64_t>(std::lround(left + 4096.0f)) << 16) ^ static_cast<uint64_t>(std::lround(right + 4096.0f));
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+        seen.push_back(key);
+    }
+    NXLOG_I(kTag, "ultrawide: edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", static_cast<unsigned long long>(vt), pw, ph, left, right, what);
+}
+
 void widen_pane(uint64_t pane, uint64_t info) {
     Wide& w = ws();
     if (rdv<uint32_t>(info + 0x10) != w.ui_scale) return;
@@ -268,13 +286,21 @@ void widen_pane(uint64_t pane, uint64_t info) {
     // x' = a x + b in layout units: a full-width pane scales about the centre; a full-height one on one edge reaches the output's edge there
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
-        if (std::fabs(rdv<float>(pane + kPaneSize + 4) * rdv<float>(m + 0x14)) < 1000.0f) return;
+        if (std::fabs(ph * m11) < 1000.0f) return;
+        // A picture on one edge wider than half the layout is content, not a side panel's backdrop: the world map's art (about 1480 wide on
+        // the right) came out 1.22 times wider than high and no longer under the panes drawn over it (markers, the cursor), and the title
+        // screen's 1416-wide picture reached into the bar with `fit` (risk R12). It stays at 16:9. Upstream 83906e5 (moistman7).
+        if (right - left > 960.0f) {
+            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (content, not a side backdrop)");
+            return;
+        }
         const float edge = 960.0f * w.k;
         if (at_left) a = (right + edge) / (right - left), b = right - a * right;
         else a = (right - left + (edge - right)) / (right - left), b = left - a * left;   // keeps the left edge, the right one goes to +edge
     }
     for (int i = 0; i < 3; ++i) wrv<float>(mv + 4 * i, rdv<float>(mv + 4 * i) * a);
     wrv<float>(mv + 0xc, rdv<float>(mv + 0xc) * a + b);
+    if (!(at_left && at_right)) log_edge_pane(pane, pw, ph, left, right, "picture stretched to the output's edge");
     if (first(kCBackdrop))
         NXLOG_I(kTag, "ultrawide: full-width / edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) drawn x %.0f..%.0f",
                 static_cast<unsigned long long>(rdv<uint64_t>(pane) - w.base), pw, rdv<float>(pane + kPaneSize + 4), left, right, a * left + b, a * right + b);
@@ -315,38 +341,115 @@ void hook_stat_graph(::Ctx* c, uint64_t, void*) {
 // two batches is bracketed: at its start the buffer's vertex count is noted, at its end every vertex pushed since gets x' = 960 + (x - 960) / k.
 struct MapBatch {
     uint64_t renderer = 0;
-    uint32_t count0 = 0;
+    int32_t count0 = 0;   // signed: -1 when the batch is the frame's first draw (the world map's dark route outline is)
     bool open = false;
 };
 thread_local MapBatch t_dots, t_lines;
+
+// [fefw] ultrawide_map_diag (debug, #66): the index ranges the map batches squeezed this frame, so the end of the dots batch can list
+// what else is in the buffer (the thick dark route curves on the world map are not squeezed and their drawer is not known yet).
+struct MapDiag {
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;   // [first, last] indices squeezed this frame, in push order
+    uint32_t last_end = 0;
+    uint64_t lines_renderer = 0;
+    int64_t next_ms = 0;
+    int reports = 0;
+};
+thread_local MapDiag t_diag;
 
 void map_batch_start(MapBatch& b, uint64_t renderer) {
     b.open = false;
     if (!renderer || !mem::is_mapped(renderer + kPrimCount, 4)) return;
     b.renderer = renderer;
-    b.count0 = rdv<uint32_t>(renderer + kPrimCount);
+    b.count0 = rdv<int32_t>(renderer + kPrimCount);
+    if (b.count0 < -1 || b.count0 > static_cast<int32_t>(kPrimMaxIndex)) return;
     b.open = true;
+    if (ws().map_diag && (b.count0 < 0 || static_cast<uint32_t>(b.count0) < t_diag.last_end)) t_diag.ranges.clear();   // a new frame
 }
 void map_batch_end(MapBatch& b) {
     if (!b.open) return;
     b.open = false;
-    const uint32_t count1 = rdv<uint32_t>(b.renderer + kPrimCount);
-    if (count1 <= b.count0 || count1 - b.count0 > kPrimMaxIndex + 1) return;   // nothing pushed, or the count went back
-    const uint32_t last = std::min(count1, kPrimMaxIndex);
-    if (last <= b.count0) return;
+    // Indices are signed: a batch that opens the frame starts at -1 and pushes from index 0. Read as unsigned, -1 made every such batch look
+    // as if the count had gone back, and it was left wide (#66: the world map's thick dark route outline, drawn first, before the white line).
+    const int32_t count1 = rdv<int32_t>(b.renderer + kPrimCount);
+    if (count1 <= b.count0) return;   // nothing pushed, or the count went back
+    const uint32_t first_idx = static_cast<uint32_t>(b.count0 + 1);
+    const uint32_t last = std::min(static_cast<uint32_t>(count1), kPrimMaxIndex);
+    if (last < first_idx) return;
+    const uint32_t n = last - first_idx + 1;
     const uint64_t verts = rdv<uint64_t>(b.renderer + kPrimVerts);
-    const uint64_t from = verts + (static_cast<uint64_t>(b.count0) + 1) * kPrimStride;
-    if (!verts || !mem::is_mapped(from, static_cast<uint64_t>(last - b.count0) * kPrimStride)) return;
+    const uint64_t from = verts + static_cast<uint64_t>(first_idx) * kPrimStride;
+    if (!verts || !mem::is_mapped(from, static_cast<uint64_t>(n) * kPrimStride)) return;
     const float inv_k = ws().inv_k;
     for (uint64_t a = from, end = verts + (static_cast<uint64_t>(last) + 1) * kPrimStride; a < end; a += kPrimStride)
         wrv<float>(a, 960.0f + (rdv<float>(a) - 960.0f) * inv_k);
-    if (first(kCMapRoutes)) NXLOG_I(kTag, "ultrawide: map batch of %u vertices: x scaled by %.4f about 960", last - b.count0, inv_k);
+    if (first(kCMapRoutes)) NXLOG_I(kTag, "ultrawide: map batch of %u vertices: x scaled by %.4f about 960", n, inv_k);
+    if (ws().map_diag) {
+        t_diag.ranges.emplace_back(first_idx, last);
+        t_diag.last_end = last;
+    }
+}
+
+// Lists the buffer's vertices 0 .. last that no map batch squeezed this frame, as runs of consecutive indices: count, x and y range,
+// the first vertex's colour word. At most once every 2 s, 12 reports in all.
+void map_diag_report(uint64_t renderer) {
+    MapDiag& d = t_diag;
+    if (d.reports >= 12 || !renderer || !mem::is_mapped(renderer + kPrimVerts, 8)) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now < d.next_ms) return;
+    d.next_ms = now + 2000;
+    ++d.reports;
+    const int32_t raw = rdv<int32_t>(renderer + kPrimCount);
+    if (raw < 0) return;
+    const uint32_t count = std::min(static_cast<uint32_t>(raw), kPrimMaxIndex);   // the last index; vertices 0 .. count
+    const uint64_t verts = rdv<uint64_t>(renderer + kPrimVerts);
+    if (!verts || !mem::is_mapped(verts, (static_cast<uint64_t>(count) + 1) * kPrimStride)) return;
+    uint64_t squeezed = 0;
+    for (const auto& r : d.ranges) squeezed += r.second - r.first + 1;
+    NXLOG_I(kTag, "ultrawide map diag %d: %u vertices in the buffer (0 .. last), %zu batches squeezed (%llu vertices), lines renderer %s the dots one",
+            d.reports, count + 1, d.ranges.size(), static_cast<unsigned long long>(squeezed),
+            d.lines_renderer == renderer ? "is" : (d.lines_renderer ? "is not" : "not seen, so not compared with"));
+    auto covered = [&](uint32_t i) {
+        for (const auto& r : d.ranges)
+            if (i >= r.first && i <= r.second) return true;
+        return false;
+    };
+    int runs = 0;
+    for (uint32_t i = 0; i <= count && runs < 24;) {
+        if (covered(i)) { ++i; continue; }
+        const uint32_t a = i;
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        const uint32_t colour = rdv<uint32_t>(verts + a * kPrimStride + 0x18);
+        for (; i <= count && !covered(i); ++i) {
+            const float x = rdv<float>(verts + i * kPrimStride), y = rdv<float>(verts + i * kPrimStride + 4);
+            x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
+        }
+        NXLOG_I(kTag, "ultrawide map diag %d: not squeezed: indices %u..%u (%u), x %.1f..%.1f, y %.1f..%.1f, colour 0x%08x", d.reports, a,
+                i - 1, i - a, x0, x1, y0, y1, colour);
+        ++runs;
+    }
+    for (const auto& r : d.ranges) {
+        float x0 = 1e9f, x1 = -1e9f;
+        for (uint32_t i = r.first; i <= r.second && i <= count; ++i) {
+            const float x = rdv<float>(verts + i * kPrimStride);
+            x0 = std::min(x0, x); x1 = std::max(x1, x);
+        }
+        NXLOG_I(kTag, "ultrawide map diag %d: squeezed: indices %u..%u (%u), x now %.1f..%.1f, colour 0x%08x", d.reports, r.first, r.second,
+                r.second - r.first + 1, x0, x1, rdv<uint32_t>(verts + r.first * kPrimStride + 0x18));
+    }
 }
 void hook_dots_start(::Ctx* c, uint64_t, void*) {
     map_batch_start(t_dots, mem::is_mapped(c->x[0], 8) ? rdv<uint64_t>(c->x[0]) : 0);
 }
-void hook_dots_end(::Ctx*, uint64_t, void*) { map_batch_end(t_dots); }
-void hook_lines_start(::Ctx* c, uint64_t, void*) { map_batch_start(t_lines, c->x[0]); }
+void hook_dots_end(::Ctx*, uint64_t, void*) {
+    const uint64_t renderer = t_dots.renderer;
+    map_batch_end(t_dots);
+    if (ws().map_diag) map_diag_report(renderer);
+}
+void hook_lines_start(::Ctx* c, uint64_t, void*) {
+    map_batch_start(t_lines, c->x[0]);
+    if (ws().map_diag) t_diag.lines_renderer = c->x[0];
+}
 void hook_lines_end(::Ctx*, uint64_t, void*) { map_batch_end(t_lines); }
 
 // ---- world markers ------------------------------------------------------------------------------------------------------------------------
@@ -511,6 +614,7 @@ void wide_install(uint64_t base, int out_w, int out_h) {
         add(kEdgeMarker, &hook_edge_marker);
     }
     if (on("statgraph")) add(kStatGraph, &hook_stat_graph);
+    w.map_diag = config_get_bool("fefw", "ultrawide_map_diag", false);
     if (on("maproutes")) {
         add(kDotsStart, &hook_dots_start);
         add(kDotsEnd, &hook_dots_end);

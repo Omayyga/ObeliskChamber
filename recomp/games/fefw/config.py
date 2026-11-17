@@ -36,7 +36,9 @@ class Config(GameConfig):
     # scalar results written to a V register as one whole-register store (perf/codegen2: every V register write), and x8..x17 in
     # function locals in functions that make calls ('tregs', opt.temps_local: AAPCS64 temporaries, not written back at calls and
     # returns). tregs changes the control flow clang sees in ~40 % of the functions it touches: build PGO with a profile of tregs code.
-    opt = ('flags', 'vstore', 'tregs')
+    # 'loopbar': a compiler memory barrier on every loop back edge (lift/a64.py Fn.jump), so a polling loop re-reads guest memory each pass
+    # once flags and temporaries live in locals (big win #7, after Savage Wind's boot hang). No instruction is emitted.
+    opt = ('flags', 'vstore', 'tregs', 'loopbar')
     # nnSdk 22.2.0's C string routines run natively (cxx.h hle_*; same results, checked against the lifted routines by
     # recomp/tests/hle_libc_test.cpp). Address: (body, the routine's first instruction words).
     inline_replace = {

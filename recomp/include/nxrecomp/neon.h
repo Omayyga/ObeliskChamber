@@ -173,6 +173,9 @@ NX_HOT int v_f3s_fast(V128 *d, __m128 a, __m128 b, const V128 *acc, int op, int 
         if ((_mm_movemask_ps(_mm_cmpge_ps(_mm_andnot_ps(sign, a), _mm_set1_ps(2.0f * 1.17549435e-38f))) & nx_lanes(n)) != nx_lanes(n)) return 0;
         r = _mm_fmadd_ps(_mm_mul_ps(_mm_xor_ps(a, sign), _mm_set1_ps(0.5f)), b, _mm_set1_ps(1.5f));
         break;
+#elif defined(NX_FAST_FMA)
+    case F_MLA: r = _mm_add_ps(_mm_mul_ps(a, b), nx_ldps(acc, n)); break;   /* fpexact.h nx_fmaf: two roundings, as the element code */
+    case F_MLS: r = _mm_sub_ps(nx_ldps(acc, n), _mm_mul_ps(a, b)); break;
 #endif
     case F_MAX: case F_MIN: case F_MAXNM: case F_MINNM: {             /* without NaN operands: the larger / smaller, +0 > -0 */
         if (_mm_movemask_ps(_mm_cmpunord_ps(a, b)) & nx_lanes(n)) return 0;

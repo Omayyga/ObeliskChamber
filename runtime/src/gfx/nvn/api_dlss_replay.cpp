@@ -667,7 +667,7 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
             return;
         }
         static bool told[6] = {};   // once per upscaler: a menu can switch to another one that cannot run either
-        if (!told[static_cast<int>(u)]) {
+        if (!told[static_cast<int>(u)] && !(why && why[0])) {   // a per-frame failure is logged by the backend, with its retry
             told[static_cast<int>(u)] = true;
             NXLOG_W(kTag, "%s is not available (its DLLs, or Streamline not started): the built-in temporal upscaler is used", upscaler_name(u));
         }

@@ -92,8 +92,8 @@ class FpOps:
     def fma(self, i, ops, kind):
         d, n, m, a = (self.regop(i, o) for o in ops[:4])
         N, M, Aa = self.fr(n), self.fr(m), self.fr(a)
-        e = {"fmadd": f"std::fma({N}, {M}, {Aa})", "fmsub": f"std::fma(-({N}), {M}, {Aa})",
-             "fnmadd": f"std::fma(-({N}), {M}, -({Aa}))", "fnmsub": f"std::fma({N}, {M}, -({Aa}))"}[kind]
+        e = {"fmadd": f"nx::nx_fma_t({N}, {M}, {Aa})", "fmsub": f"nx::nx_fma_t(-({N}), {M}, {Aa})",
+             "fnmadd": f"nx::nx_fma_t(-({N}), {M}, -({Aa}))", "fnmsub": f"nx::nx_fma_t({N}, {M}, -({Aa}))"}[kind]
         return self.fw(d, e)
 
     def i_fmadd(self, f, i, ops):

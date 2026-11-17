@@ -155,14 +155,14 @@ class NeonOps:
     def i_fmla(self, f, i, ops):
         if not ops[0].vas:  # scalar by element: fmla s0, s1, v2.s[1]
             d, n = self.regop(i, ops[0]), self.regop(i, ops[1])
-            return self.fw(d, f"std::fma({self.fr(n)}, {self.velem(i, ops[2], 'f')}, {self.fr(d)})")
-        return self.v_bin(i, ops, "std::fma(a, b, o)", fp=True)
+            return self.fw(d, f"nx::nx_fma_t({self.fr(n)}, {self.velem(i, ops[2], 'f')}, {self.fr(d)})")
+        return self.v_bin(i, ops, "nx::nx_fma_t(a, b, o)", fp=True)
 
     def i_fmls(self, f, i, ops):
         if not ops[0].vas:
             d, n = self.regop(i, ops[0]), self.regop(i, ops[1])
-            return self.fw(d, f"std::fma(-({self.fr(n)}), {self.velem(i, ops[2], 'f')}, {self.fr(d)})")
-        return self.v_bin(i, ops, "std::fma(-a, b, o)", fp=True)
+            return self.fw(d, f"nx::nx_fma_t(-({self.fr(n)}), {self.velem(i, ops[2], 'f')}, {self.fr(d)})")
+        return self.v_bin(i, ops, "nx::nx_fma_t(-a, b, o)", fp=True)
 
     def i_mla(self, f, i, ops):
         return self.v_bin(i, ops, "o + a * b")
