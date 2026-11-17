@@ -658,7 +658,7 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
             return;
         }
         static bool told = false;
-        if (!told) {
+        if (!told && !(why && why[0])) {   // a per-frame failure is logged by the backend, with its retry
             told = true;
             NXLOG_W(kTag, "%s is not available (its DLLs, or Streamline not started): the built-in temporal upscaler is used", upscaler_name(u));
         }

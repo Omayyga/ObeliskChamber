@@ -5,6 +5,18 @@
 #ifndef NXRECOMP_FPEXACT_H
 #define NXRECOMP_FPEXACT_H
 
+/* The fused multiply-add the guest's FMADD / FMLA family needs. With FMA3 (__FMA__) fma / fmaf are one vfmadd. Without it they are calls
+ * into the exactly rounded library routines (game-build sdk fefw_fma.c), which are slow; NX_FAST_FMA (the compatible build's default,
+ * fefw_build.py "fast_fma") makes them a multiply and an add, rounded twice, inline (Savage Wind's choice: 130 -> 151 fps on a
+ * processor without FMA3). Only the last bit of some results can differ; NaN and infinity handling below is unchanged. */
+#if defined(NX_FAST_FMA) && !defined(__FMA__)
+static inline float nx_fmaf(float a, float b, float c) { return a * b + c; }     /* -ffp-contract=off: two roundings */
+static inline double nx_fmad(double a, double b, double c) { return a * b + c; }
+#else
+static inline float nx_fmaf(float a, float b, float c) { return fmaf(a, b, c); }
+static inline double nx_fmad(double a, double b, double c) { return fma(a, b, c); }
+#endif
+
 /* x86 produces a negative quiet NaN for invalid operations, AArch64 a positive one. */
 static inline float fnan32(float r) {
     uint32_t b;
@@ -258,7 +270,7 @@ static inline double fp_abs64(double a) { return fp_from_bits64(fp_bits64(a) & 0
 /* Fused n * m + a. NaN order is addend, n, m (measured on Unicorn, not the order of the operands in the encoding). A quiet
  * NaN addend with an invalid product (inf * 0) gives the default NaN, not the addend. */
 static inline float fp_fma32(float n, float m, float a) {
-    float r = fmaf(n, m, a);
+    float r = nx_fmaf(n, m, a);
     if (r == r) return r;
     uint32_t bn = fp_bits32(n), bm = fp_bits32(m), ba = fp_bits32(a);
     if (fp_nan32b(ba) && !fp_snan32b(ba) &&
@@ -267,7 +279,7 @@ static inline float fp_fma32(float n, float m, float a) {
     return fp_nan_result32(3, a, n, m);       /* the addend has the first place (Unicorn, probed), then n, then m */
 }
 static inline double fp_fma64(double n, double m, double a) {
-    double r = fma(n, m, a);
+    double r = nx_fmad(n, m, a);
     if (r == r) return r;
     uint64_t bn = fp_bits64(n), bm = fp_bits64(m), ba = fp_bits64(a);
     if (fp_nan64b(ba) && !fp_snan64b(ba) &&
@@ -289,8 +301,8 @@ static inline float fp_rsqrts32(float a, float b) {
      * cannot overflow in the intermediate product (a = 1.5, b = FLT_MAX has the finite result -0.75 * FLT_MAX). */
     float na = fp_neg32(a);
     if (a == a && b == b) {
-        if (fabsf(a) >= 2.0f * 1.17549435e-38f) return fmaf(na * 0.5f, b, 1.5f);
-        if (fabsf(b) >= 2.0f * 1.17549435e-38f) return fmaf(na, b * 0.5f, 1.5f);
+        if (fabsf(a) >= 2.0f * 1.17549435e-38f) return nx_fmaf(na * 0.5f, b, 1.5f);
+        if (fabsf(b) >= 2.0f * 1.17549435e-38f) return nx_fmaf(na, b * 0.5f, 1.5f);
     }
     return fp_fma32(na, b, 3.0f) * 0.5f;
 }
@@ -304,8 +316,8 @@ static inline double fp_rsqrts64(double a, double b) {
     if ((fp_inf64b(ba) && fp_zero64b(bb)) || (fp_zero64b(ba) && fp_inf64b(bb))) return 1.5;
     double na = fp_neg64(a);
     if (a == a && b == b) {
-        if (fabs(a) >= 2.0 * 2.2250738585072014e-308) return fma(na * 0.5, b, 1.5);
-        if (fabs(b) >= 2.0 * 2.2250738585072014e-308) return fma(na, b * 0.5, 1.5);
+        if (fabs(a) >= 2.0 * 2.2250738585072014e-308) return nx_fmad(na * 0.5, b, 1.5);
+        if (fabs(b) >= 2.0 * 2.2250738585072014e-308) return nx_fmad(na, b * 0.5, 1.5);
     }
     return fp_fma64(na, b, 3.0) * 0.5;
 }

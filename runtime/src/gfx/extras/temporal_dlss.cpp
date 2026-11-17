@@ -9,7 +9,9 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -99,6 +101,7 @@ struct Sl {
     PFun_slGetFeatureFunction* feature_fn = nullptr;
     PFun_slDLSSSetOptions* set_options = nullptr;
     PFun_slDLSSGetOptimalSettings* optimal = nullptr;
+    PFun_slFreeResources* free_resources = nullptr;   // optional: DLSS's memory goes back while it waits for a retry
 };
 Sl& sl_state() {
     static Sl s;
@@ -203,8 +206,20 @@ public:
     bool evaluate(VkCommandBuffer cb, const TemporalFrame& f) override {
         Sl& s = sl_state();
         if (failed_) return false;
+        // After a failure of one frame's work (slEvaluateFeature 39 beside Streamline's "Exceeded VRAM budget", upstream issue 21) the caller
+        // runs the built-in upscaler until the retry time; the retry starts from no history (the caller resets it when the backend changes).
         // DLSS-G consumes viewport 0 at present; keep SR tags/constants separate.
         const sl::ViewportHandle vp(framegen_dlss() ? 1u : 0u);
+        if (retry_pending_) {
+            const auto now = std::chrono::steady_clock::now();
+            // DLSS's memory goes back half a second after the failure, when no frame in flight can still use it (frames_in_flight is 2)
+            if (free_pending_ && now >= free_at_) {
+                free_pending_ = false;
+                if (s.free_resources && s.free_resources(sl::kFeatureDLSS, vp) == sl::Result::eOk) NXLOG_I(kTag, "DLSS's memory released until the retry");
+            }
+            if (now < retry_at_) return false;
+        }
+        if (test_failure()) return fail_frame(s, vp, "slEvaluateFeature (test: [dlss] test_fail_after_s)", 39);
         sl::FrameToken* frame = static_cast<sl::FrameToken*>(sl_frame_token());
         if (!frame) return fail("slGetNewFrameToken");
         // The mode: kept while the input size stays in its dynamic range (the game may change its render size per frame), else the one
@@ -275,7 +290,7 @@ public:
         c.motionVectors3D = sl::Boolean::eFalse;
         c.reset = f.reset ? sl::Boolean::eTrue : sl::Boolean::eFalse;
         c.motionVectorsJittered = sl::Boolean::eFalse;
-        if (s.constants(c, *frame, vp) != sl::Result::eOk) return fail("slSetConstants");
+        if (s.constants(c, *frame, vp) != sl::Result::eOk) return fail_frame(s, vp, "slSetConstants");
         sl::Resource col = resource(f.color), dep = resource(f.depth), mv = resource(f.motion), out = resource(f.output);
         const sl::Extent in_ext{0, 0, f.render.width, f.render.height}, out_ext{0, 0, f.out.width, f.out.height};
         sl::ResourceTag tags[4] = {sl::ResourceTag(&col, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
@@ -283,10 +298,16 @@ public:
                                    sl::ResourceTag(&mv, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &in_ext),
                                    sl::ResourceTag(&out, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, &out_ext)};
         auto* slcb = reinterpret_cast<sl::CommandBuffer*>(cb);
-        if (s.tag(*frame, vp, tags, 4, slcb) != sl::Result::eOk) return fail("slSetTagForFrame");
+        if (s.tag(*frame, vp, tags, 4, slcb) != sl::Result::eOk) return fail_frame(s, vp, "slSetTagForFrame");
         const sl::BaseStructure* inputs[] = {&vp};
         const sl::Result er = s.evaluate(sl::kFeatureDLSS, *frame, inputs, 1, slcb);
-        if (er != sl::Result::eOk) return fail("slEvaluateFeature", static_cast<int>(er));
+        if (er != sl::Result::eOk) return fail_frame(s, vp, "slEvaluateFeature", static_cast<int>(er));
+        if (retry_pending_) {
+            NXLOG_I(kTag, "%s is back after %u failed attempt(s)", name(), fail_streak_);
+            retry_pending_ = false;
+            fail_streak_ = 0;
+            failure_[0] = '\0';
+        }
         return true;
     }
 
@@ -338,9 +359,47 @@ private:
         failed_ = true;
         return false;
     }
+    // A failure of one frame's work (constants, tags, the evaluation): Streamline and the DLSS feature are still there, and the usual cause
+    // passes (video memory over the OS budget during a level load). DLSS's own memory is released half a second later (slFreeResources,
+    // once no frame in flight can use it), the built-in upscaler stands in, and DLSS is tried again after 2 s, doubling up to 30 s
+    // while it keeps failing. So a passing failure gives DLSS back instead of TAAU for the rest of the session (upstream f3b3e3d), and the
+    // memory it held is not kept from the game meanwhile (Fortune's Eden v1.6.7.3: an 8 GB card stayed at 15-30 fps without that).
+    // Setup failures (no token, options refused) still turn DLSS off (fail).
+    bool fail_frame(Sl& s, const sl::ViewportHandle& vp, const char* what, int code = -1) {
+        ++fail_streak_;
+        const unsigned shift = fail_streak_ > 5 ? 4u : fail_streak_ - 1u;
+        const int delay_s = std::min(2 << shift, 30);
+        retry_at_ = std::chrono::steady_clock::now() + std::chrono::seconds(delay_s);
+        retry_pending_ = true;
+        (void)s;
+        (void)vp;
+        free_pending_ = true;    // released from the next evaluation half a second on (above)
+        free_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        last_out_ = {};          // the mode and its options are set again at the retry (the feature is freed meanwhile)
+        last_preset_ = -1;
+        if (fail_streak_ == 1)
+            NXLOG_E(kTag, "%s failed (%d): the built-in upscaler until DLSS is tried again in %d s", what, code, delay_s);
+        else NXLOG_W(kTag, "%s failed (%d) again (%u in a row): next try in %d s", what, code, fail_streak_, delay_s);
+        if (code >= 0) std::snprintf(failure_, sizeof(failure_), "%s failed (%d): retrying in %d s", what, code, delay_s);
+        else std::snprintf(failure_, sizeof(failure_), "%s failed: retrying in %d s", what, delay_s);
+        return false;
+    }
+    // [dlss] test_fail_after_s = N (a test aid): one evaluation N seconds after the first is treated as failed, to see the retry on a GPU
+    // with video memory to spare.
+    bool test_failure() {
+        static const double after = config_get_double("dlss", "test_fail_after_s", 0.0);
+        if (after <= 0 || test_done_) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (first_eval_ == std::chrono::steady_clock::time_point{}) first_eval_ = now;
+        if (std::chrono::duration<double>(now - first_eval_).count() < after) return false;
+        test_done_ = true;
+        return true;
+    }
     const char* last_failure() const override { return failure_; }
     [[maybe_unused]] gfx::Device* dev_;
-    bool dlaa_ = false, failed_ = false;
+    bool dlaa_ = false, failed_ = false, retry_pending_ = false, free_pending_ = false, test_done_ = false;
+    unsigned fail_streak_ = 0;
+    std::chrono::steady_clock::time_point retry_at_{}, free_at_{}, first_eval_{};
     char failure_[96] = {};
     sl::DLSSMode last_mode_ = sl::DLSSMode::eCount;
     int last_preset_ = -1;
@@ -416,6 +475,7 @@ PFN_vkGetInstanceProcAddr streamline_preinit() {
     s.tag = reinterpret_cast<PFun_slSetTagForFrame*>(get("slSetTagForFrame"));
     s.evaluate = reinterpret_cast<PFun_slEvaluateFeature*>(get("slEvaluateFeature"));
     s.feature_fn = reinterpret_cast<PFun_slGetFeatureFunction*>(get("slGetFeatureFunction"));
+    s.free_resources = reinterpret_cast<PFun_slFreeResources*>(get("slFreeResources"));
     auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(get("vkGetInstanceProcAddr"));
     if (!s.init || !s.supported || !s.token || !s.constants || !s.tag || !s.evaluate || !s.feature_fn || !gipa) {
         NXLOG_E(kTag, "sl.interposer.dll lacks the Streamline API");

@@ -422,6 +422,15 @@ inline F fmin_(F a, F b) {
     return a < b ? a : b;
 }
 
+// std::fma, or a multiply and an add with NX_FAST_FMA on a processor without FMA3 (fpexact.h nx_fmaf / nx_fmad).
+// Mixed argument types promote as std::fma's do.
+template <typename A, typename B, typename C>
+inline auto nx_fma_t(A a, B b, C c) {
+    using T = decltype(std::fma(a, b, c));
+    if constexpr (std::is_same_v<T, float>) return nx_fmaf(a, b, c);
+    else return nx_fmad(static_cast<double>(a), static_cast<double>(b), static_cast<double>(c));
+}
+
 // FRSQRTS/FRECPS: (0 * inf) gives the exact step result instead of NaN.
 template <typename F>
 inline F frsqrts(F a, F b) {
@@ -429,15 +438,15 @@ inline F frsqrts(F a, F b) {
     // Fused on hardware, (3 - a * b) / 2 rounded once. Halving a normal operand is exact, so fold the / 2 into it
     // and the fma rounds once without overflowing in between.
     const F lim = std::numeric_limits<F>::min() * 2;
-    if (std::fabs(a) >= lim) return std::fma(-(a * F(0.5)), b, F(1.5));
-    if (std::fabs(b) >= lim) return std::fma(-a, b * F(0.5), F(1.5));
-    return std::fma(-a, b, F(3)) / F(2);
+    if (std::fabs(a) >= lim) return nx_fma_t(-(a * F(0.5)), b, F(1.5));
+    if (std::fabs(b) >= lim) return nx_fma_t(-a, b * F(0.5), F(1.5));
+    return nx_fma_t(-a, b, F(3)) / F(2);
 }
 
 template <typename F>
 inline F frecps(F a, F b) {
     if ((std::isinf(a) && b == 0) || (a == 0 && std::isinf(b))) return F(2);
-    return std::fma(-a, b, F(2));  // fused on hardware
+    return nx_fma_t(-a, b, F(2));  // fused on hardware
 }
 
 // ---- vector helpers -----------------------------------------------------------------------------------------

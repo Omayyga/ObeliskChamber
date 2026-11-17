@@ -312,6 +312,11 @@ static inline void nx_spin_hint(int kind) {
 static inline void nx_spin_hint(int kind) { (void)kind; }
 #endif
 
+/* A loop's back edge in lifted code (opt 'loopbar', lift/a64.py Fn.jump): a compiler-only memory barrier, no instruction. Guest memory
+ * read in the loop is read again on every pass, so a polling loop whose context stores the opt passes removed is not folded into an
+ * endless one (Savage Wind found that hang). Locals (flags, tregs) are not memory and stay in registers. */
+#define NX_LOOP_EDGE() __asm__ __volatile__("" ::: "memory")
+
 #include "fpexact.h"
 #include "neon.h"
 

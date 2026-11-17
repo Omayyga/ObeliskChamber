@@ -104,8 +104,12 @@ CXXFLAGS_COMMON = ['-std=c++20', '-O1', '-g0', '-fomit-frame-pointer', '-w', '-f
 #                  functions, at more memory per compile. 40 to 400.
 #   "job_gib":     memory assumed per compile job when the job count is capped by free memory (the release: 2). Raise it for
 #                  "O2" / "O3" or fewer shards if compiles fail for memory (a failed unit is retried alone anyway).
+#   "fast_fma":    true (the release's) or false. The compatible build only (no FMA3): true does the guest's fused multiply-adds as a
+#                  multiply then an add (two roundings, inline), false calls the exactly rounded fma / fmaf of sdk/fefw_fma.c. Savage
+#                  Wind measured the compatible build 130 -> 151 fps that way (big win #4). Results may differ in a float's last bit;
+#                  false gives the FMA3 build's bits exactly.
 # Every key that differs from the release's is part of the build stamp, so changing the file makes Set up build again.
-TUNE_DEFAULTS = {'cpu': '', 'opt': 'O1', 'main_shards': MODULES[0][4], 'job_gib': 2}
+TUNE_DEFAULTS = {'cpu': '', 'opt': 'O1', 'main_shards': MODULES[0][4], 'job_gib': 2, 'fast_fma': True}
 TUNE = dict(TUNE_DEFAULTS)
 
 
@@ -142,7 +146,7 @@ def load_tune(game, quiet=False):
         if k.startswith('_'):
             continue                                     # "_comment" keys
         if k not in TUNE_DEFAULTS:
-            raise Fail('build_options.json: unknown key "%s" (cpu, opt, main_shards, job_gib)' % k)
+            raise Fail('build_options.json: unknown key "%s" (cpu, opt, main_shards, job_gib, fast_fma)' % k)
         if k == 'cpu':
             if not isinstance(v, str) or not re.fullmatch(r'[A-Za-z0-9_]*', v):
                 raise Fail('build_options.json: "cpu" is "native", a CPU name such as "raptorlake", or ""')
@@ -160,6 +164,9 @@ def load_tune(game, quiet=False):
         elif k == 'job_gib':
             if not isinstance(v, (int, float)) or not 1 <= v <= 16:
                 raise Fail('build_options.json: "job_gib" is a number from 1 to 16')
+        elif k == 'fast_fma':
+            if not isinstance(v, bool):
+                raise Fail('build_options.json: "fast_fma" is true or false')
         TUNE[k] = v
     changed = {k: TUNE[k] for k in TUNE if TUNE[k] != TUNE_DEFAULTS[k]}
     if changed and not quiet:
@@ -168,7 +175,7 @@ def load_tune(game, quiet=False):
 
 def tune_stamp():
     """The build options that change ObeliskChamber.exe (job_gib does not), when any differs from the release's; else None."""
-    st = {k: TUNE[k] for k in ('cpu', 'opt', 'main_shards') if TUNE[k] != TUNE_DEFAULTS[k]}
+    st = {k: TUNE[k] for k in ('cpu', 'opt', 'main_shards', 'fast_fma') if TUNE[k] != TUNE_DEFAULTS[k]}
     return st or None
 
 
@@ -200,6 +207,8 @@ def cxxflags(variant):
     if PGO['use']:
         extra += ['-fprofile-use=' + PGO['use'], '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-unprofiled',
                   '-mllvm', '-enable-ext-tsp-block-placement']   # profile-driven block order (ext-TSP) for the instruction cache
+    if variant == 'compat' and TUNE['fast_fma'] and not TUNE['cpu']:
+        extra += ['-DNX_FAST_FMA']   # recomp fpexact.h / cxx.h / neon.h: fused multiply-adds as a multiply and an add (no FMA3 here)
     return ['-target', 'x86_64-windows-gnu', '-mcpu=' + mcpu(variant)] + common + extra
 CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL = 0x00004000
