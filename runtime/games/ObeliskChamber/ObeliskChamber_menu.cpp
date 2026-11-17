@@ -16,6 +16,7 @@
 // frame generation are set up once, the frame-rate hooks are installed at start) says "restart", and the row shows the value in force until
 // then; nothing pretends to be live. A key set by an environment variable (NXRT_...) wins over the file: the row says so and is locked.
 #include "ObeliskChamber_game.h"
+#include "ObeliskChamber_presets.h"
 
 #include <algorithm>
 #include <array>
@@ -493,10 +494,40 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
 }
 
 // ---- Graphics ---------------------------------------------------------------------------------------------------------------------------
-constexpr const char* kOutputNames[] = {"Console (the game's choice: 1440p docked)", "1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
-                                        "2560 x 1080 (21:9)", "3440 x 1440 (21:9)", "5120 x 1440 (32:9, drawn at 3840 x 1080)", "The window's size at start"};
-constexpr const char* kOutputVals[] = {"console", "720p", "1080p", "1440p", "2160p", "2560x1080", "3440x1440", "5120x1440", "window"};
-constexpr int kOutputCount = static_cast<int>(std::size(kOutputVals));
+// The output list (ObeliskChamber_presets.h kOutputChoices) named by shape, then "This monitor" (the display the window is on) when its
+// size is known. Rebuilt when the menu draws, so a window moved to another display shows that one.
+struct OutputList {
+    std::vector<std::string> names, vals;
+    std::vector<const char*> name_ptrs;
+    int monitor = -1;    // the index of the "This monitor" entry, -1 when there is none
+};
+std::string output_choice_name(const OutputChoice& o) {
+    std::string n;
+    if (!std::strcmp(o.shape, "16:9")) n = "16:9  ";
+    else if (!std::strcmp(o.shape, "21:9")) n = "21:9 ultrawide  ";
+    else if (!std::strcmp(o.shape, "32:9")) n = "32:9 super ultrawide  ";
+    n += o.size;
+    if (*o.note) n += std::string(" (") + o.note + ")";
+    return n;
+}
+const OutputList& output_list() {
+    static OutputList l;
+    static std::string monitor_was = "?";
+    const std::string mon = monitor_output_value();
+    if (mon == monitor_was && !l.vals.empty()) return l;
+    monitor_was = mon;
+    l = OutputList{};
+    for (const OutputChoice& o : kOutputChoices) l.names.push_back(output_choice_name(o)), l.vals.emplace_back(o.value);
+    if (!mon.empty()) {
+        int w = 0, h = 0;
+        std::sscanf(mon.c_str(), "%dx%d", &w, &h);
+        l.monitor = static_cast<int>(l.vals.size());
+        l.names.push_back("This monitor: " + std::to_string(w) + " x " + std::to_string(h) + " (" + shape_of(w, h) + ")");
+        l.vals.push_back(mon);
+    }
+    for (const std::string& n : l.names) l.name_ptrs.push_back(n.c_str());
+    return l;
+}
 constexpr const char* kWideNames[] = {"Auto (outputs wider than 16:9)", "Off (16:9, stretched)"};
 constexpr const char* kWideVals[] = {"auto", "off"};
 constexpr const char* kRatioNames[] = {"Game default (half per side)", "33% (ultra performance)", "50% (performance)", "59% (balanced)",
@@ -504,8 +535,9 @@ constexpr const char* kRatioNames[] = {"Game default (half per side)", "33% (ult
 constexpr const char* kRatioVals[] = {"0", "0.33", "0.5", "0.59", "0.67", "0.75", "0.85", "1.0"};
 constexpr const char* kShadowNames[] = {"Game default (2048 docked)", "1024", "1536", "2048", "3072", "4096", "6144", "8192"};
 constexpr const char* kShadowVals[] = {"0", "1024", "1536", "2048", "3072", "4096", "6144", "8192"};
-constexpr const char* kQualityNames[] = {"Console (handheld configs keep their cuts)", "Docked quality in every config"};
-constexpr const char* kQualityVals[] = {"console", "docked"};
+constexpr const char* kQualityNames[] = {"Console (handheld configs keep their cuts)", "Docked quality in every config",
+                                         "Handheld quality in every config (lighter)"};
+constexpr const char* kQualityVals[] = {"console", "docked", "handheld"};
 constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NVIDIA RTX, through Streamline)", "FSR 3 (AMD FidelityFX)",
                                           "XeSS (Intel, any GPU with DP4a)", "Bilinear (no anti-aliasing)", "Auto (DLSS, else XeSS, else FSR 3, else TAAU)"};
 constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "xess", "bilinear", "auto"};
@@ -539,24 +571,77 @@ void output_size(const std::string& v, bool wide, int* w, int* h) {
     }
 }
 
+// Graphics preset: writes render scale, shadow resolution and quality together (ObeliskChamber_presets.h). The row shows the preset the
+// three keys hold now, Custom when they hold anything else.
+void preset_row(Menu& m) {
+    const IniKey* keys[3] = {ini_key("fefw", "render_ratio"), ini_key("fefw", "shadow_size"), ini_key("fefw", "quality")};
+    row(m, "Graphics preset", When::Restart,
+        "Sets Render scale, Shadow resolution and Quality below together. Low: 50% render, 1024 shadows, handheld effects. Medium: the "
+        "console's picture (the defaults). High: 67% render, 4096 shadows, docked effects. Ultra: native render (DLAA), 8192 shadows, docked "
+        "effects. Changing one of the three afterwards shows Custom. Output size and the upscaler are not touched.");
+    for (const IniKey* k : keys)
+        if (env_locked(*k)) return;
+    static const char* names[kGraphicsPresetCount];
+    for (int i = 0; i < kGraphicsPresetCount; ++i) names[i] = kGraphicsPresets[i].name;
+    int idx = graphics_preset_current();
+    if (combo(m, "##preset", &idx, names, kGraphicsPresetCount, "Custom")) {
+        const GraphicsPreset& p = kGraphicsPresets[idx];
+        ini_put(m, *keys[0], p.render_ratio);
+        ini_put(m, *keys[1], p.shadow_size);
+        ini_put(m, *keys[2], p.quality);
+        NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s", p.name, p.render_ratio, p.shadow_size, p.quality);
+        notify(m, std::string(tr("Graphics preset")) + ": " + tr(p.name) + "  (" + tr("applies on restart") + ")");
+    }
+}
+
+// Under the Ultrawide row: a wide output with Ultrawide off is stretched; a 16:9 output on a wide monitor is pillarboxed. Says which.
+void wide_notes() {
+    int ow = 0, oh = 0;
+    const bool wide_on = lower(ini_now(*ini_key("fefw", "ultrawide"))) != "off";
+    output_size(ini_now(*ini_key("fefw", "output")), true, &ow, &oh);   // true: the shape as asked for
+    const bool out_wide = ow > 0 && oh > 0 && wide_aspect(ow, oh);
+    int mw = 0, mh = 0;
+    const bool mon_wide = platform::desktop_pixel_size(&mw, &mh) && wide_aspect(mw, mh);
+    std::string note;
+    if (out_wide && !wide_on) {
+        note = tr("This output is wider than 16:9 but Ultrawide is Off: the 16:9 picture is stretched. Set Ultrawide to Auto.");
+    } else if (!out_wide && mon_wide) {
+        char buf[256];
+        const std::string shape = shape_of(mw, mh);
+        std::snprintf(buf, sizeof buf, tr("This monitor is %d x %d (%s). For a wide picture pick This monitor or a %s size as Output size."), mw, mh,
+                      shape.c_str(), shape.c_str());
+        note = buf;
+    }
+    if (note.empty()) return;
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kOrange, "%s", note.c_str());
+    ImGui::PopTextWrapPos();
+}
+
 void resolution_group(Menu& m) {
     section("Resolution");
     ImGui::TextWrapped("%s", tr("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md)."));
     if (begin_rows("res")) {
+        preset_row(m);
         // the output: the entries, or a WxH from the ini shown as it is
         const IniKey& out = *ini_key("fefw", "output");
         {
             const std::string v = lower(ini_now(out));
             const char* cur = v == "4k" ? "2160p" : v.c_str();
             row(m, "Output size", When::Restart,
-                "The size the game renders its picture, UI and post effects at (its DLSS output). Up to 3840 x 2160 at 16:9; wider shapes "
-                "need Ultrawide. The window scales it (Display > Scaling to the window).");
+                "The size the game renders its picture, UI and post effects at (its DLSS output), not the window's size. For an ultrawide "
+                "monitor pick a 21:9 or 32:9 size, or This monitor, and keep Ultrawide on Auto; Borderless fullscreen (Display) then fills the "
+                "screen. Up to 3840 x 2160; a larger size keeps its shape and is drawn smaller. The window scales it (Display > Scaling to the window).");
             if (!env_locked(out)) {
+                const OutputList& ol = output_list();
+                const int n = static_cast<int>(ol.vals.size());
                 int idx = -1;
-                for (int i = 0; i < kOutputCount; ++i)
-                    if (cur == std::string(kOutputVals[i])) idx = i;
+                for (int i = 0; i < n && idx < 0; ++i)
+                    if (cur == ol.vals[static_cast<size_t>(i)]) idx = i;
                 const std::string other = std::string(tr("Custom")) + ": " + ini_now(out);
-                if (combo(m, "##out", &idx, kOutputNames, kOutputCount, other.c_str(), true)) ini_put(m, out, kOutputVals[idx]);
+                if (combo(m, "##out", &idx, ol.name_ptrs.data(), n, other.c_str(), true)) ini_put(m, out, ol.vals[static_cast<size_t>(idx)]);
                 pending_note(ini_pending(m, out), ini_boot(m, out));
             }
         }
@@ -565,6 +650,7 @@ void resolution_group(Menu& m) {
                       "keeps the menus, HUD, text and movies in the centred 16:9 area, after Kompas9's ultrawide patch. A narrower output "
                       "(16:10) gets the 16:9 picture letterboxed. Off: the game's 16:9 picture is stretched to a wide output.",
                       kWideNames, kWideVals, 2);
+        wide_notes();
         ini_combo_row(m, *ini_key("fefw", "render_ratio"), "Render scale",
                       "The 3D render size per side as a share of the output; the game's upscaler (Graphics > Upscaler) fills the rest. "
                       "100% renders at the output size and only anti-aliases.",
@@ -614,7 +700,7 @@ void resolution_group(Menu& m) {
                       kShadowNames, kShadowVals, 8);
         ini_combo_row(m, *ini_key("fefw", "quality"), "Quality",
                       "Docked gives every render configuration the docked one's shadows and effects, so a handheld or 1080p answer keeps them.",
-                      kQualityNames, kQualityVals, 2);
+                      kQualityNames, kQualityVals, 3);
         end_rows();
     }
     // what the chosen sizes mean

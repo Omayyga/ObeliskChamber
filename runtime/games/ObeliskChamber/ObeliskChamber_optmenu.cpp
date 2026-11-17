@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "ObeliskChamber_game.h"
+#include "ObeliskChamber_presets.h"
 #include "nxrt/abi.h"
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
@@ -224,8 +225,6 @@ int filter_get() {
 }
 
 // Graphics
-constexpr const char* kOutputNames[] = {"Console", "1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160", "2560 x 1080", "3440 x 1440", "5120 x 1440", "Window size"};
-constexpr const char* kOutputVals[] = {"console", "720p", "1080p", "1440p", "2160p", "2560x1080", "3440x1440", "5120x1440", "window"};
 constexpr const char* kWideNames[] = {"Auto", "Off"};
 constexpr const char* kWideVals[] = {"auto", "off"};
 constexpr const char* kRatioNames[] = {"Game default", "33%", "50%", "59%", "67%", "75%", "85%", "100%"};
@@ -274,18 +273,51 @@ void smooth_after() {
 }
 void preset_after() { nxrt::extras::set_dlss_preset_override(std::max(0, nxrt::extras::dlss_preset_from_word(lower(ini("dlss", "preset", "default"))))); }
 void rate_after() { nxrt::nvn::backend_set_shading_rate(lower(ini("nvn", "shading_rate", "off")).c_str()); }
+// Output Size: the shared list (ObeliskChamber_presets.h kOutputChoices), then "Monitor WxH" (the display the window is on) when known.
+// Names are short for the narrow value box: the shape first, so the ultrawide sizes read as such.
+int output_count() { return kOutputChoiceCount + (monitor_output_value().empty() ? 0 : 1); }
+std::string output_val(int i) {
+    if (i >= 0 && i < kOutputChoiceCount) return kOutputChoices[i].value;
+    return i == kOutputChoiceCount ? monitor_output_value() : std::string();
+}
 int output_get() {
     std::string v = lower(ini("fefw", "output", "console"));
     if (v == "4k") v = "2160p";
-    for (int i = 0; i < static_cast<int>(std::size(kOutputVals)); ++i)
-        if (v == kOutputVals[i]) return i;
+    for (int i = 0; i < output_count(); ++i)
+        if (v == output_val(i)) return i;
     return -1;
 }
-int output_count() { return static_cast<int>(std::size(kOutputVals)); }
 void output_name(int i, char* out, size_t n) {
-    if (i >= 0 && i < output_count()) std::snprintf(out, n, "%s", kOutputNames[i]);
-    else std::snprintf(out, n, "%.24s", ini("fefw", "output", "console").c_str());
+    if (i >= 0 && i < kOutputChoiceCount) {
+        const OutputChoice& o = kOutputChoices[i];
+        if (!*o.shape) std::snprintf(out, n, "%s", !std::strcmp(o.value, "window") ? "Window Size" : o.size);
+        else {
+            int w = 0, h = 0;
+            std::sscanf(o.size, "%d x %d", &w, &h);
+            std::snprintf(out, n, "%s  %dx%d", o.shape, w, h);
+        }
+    } else if (i == kOutputChoiceCount && !monitor_output_value().empty()) {
+        std::snprintf(out, n, "Monitor %s", monitor_output_value().c_str());
+    } else {
+        std::snprintf(out, n, "%.24s", ini("fefw", "output", "console").c_str());
+    }
 }
+void output_set(int i) {
+    const std::string v = output_val(i);
+    if (!v.empty()) ini_write("fefw", "output", v);
+}
+// Graphics Preset: render scale, shadow resolution and quality together (ObeliskChamber_presets.h); -1 (Custom) when they hold anything else.
+int preset_count() { return kGraphicsPresetCount; }
+int preset_get() { return graphics_preset_current(); }
+void preset_set(int i) {
+    const GraphicsPreset& p = kGraphicsPresets[std::clamp(i, 0, kGraphicsPresetCount - 1)];
+    ini_write("fefw", "render_ratio", p.render_ratio);
+    ini_write("fefw", "shadow_size", p.shadow_size);
+    ini_write("fefw", "quality", p.quality);
+    NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s", p.name, p.render_ratio, p.shadow_size, p.quality);
+    rebuild_after();     // one live rebuild for all three
+}
+void preset_name(int i, char* out, size_t n) { std::snprintf(out, n, "%s", i >= 0 && i < kGraphicsPresetCount ? kGraphicsPresets[i].name : "Custom"); }
 int fg_get() {
     std::string v = lower(ini("dlss", "frame_gen", "0"));
     if (v == "1") v = "dlss";
@@ -384,10 +416,12 @@ const Row kRows[] = {
            [](int i) { edit([i](play::Settings& s) { s.extras.upscale.mode = kFilterModes[i]; }); },
            [](int i, char* o, size_t n) { std::snprintf(o, n, "%s", i >= 0 && i < 3 ? kFilterNames[i] : "Other"); }),
     // Graphics
-    FN_ROW(kPageGraphics, "Output Size", "The size the game draws its picture and UI at. Applies on restart.", output_count, output_get,
-           [](int i) { ini_write("fefw", "output", kOutputVals[i]); }, output_name),
-    INI_ROW(kPageGraphics, "Ultrawide", "Outputs wider than 16:9 widen the 3D view and keep the UI centred. Applies on restart.", "fefw", "ultrawide", "auto",
-            kWideNames, kWideVals, nullptr),
+    FN_ROW(kPageGraphics, "Graphics Preset", "Sets Render Scale, Shadow Resolution and Quality together. Medium is the console's picture. Applies at once.",
+           preset_count, preset_get, preset_set, preset_name),
+    FN_ROW(kPageGraphics, "Output Size", "What the game draws at, not the window. Ultrawide monitor: pick 21:9, 32:9 or Monitor. Applies on restart.",
+           output_count, output_get, output_set, output_name),
+    INI_ROW(kPageGraphics, "Ultrawide", "Auto widens the 3D view for a 21:9 or 32:9 Output Size; the UI stays centred. Off stretches. Applies on restart.", "fefw",
+            "ultrawide", "auto", kWideNames, kWideVals, nullptr),
     INI_ROW(kPageGraphics, "Render Scale", "The 3D render size per side as a share of the output. Applies at once, with a short pause.", "fefw", "render_ratio", "0",
             kRatioNames, kRatioVals, scale_after),
     INI_ROW(kPageGraphics, "Dynamic Resolution", "Lowers the 3D render size in 10% steps under the target frame rate. Needs an Output Size.", "nvn", "dynres", "0",
@@ -528,6 +562,30 @@ void item_value(::Ctx* c) {
     row_name(*r, row_get(*r), text, sizeof g_value[0]);
     call(c, g_base + kSetText, {base, g_base + kStrTxt, ptr(text)});
 }
+// The options menu the cursor was last seen in (menu_help), for the rows that change other rows' values.
+uint64_t g_opt_menu = 0;
+// Graphics Preset writes three other rows' keys, and those three decide what the preset row shows: after a step on any of them every row of
+// the menu shows its value again. Only when `item` is one of the menu's items, so the menu is the one open now.
+bool links_rows(const Row* r) {
+    if (!r) return false;
+    if (r->set == preset_set) return true;
+    return r->sec && !std::strcmp(r->sec, "fefw") &&
+           (!std::strcmp(r->key, "render_ratio") || !std::strcmp(r->key, "shadow_size") || !std::strcmp(r->key, "quality"));
+}
+void redraw_all(::Ctx* c, uint64_t item) {
+    uint64_t vt = 0, b = 0, e = 0;
+    const uint64_t menu = g_opt_menu;
+    if (!menu || !rd(menu, &vt) || vt != ptr(&g_mvt[2]) || !rd(menu + kMenuItems, &b) || !rd(menu + kMenuItems + 8, &e) || e <= b || (e - b) % 8 ||
+        e - b > 8 * 4096 || !mem::is_mapped(b, e - b))
+        return;
+    bool mine = false;
+    for (uint64_t p = b; p < e && !mine; p += 8) mine = *reinterpret_cast<const uint64_t*>(p) == item;
+    if (!mine) return;
+    for (uint64_t p = b; p < e; p += 8) {
+        uint64_t row = 0;
+        if (rd(p, &row) && row != item && row_of(row) && part_alive(row + kItemBase)) call(c, g_ivt[2 + kISlotRedraw], {row});
+    }
+}
 // slots 39 / 40: (item, wrap) -> changed, as the game's: the value, a redraw, the arrow's animation
 void item_step(::Ctx* c, int dir) {
     const uint64_t item = c->x[0];
@@ -538,6 +596,7 @@ void item_step(::Ctx* c, int dir) {
         return;
     }
     call(c, g_ivt[2 + kISlotRedraw], {item});
+    if (links_rows(r)) redraw_all(c, item);
     if (const uint64_t base = part_alive(item + kItemBase)) call(c, g_base + kArrow, {base, dir < 0 ? 1ull : 0ull});
     c->x[0] = 1;
 }
@@ -862,6 +921,7 @@ void menu_help(::Ctx* c) {
     const Row* r = cur ? row_of(cur) : nullptr;
     const int li = cur ? list_row(cur) : -1;
     if (!r && li < 0) return;
+    if (r) g_opt_menu = menu;
     const char* text = r && r->help ? r->help : kEmpty;
     if (li >= 0) {
         g_list_help[0] = 0;
@@ -895,7 +955,7 @@ void reset_all() {
                 ++changed;
             }
     }
-    if (output_get() != 0) ini_write("fefw", "output", kOutputVals[0]), ++changed;
+    if (output_get() != 0) ini_write("fefw", "output", kOutputChoices[0].value), ++changed;
     if (fg_get() != 0) ini_write("dlss", "frame_gen", kFgVals[0]), ++changed;
     if (rate_get() != 0) rate_set(0), ++changed;
     const play::Settings d;

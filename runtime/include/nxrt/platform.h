@@ -41,6 +41,7 @@ enum class FullscreenMode { Windowed, Borderless, Exclusive };
 bool set_fullscreen(FullscreenMode mode, int w = 0, int h = 0, float hz = 0.f);
 FullscreenMode fullscreen_mode();
 float display_refresh_hz();                   // refresh rate of the display the window is on (desktop mode), 0 if unknown
+bool desktop_pixel_size(int* w, int* h);      // desktop size in pixels of the display the window is on; false (0, 0) if unknown
 
 // Displays (monitors), numbered 1.. in the system's order. display_name is "Name (1920x1080 @ 144 Hz)"-style text for menus, empty for a bad number.
 int display_count();

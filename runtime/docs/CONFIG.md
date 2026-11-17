@@ -433,6 +433,30 @@ Rules:
 | `boot` | `trace_plt` | `false` | `NXRT_BOOT_TRACE_PLT` | `game-build/src/mpr_main.cpp` | Diagnostic: logs every lazy symbol binding of the game's loader (debug note 018). |
 | `time` | `zone` | `host` | `NXRT_TIME_ZONE` | `src/services/time.cpp` | `utc` (any case) sets UTC. Any other value uses the host time zone. |
 
+### Fortune's Weave graphics presets
+
+The launcher's Picture tab, Recomp Options (Graphics) and the F1 menu (Graphics > Resolution) offer **Graphics preset**: Low, Medium, High,
+Ultra. A preset is not a key: picking one writes the three keys below, and the preset shown is the one whose values the file holds now
+(*Custom* when none matches). Output size, the upscaler and frame generation are left alone. The table lives in
+`games/ObeliskChamber/ObeliskChamber_presets.h` and `launcher/src/pages/settings.js` (`PRESETS`); keep both and this table in step.
+
+| Preset | `[fefw] render_ratio` | `[fefw] shadow_size` | `[fefw] quality` |
+|---|---|---|---|
+| Low | `0.5` | `1024` | `handheld` |
+| Medium (the defaults, the console's picture) | `0` | `0` | `console` |
+| High | `0.67` | `4096` | `docked` |
+| Ultra | `1.0` (DLAA) | `8192` (about 1.3 GB more video memory) | `docked` |
+
+Recomp Options applies a preset to the running game at once (two short pauses, as for those rows); the F1 menu writes it for the next start.
+Above a 1440p output the render is held to half per side unless the render-target pool is extended, so High and Ultra render at 50% there.
+
+### Fortune's Weave on an ultrawide monitor
+
+The picture's shape comes from `[fefw] output`, not from the window: pick the monitor's size (the menus list 21:9 and 32:9 sizes and mark or
+add *This monitor*), keep `[fefw] ultrawide = auto`, and use `[display] window_mode = borderless` so the window covers the screen. `window`
+takes the window's size at start, which is the monitor's in borderless mode. A 16:9 output on a wide monitor is shown with bars at the sides;
+a wide output with `ultrawide = off` is the 16:9 picture stretched. The menus warn about both.
+
 ### Audio notes
 
 When the sink has a clock of its own (XAudio2, or `paced`), the audio renderer keeps about 40 ms of audio queued on it and renders the next 5 ms frame whenever the queue falls below that, instead of waiting on the host clock. The sound card and the host clock never agree exactly; pacing by the host clock alone would fill the queue slowly (frames dropped) or drain it (a click). With the null sink the renderer keeps its 5 ms host-clock pacing. The pace does not depend on the game's frame rate: the renderer runs on its own thread and the game's audio thread waits for the renderer's frame event.
