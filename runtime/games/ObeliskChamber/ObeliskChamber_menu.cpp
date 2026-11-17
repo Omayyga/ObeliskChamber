@@ -107,6 +107,7 @@ void live_smooth() {
     for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     play_set_smooth(v == "1" || v == "on" || v == "true" ? 1 : v == "0" || v == "off" || v == "false" ? 0 : -1);
 }
+void live_frame_fixes() { frame_set_enabled(config_get_bool("fefw", "frame_fixes", true)); }
 void live_dynres() { res_dynres_live(config_get_bool("nvn", "dynres", false)); }
 void live_upscaler() { nxrt::nvn::backend_set_upscaler(config_get_str("dlss", "upscaler", "taau").c_str()); }
 void live_tuning() {
@@ -127,6 +128,7 @@ constexpr IniKey kIni[] = {
     {"fefw", "fps60", "0", Norm::Bool, false, "60 fps", live_rate},
     {"fefw", "fps120", "0", Norm::Bool, false, "120 fps", live_rate},
     {"fefw", "smooth_step", "auto", Norm::Text, false, "smooth time step", live_smooth},
+    {"fefw", "frame_fixes", "1", Norm::Bool, false, "frame-rate fixes", live_frame_fixes},
     {"fefw", "clock_log", "10", Norm::Number, false, "game clock log"},
     {"dlss", "upscaler", "taau", Norm::Text, false, "upscaler", live_upscaler},
     {"dlss", "preset", "default", Norm::Text, false, "DLSS model"},
@@ -1005,7 +1007,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         const IniKey& k120 = *ini_key("fefw", "fps120");
         row(m, "Gameplay frame rate", When::Live,
             "30 is the game's own. 60 runs gameplay at 60 at the right speed (dialogue text types twice as fast). 120 needs a frame limit of 120 "
-            "or more and a fast PC; frame-counted effects such as the dialogue typing run 4 times as fast.");
+            "or more and a fast PC; the dialogue typing runs 4 times as fast.");
         if (!(ini_env(k60) || ini_env(k120))) {
             const auto is_on = [](const IniKey& k) { return normalized(k, ini_now(k)) == "1"; };
             int idx = is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
@@ -1027,6 +1029,11 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         ini_combo_row(m, *ini_key("fefw", "smooth_step"), "Smooth time step",
                       "Keeps the game clock exact when frames are uneven: the game's step plus a quarter of the time it still owes.", kSmooth,
                       kSmoothVals, 3);
+        constexpr const char* kFix[] = {"On", "Off"};
+        constexpr const char* kFixVals[] = {"1", "0"};
+        ini_combo_row(m, *ini_key("fefw", "frame_fixes"), "Frame-rate fixes",
+                      "At 60 and 120 fps: physics, capes and hair, cutscene shakes, map markers and menu animations that count frames move at their "
+                      "30 fps speed. [fefw] frame_fixes_skip in the ini turns single groups off.", kFix, kFixVals, 2);
         end_rows();
     }
     if (ck.valid)
