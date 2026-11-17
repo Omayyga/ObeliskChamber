@@ -17,10 +17,12 @@
 // Each hook sits after the instruction that makes the game's value and changes the register in place; the movk sites first check the register
 // holds the game's constant. The cutscene quake block (evt::demo::Seq, 0x11e9b50) draws a new random offset each frame, so it runs on 30 Hz
 // ticks only: a midhook at its start (0x11ea5cc) runs the function's rest from the block's end (0x11eb084, also a midhook site, which gives
-// the lifted f_11eb084) on the other frames.
+// the lifted f_11eb084) on the other frames. Spoken text the same way: the talk sequence (0x1154754) asks the text step (0x115d330, an
+// entry hook) for 3 more letters each frame; off the 30 Hz ticks the entry hook answers "not finished" (0) without running it, as
+// Fortune's Eden v1.6.8.6 did. Showing the whole line (a button press asks for more than 3) is left alone.
 //
 // [fefw] frame_fixes = 1 (default; the menu changes it live) and [fefw] frame_fixes_skip = a comma list of groups to leave alone: dt, shader,
-// physics, cloth, quake, anim, map, ui. At 30 fps every hook leaves the game's values as they are.
+// physics, cloth, quake, anim, map, ui, text. At 30 fps every hook leaves the game's values as they are.
 #include "ObeliskChamber_game.h"
 
 #include <algorithm>
@@ -41,8 +43,8 @@ namespace {
 
 constexpr const char* kTag = "fefw";
 
-enum Group : uint8_t { kDt, kShader, kPhysics, kCloth, kQuake, kAnim, kMap, kUi, kGroups };
-constexpr const char* kGroupNames[kGroups] = {"dt", "shader", "physics", "cloth", "quake", "anim", "map", "ui"};
+enum Group : uint8_t { kDt, kShader, kPhysics, kCloth, kQuake, kAnim, kMap, kUi, kText, kGroups };
+constexpr const char* kGroupNames[kGroups] = {"dt", "shader", "physics", "cloth", "quake", "anim", "map", "ui", "text"};
 
 // How a movk site's constant becomes the frame's value.
 enum class Rule : uint8_t {
@@ -89,6 +91,7 @@ constexpr MovkSite kMovk[] = {
 // The other sites (the hook address; what each does is at its function below).
 constexpr uint32_t kClothPhase = 0xa686ec, kClothBlend = 0xa68738, kClothDamp = 0xa687f4, kClothWind = 0xa68994, kClothPull = 0xa68a9c;
 constexpr uint32_t kQuakeStart = 0x11ea5cc, kQuakeEnd = 0x11eb084;
+constexpr uint32_t kTextStep = 0x115d330;           // entry hook: (x0 = the talk window's text, w1 = letters to add) -> w0 finished
 constexpr uint32_t kIllusion = 0x112291c, kLookAt = 0x10d7324;
 constexpr uint32_t kMapAngle = 0x133fb94, kMapHeight = 0x133feb8, kMapTimer = 0xf3a968;
 constexpr uint32_t kSubsteps = 0x14cf5dc;
@@ -237,6 +240,14 @@ int hook_quake(::Ctx* c, uint64_t, void*) {
     return 1;
 }
 
+// ---- spoken text: 3 letters a frame, on 30 Hz ticks only -------------------------------------------------------------------------------
+int hook_text_step(::Ctx* c, uint64_t, void*) {
+    if (static_cast<uint32_t>(c->x[1]) != 3 || full(scale(kText)) || st().tick.load(std::memory_order_relaxed)) return 0;
+    c->x[0] = 0;              // not finished: the line goes on typing at the next tick
+    count(kText);
+    return 1;
+}
+
 // ---- animation, map, UI ----------------------------------------------------------------------------------------------------------------
 // CharacterIllusion: clone index = frame / period (w12, 30 fps frames) -> period / (native / target)
 void hook_illusion(::Ctx* c, uint64_t, void*) {
@@ -337,7 +348,7 @@ uint32_t parse_skip(const std::string& list) {
         bool found = w.empty();
         for (int g = 0; g < kGroups; ++g)
             if (w == kGroupNames[g]) m |= 1u << g, found = true;
-        if (!found) NXLOG_W(kTag, "[fefw] frame_fixes_skip: unknown group \"%s\" (dt, shader, physics, cloth, quake, anim, map, ui)", w.c_str());
+        if (!found) NXLOG_W(kTag, "[fefw] frame_fixes_skip: unknown group \"%s\" (dt, shader, physics, cloth, quake, anim, map, ui, text)", w.c_str());
         i = j + 1;
     }
     return m;
@@ -367,6 +378,7 @@ void frame_install(uint64_t base) {
     // the quake's 30 Hz block needs the lifted rest of its function (the midhook site 0x11eb084 in main.sites), looked up at the first quake:
     // the lifted modules are registered after play mode installs its hooks
     n += hook_add_mid(base + kQuakeStart, &hook_quake) ? 1 : 0;
+    n += hook_add_entry(base + kTextStep, &hook_text_step) ? 1 : 0;
     std::string skipped;
     for (int g = 0; g < kGroups; ++g)
         if (s.skip >> g & 1u) skipped += std::string(skipped.empty() ? "" : ", ") + kGroupNames[g];

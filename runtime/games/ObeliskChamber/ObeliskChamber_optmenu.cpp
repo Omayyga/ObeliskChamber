@@ -454,7 +454,7 @@ const Row kRows[] = {
            rate_name),
     INI_ROW(kPageFrameRate, "Smooth Time Step", "Keeps the game clock exact when frames are uneven. Auto is on above 30 fps. Applies at once.", "fefw", "smooth_step", "auto",
             kSmoothNames, kSmoothVals, smooth_after),
-    INI_ROW(kPageFrameRate, "Frame-Rate Fixes", "Keeps physics, capes and hair, cutscene shakes and map markers at their real speed at 60 and 120 fps. Applies at once.",
+    INI_ROW(kPageFrameRate, "Frame-Rate Fixes", "Keeps physics, capes, cutscene shakes, map markers and dialogue typing at their real speed at 60 and 120 fps. Applies at once.",
             "fefw", "frame_fixes", "1", kOffOnNames, kOffOnVals, frame_fixes_after),
     FN_ROW(kPageFrameRate, "Vsync", "Off works with G-Sync and FreeSync and the frame limit. On lets the display pace.", two,
            [] { return settings().display.vsync ? 1 : 0; }, [](int i) { edit([i](play::Settings& s) { s.display.vsync = i == 1; }); }, onoff),

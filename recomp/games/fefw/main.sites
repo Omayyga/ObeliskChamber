@@ -138,3 +138,6 @@ inline 0x71017cf5a4
 # 0x11eb0b4 before anything reads them)
 midhook 0x71011ea5cc
 midhook 0x71011eb084
+# spoken text (ObeliskChamber_frame.cpp, [fefw] frame_fixes): the talk sequence asks the text step 0x115d330 (x0 = the window's text, w1 =
+# letters to add, 3 a frame from 0x1154754) -> w0 finished; the entry hook skips it off the 30 Hz ticks (after Fortune's Eden v1.6.8.6)
+entryhook 0x710115d330

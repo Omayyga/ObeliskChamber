@@ -58,7 +58,7 @@ struct FrameFixInfo {
     bool installed = false, on = false, quake = false;
     float scale = 1.0f;                    // the frame's share of a 1/30 s step (1 = the game's own values)
     int native = 0;                        // the target the game asked for last (30 gameplay, 60 menus; 0 none seen)
-    static constexpr int kGroups = 8;
+    static constexpr int kGroups = 9;
     uint64_t applied[kGroups] = {};        // values changed, per group (frame_group_name)
     uint64_t quake_held = 0;               // quake blocks held to 30 Hz
 };

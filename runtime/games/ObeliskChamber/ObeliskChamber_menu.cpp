@@ -1006,8 +1006,8 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         const IniKey& k60 = *ini_key("fefw", "fps60");
         const IniKey& k120 = *ini_key("fefw", "fps120");
         row(m, "Gameplay frame rate", When::Live,
-            "30 is the game's own. 60 runs gameplay at 60 at the right speed (dialogue text types twice as fast). 120 needs a frame limit of 120 "
-            "or more and a fast PC; the dialogue typing runs 4 times as fast.");
+            "30 is the game's own. 60 runs gameplay at 60 at the right speed. 120 needs a frame limit of 120 or more and a fast PC. "
+            "Frame-rate fixes below keep frame-counted effects at their 30 fps speed.");
         if (!(ini_env(k60) || ini_env(k120))) {
             const auto is_on = [](const IniKey& k) { return normalized(k, ini_now(k)) == "1"; };
             int idx = is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
@@ -1032,7 +1032,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         constexpr const char* kFix[] = {"On", "Off"};
         constexpr const char* kFixVals[] = {"1", "0"};
         ini_combo_row(m, *ini_key("fefw", "frame_fixes"), "Frame-rate fixes",
-                      "At 60 and 120 fps: physics, capes and hair, cutscene shakes, map markers and menu animations that count frames move at their "
+                      "At 60 and 120 fps: physics, capes and hair, cutscene shakes, map markers, menu animations and dialogue typing that count frames move at their "
                       "30 fps speed. [fefw] frame_fixes_skip in the ini turns single groups off.", kFix, kFixVals, 2);
         end_rows();
     }
