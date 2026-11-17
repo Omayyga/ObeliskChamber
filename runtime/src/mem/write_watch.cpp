@@ -326,6 +326,32 @@ bool guarded_at(uint64_t addr) {
 
 void drop_guard(uint64_t addr, uint64_t size);   // below
 
+// A write fault on a heap page that is read-write by the time this handler looks, with no region claiming it: the page was read-only
+// only for a moment, nearly always an import freeze (ImportFreeze) that ended between the fault and freeze_overlaps above (the destructor
+// gives the pages back and only then clears its slot, so the freeze is gone before the handler sees it). The write can simply run again.
+// Seen on an Arc B390 with [nvn] pool_slabs = false (issue 81, 2026-11-17): a guest write to the first page of a 4 KiB pool being imported
+// crashed with the page read-write in the report and no owner. Bounded per thread, so a fault that keeps coming back still reports.
+std::atomic<uint64_t> g_late_retries{0};
+bool heap_write_landed_late(uint64_t addr) {
+    if (addr < kHeapBase || addr - kHeapBase >= kHeapMax) return false;
+    thread_local uint64_t t_addr = 0;
+    thread_local int t_count = 0;
+    const uint64_t pg = addr & ~(kPage - 1);
+    if (pg != t_addr) {
+        t_addr = pg;
+        t_count = 0;
+    }
+    if (++t_count > 8) return false;
+    const DWORD pr = page_protect(addr);
+    if (pr & PAGE_GUARD) return false;
+    const DWORD p = pr & 0xff;
+    if (p != PAGE_READWRITE && p != PAGE_EXECUTE_READWRITE) return false;
+    if (g_late_retries.fetch_add(1, std::memory_order_relaxed) == 0)
+        NXLOG_W(kTag, "write fault at %llx on a page that is read-write again (an import freeze ended meanwhile): the write runs again",
+                static_cast<unsigned long long>(addr));
+    return true;
+}
+
 LONG CALLBACK on_fault(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
     const EXCEPTION_RECORD* rec = ep->ExceptionRecord;
@@ -422,6 +448,7 @@ retry:
         }
     }
     g_busy.fetch_sub(1, std::memory_order_seq_cst);
+    if (!ours && heap_write_landed_late(addr)) return EXCEPTION_CONTINUE_EXECUTION;
     if (!ours) return EXCEPTION_CONTINUE_SEARCH;
     g_faults.fetch_add(1, std::memory_order_relaxed);
     return EXCEPTION_CONTINUE_EXECUTION;
