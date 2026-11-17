@@ -93,7 +93,7 @@ constexpr uint64_t kLinesEnd = 0x16bdfbc;         // where every path out of the
 // the 2D renderer's primitive buffer: vertices of 40 bytes (x, y f32 at +0, in 1920x1080 layout pixels), a push takes index count + 1
 // and writes the vertex only while count <= 0x3fffe
 constexpr uint64_t kPrimVerts = 0x4ac0;           // vertex array pointer
-constexpr uint64_t kPrimCount = 0x4b00;           // s32: the last index pushed
+constexpr uint64_t kPrimCount = 0x4b00;           // s32: the last index pushed, -1 while the frame's buffer is empty
 constexpr uint32_t kPrimMaxIndex = 0x3ffff;
 constexpr uint64_t kPrimStride = 40;
 constexpr uint64_t kMovieTarget = 0x1904b5c;      // in 0x1904aa0, after the target is set: [x19] = command wrapper, x20 + 0x10 = s32 w, h
@@ -341,7 +341,7 @@ void hook_stat_graph(::Ctx* c, uint64_t, void*) {
 // two batches is bracketed: at its start the buffer's vertex count is noted, at its end every vertex pushed since gets x' = 960 + (x - 960) / k.
 struct MapBatch {
     uint64_t renderer = 0;
-    uint32_t count0 = 0;
+    int32_t count0 = 0;   // signed: -1 when the batch is the frame's first draw (the world map's dark route outline is)
     bool open = false;
 };
 thread_local MapBatch t_dots, t_lines;
@@ -361,31 +361,36 @@ void map_batch_start(MapBatch& b, uint64_t renderer) {
     b.open = false;
     if (!renderer || !mem::is_mapped(renderer + kPrimCount, 4)) return;
     b.renderer = renderer;
-    b.count0 = rdv<uint32_t>(renderer + kPrimCount);
+    b.count0 = rdv<int32_t>(renderer + kPrimCount);
+    if (b.count0 < -1 || b.count0 > static_cast<int32_t>(kPrimMaxIndex)) return;
     b.open = true;
-    if (ws().map_diag && b.count0 < t_diag.last_end) t_diag.ranges.clear();   // the count went back: a new frame
+    if (ws().map_diag && (b.count0 < 0 || static_cast<uint32_t>(b.count0) < t_diag.last_end)) t_diag.ranges.clear();   // a new frame
 }
 void map_batch_end(MapBatch& b) {
     if (!b.open) return;
     b.open = false;
-    const uint32_t count1 = rdv<uint32_t>(b.renderer + kPrimCount);
-    if (count1 <= b.count0 || count1 - b.count0 > kPrimMaxIndex + 1) return;   // nothing pushed, or the count went back
-    const uint32_t last = std::min(count1, kPrimMaxIndex);
-    if (last <= b.count0) return;
+    // Indices are signed: a batch that opens the frame starts at -1 and pushes from index 0. Read as unsigned, -1 made every such batch look
+    // as if the count had gone back, and it was left wide (#66: the world map's thick dark route outline, drawn first, before the white line).
+    const int32_t count1 = rdv<int32_t>(b.renderer + kPrimCount);
+    if (count1 <= b.count0) return;   // nothing pushed, or the count went back
+    const uint32_t first_idx = static_cast<uint32_t>(b.count0 + 1);
+    const uint32_t last = std::min(static_cast<uint32_t>(count1), kPrimMaxIndex);
+    if (last < first_idx) return;
+    const uint32_t n = last - first_idx + 1;
     const uint64_t verts = rdv<uint64_t>(b.renderer + kPrimVerts);
-    const uint64_t from = verts + (static_cast<uint64_t>(b.count0) + 1) * kPrimStride;
-    if (!verts || !mem::is_mapped(from, static_cast<uint64_t>(last - b.count0) * kPrimStride)) return;
+    const uint64_t from = verts + static_cast<uint64_t>(first_idx) * kPrimStride;
+    if (!verts || !mem::is_mapped(from, static_cast<uint64_t>(n) * kPrimStride)) return;
     const float inv_k = ws().inv_k;
     for (uint64_t a = from, end = verts + (static_cast<uint64_t>(last) + 1) * kPrimStride; a < end; a += kPrimStride)
         wrv<float>(a, 960.0f + (rdv<float>(a) - 960.0f) * inv_k);
-    if (first(kCMapRoutes)) NXLOG_I(kTag, "ultrawide: map batch of %u vertices: x scaled by %.4f about 960", last - b.count0, inv_k);
+    if (first(kCMapRoutes)) NXLOG_I(kTag, "ultrawide: map batch of %u vertices: x scaled by %.4f about 960", n, inv_k);
     if (ws().map_diag) {
-        t_diag.ranges.emplace_back(b.count0 + 1, last);
+        t_diag.ranges.emplace_back(first_idx, last);
         t_diag.last_end = last;
     }
 }
 
-// Lists the buffer's vertices 1 .. count that no map batch squeezed this frame, as runs of consecutive indices: count, x and y range,
+// Lists the buffer's vertices 0 .. last that no map batch squeezed this frame, as runs of consecutive indices: count, x and y range,
 // the first vertex's colour word. At most once every 2 s, 12 reports in all.
 void map_diag_report(uint64_t renderer) {
     MapDiag& d = t_diag;
@@ -394,13 +399,15 @@ void map_diag_report(uint64_t renderer) {
     if (now < d.next_ms) return;
     d.next_ms = now + 2000;
     ++d.reports;
-    const uint32_t count = std::min(rdv<uint32_t>(renderer + kPrimCount), kPrimMaxIndex);
+    const int32_t raw = rdv<int32_t>(renderer + kPrimCount);
+    if (raw < 0) return;
+    const uint32_t count = std::min(static_cast<uint32_t>(raw), kPrimMaxIndex);   // the last index; vertices 0 .. count
     const uint64_t verts = rdv<uint64_t>(renderer + kPrimVerts);
-    if (!verts || !count || !mem::is_mapped(verts, (static_cast<uint64_t>(count) + 1) * kPrimStride)) return;
+    if (!verts || !mem::is_mapped(verts, (static_cast<uint64_t>(count) + 1) * kPrimStride)) return;
     uint64_t squeezed = 0;
     for (const auto& r : d.ranges) squeezed += r.second - r.first + 1;
-    NXLOG_I(kTag, "ultrawide map diag %d: %u vertices in the buffer, %zu batches squeezed (%llu vertices), lines renderer %s the dots one",
-            d.reports, count, d.ranges.size(), static_cast<unsigned long long>(squeezed),
+    NXLOG_I(kTag, "ultrawide map diag %d: %u vertices in the buffer (0 .. last), %zu batches squeezed (%llu vertices), lines renderer %s the dots one",
+            d.reports, count + 1, d.ranges.size(), static_cast<unsigned long long>(squeezed),
             d.lines_renderer == renderer ? "is" : (d.lines_renderer ? "is not" : "not seen, so not compared with"));
     auto covered = [&](uint32_t i) {
         for (const auto& r : d.ranges)
@@ -408,7 +415,7 @@ void map_diag_report(uint64_t renderer) {
         return false;
     };
     int runs = 0;
-    for (uint32_t i = 1; i <= count && runs < 24;) {
+    for (uint32_t i = 0; i <= count && runs < 24;) {
         if (covered(i)) { ++i; continue; }
         const uint32_t a = i;
         float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
