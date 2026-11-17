@@ -39,6 +39,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <mutex>
@@ -123,6 +124,7 @@ struct Wide {
     uint32_t ui_scale = 0;          // the bits of 1/(960k) written into UI projections
     float cam_aspect_num = 16.0f;   // 9 * w / h
     std::vector<uint32_t> hooks;
+    bool map_diag = false;          // [fefw] ultrawide_map_diag: log what the map batches leave unsqueezed
     std::atomic<uint64_t> count[kCCount] = {};
     std::atomic<bool> logged[kCCount] = {};
 };
@@ -344,12 +346,24 @@ struct MapBatch {
 };
 thread_local MapBatch t_dots, t_lines;
 
+// [fefw] ultrawide_map_diag (debug, #66): the index ranges the map batches squeezed this frame, so the end of the dots batch can list
+// what else is in the buffer (the thick dark route curves on the world map are not squeezed and their drawer is not known yet).
+struct MapDiag {
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;   // [first, last] indices squeezed this frame, in push order
+    uint32_t last_end = 0;
+    uint64_t lines_renderer = 0;
+    int64_t next_ms = 0;
+    int reports = 0;
+};
+thread_local MapDiag t_diag;
+
 void map_batch_start(MapBatch& b, uint64_t renderer) {
     b.open = false;
     if (!renderer || !mem::is_mapped(renderer + kPrimCount, 4)) return;
     b.renderer = renderer;
     b.count0 = rdv<uint32_t>(renderer + kPrimCount);
     b.open = true;
+    if (ws().map_diag && b.count0 < t_diag.last_end) t_diag.ranges.clear();   // the count went back: a new frame
 }
 void map_batch_end(MapBatch& b) {
     if (!b.open) return;
@@ -365,12 +379,70 @@ void map_batch_end(MapBatch& b) {
     for (uint64_t a = from, end = verts + (static_cast<uint64_t>(last) + 1) * kPrimStride; a < end; a += kPrimStride)
         wrv<float>(a, 960.0f + (rdv<float>(a) - 960.0f) * inv_k);
     if (first(kCMapRoutes)) NXLOG_I(kTag, "ultrawide: map batch of %u vertices: x scaled by %.4f about 960", last - b.count0, inv_k);
+    if (ws().map_diag) {
+        t_diag.ranges.emplace_back(b.count0 + 1, last);
+        t_diag.last_end = last;
+    }
+}
+
+// Lists the buffer's vertices 1 .. count that no map batch squeezed this frame, as runs of consecutive indices: count, x and y range,
+// the first vertex's colour word. At most once every 2 s, 12 reports in all.
+void map_diag_report(uint64_t renderer) {
+    MapDiag& d = t_diag;
+    if (d.reports >= 12 || !renderer || !mem::is_mapped(renderer + kPrimVerts, 8)) return;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now < d.next_ms) return;
+    d.next_ms = now + 2000;
+    ++d.reports;
+    const uint32_t count = std::min(rdv<uint32_t>(renderer + kPrimCount), kPrimMaxIndex);
+    const uint64_t verts = rdv<uint64_t>(renderer + kPrimVerts);
+    if (!verts || !count || !mem::is_mapped(verts, (static_cast<uint64_t>(count) + 1) * kPrimStride)) return;
+    uint64_t squeezed = 0;
+    for (const auto& r : d.ranges) squeezed += r.second - r.first + 1;
+    NXLOG_I(kTag, "ultrawide map diag %d: %u vertices in the buffer, %zu batches squeezed (%llu vertices), lines renderer %s the dots one",
+            d.reports, count, d.ranges.size(), static_cast<unsigned long long>(squeezed),
+            d.lines_renderer == renderer ? "is" : (d.lines_renderer ? "is not" : "not seen, so not compared with"));
+    auto covered = [&](uint32_t i) {
+        for (const auto& r : d.ranges)
+            if (i >= r.first && i <= r.second) return true;
+        return false;
+    };
+    int runs = 0;
+    for (uint32_t i = 1; i <= count && runs < 24;) {
+        if (covered(i)) { ++i; continue; }
+        const uint32_t a = i;
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        const uint32_t colour = rdv<uint32_t>(verts + a * kPrimStride + 0x18);
+        for (; i <= count && !covered(i); ++i) {
+            const float x = rdv<float>(verts + i * kPrimStride), y = rdv<float>(verts + i * kPrimStride + 4);
+            x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y);
+        }
+        NXLOG_I(kTag, "ultrawide map diag %d: not squeezed: indices %u..%u (%u), x %.1f..%.1f, y %.1f..%.1f, colour 0x%08x", d.reports, a,
+                i - 1, i - a, x0, x1, y0, y1, colour);
+        ++runs;
+    }
+    for (const auto& r : d.ranges) {
+        float x0 = 1e9f, x1 = -1e9f;
+        for (uint32_t i = r.first; i <= r.second && i <= count; ++i) {
+            const float x = rdv<float>(verts + i * kPrimStride);
+            x0 = std::min(x0, x); x1 = std::max(x1, x);
+        }
+        NXLOG_I(kTag, "ultrawide map diag %d: squeezed: indices %u..%u (%u), x now %.1f..%.1f, colour 0x%08x", d.reports, r.first, r.second,
+                r.second - r.first + 1, x0, x1, rdv<uint32_t>(verts + r.first * kPrimStride + 0x18));
+    }
 }
 void hook_dots_start(::Ctx* c, uint64_t, void*) {
     map_batch_start(t_dots, mem::is_mapped(c->x[0], 8) ? rdv<uint64_t>(c->x[0]) : 0);
 }
-void hook_dots_end(::Ctx*, uint64_t, void*) { map_batch_end(t_dots); }
-void hook_lines_start(::Ctx* c, uint64_t, void*) { map_batch_start(t_lines, c->x[0]); }
+void hook_dots_end(::Ctx*, uint64_t, void*) {
+    const uint64_t renderer = t_dots.renderer;
+    map_batch_end(t_dots);
+    if (ws().map_diag) map_diag_report(renderer);
+}
+void hook_lines_start(::Ctx* c, uint64_t, void*) {
+    map_batch_start(t_lines, c->x[0]);
+    if (ws().map_diag) t_diag.lines_renderer = c->x[0];
+}
 void hook_lines_end(::Ctx*, uint64_t, void*) { map_batch_end(t_lines); }
 
 // ---- world markers ------------------------------------------------------------------------------------------------------------------------
@@ -535,6 +607,7 @@ void wide_install(uint64_t base, int out_w, int out_h) {
         add(kEdgeMarker, &hook_edge_marker);
     }
     if (on("statgraph")) add(kStatGraph, &hook_stat_graph);
+    w.map_diag = config_get_bool("fefw", "ultrawide_map_diag", false);
     if (on("maproutes")) {
         add(kDotsStart, &hook_dots_start);
         add(kDotsEnd, &hook_dots_end);
