@@ -486,6 +486,17 @@ float display_refresh_hz() {
     return m ? m->refresh_rate : 0.f;
 }
 
+bool desktop_pixel_size(int* w, int* h) {
+    *w = *h = 0;
+    if (!g_window) return false;
+    const SDL_DisplayMode* m = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(g_window));
+    if (!m || m->w <= 0 || m->h <= 0) return false;
+    const float d = m->pixel_density > 0.f ? m->pixel_density : 1.f;   // the mode is in screen coordinates; pixels = size x density
+    *w = static_cast<int>(m->w * d + 0.5f);
+    *h = static_cast<int>(m->h * d + 0.5f);
+    return true;
+}
+
 // ---- displays -----------------------------------------------------------------------------------------------------
 
 namespace {

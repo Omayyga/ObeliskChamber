@@ -16,6 +16,7 @@
 // frame generation are set up once, the frame-rate hooks are installed at start) says "restart", and the row shows the value in force until
 // then; nothing pretends to be live. A key set by an environment variable (NXRT_...) wins over the file: the row says so and is locked.
 #include "ObeliskChamber_game.h"
+#include "ObeliskChamber_presets.h"
 
 #include <algorithm>
 #include <array>
@@ -37,6 +38,7 @@
 #include "extras/temporal.h"
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
+#include "nxrt/cpu_info.h"
 #include "nxrt/extras.h"
 #include "nxrt/nvn_backend.h"
 #include "nxrt/frame_limiter.h"
@@ -44,6 +46,7 @@
 #include "nxrt/gfx.h"
 #include "nxrt/input_source.h"
 #include "nxrt/jc2_mouse.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/overlay.h"
@@ -79,7 +82,8 @@ enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kT
 constexpr const char* kTabNames[kTabCount] = {"Display", "Graphics", "Frame rate", "Audio", "Controls", "Game", "Debug"};
 
 // ---- the ObeliskChamber.ini keys the menu edits -------------------------------------------------------------------------------------------------
-// The value read at start is kept (boot) so a restart-only row can show what is in force and the bottom bar can list what waits.
+// The value read at start is kept (boot) so a restart-only row can show what is in force and the bottom bar can list what waits. A key the
+// running game can take has a `live` function, called after the key is written (ini_put): the same paths Recomp Options uses.
 enum class Norm { Text, Bool, Number };
 struct IniKey {
     const char* sec;
@@ -88,34 +92,58 @@ struct IniKey {
     Norm norm;
     bool restart;        // read once at start
     const char* label;   // for the "waits for a restart" list
+    void (*live)() = nullptr;   // applies the written value to the running game
 };
+
+// The live paths (ObeliskChamber_res.cpp, ObeliskChamber_play.cpp, the upscaler, the frame summary thread).
+void live_scale() { res_live_apply(false); }        // render scale, fixed render size: a new size rebuilds by itself
+void live_rebuild() { res_live_apply(true); }       // shadows, quality: the same size, so the rebuild is forced (two short pauses)
+void live_rate() {
+    const bool f120 = config_get_bool("fefw", "fps120", false), f60 = config_get_bool("fefw", "fps60", false);
+    play_set_rate(f120 ? 120 : f60 ? 60 : 30);
+}
+void live_smooth() {
+    std::string v = config_get_str("fefw", "smooth_step", "auto");
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    play_set_smooth(v == "1" || v == "on" || v == "true" ? 1 : v == "0" || v == "off" || v == "false" ? 0 : -1);
+}
+void live_dynres() { res_dynres_live(config_get_bool("nvn", "dynres", false)); }
+void live_upscaler() { nxrt::nvn::backend_set_upscaler(config_get_str("dlss", "upscaler", "taau").c_str()); }
+void live_tuning() {
+    nxrt::nvn::backend_upscale_tuning(config_get_double("dlss", "history_weight", 12.0), config_get_double("dlss", "sharpness", 0.0));
+}
+void live_hitch() {   // the summary period is the thread's argument: start it again
+    hitch_stop();
+    hitch_start();
+}
+
 constexpr IniKey kIni[] = {
     {"fefw", "output", "console", Norm::Text, true, "output size"},
     {"fefw", "ultrawide", "auto", Norm::Text, true, "ultrawide"},
-    {"fefw", "render_ratio", "0", Norm::Number, true, "render scale"},
-    {"fefw", "render", "", Norm::Text, true, "fixed render size"},
-    {"fefw", "shadow_size", "0", Norm::Number, true, "shadow resolution"},
-    {"fefw", "quality", "console", Norm::Text, true, "quality"},
-    {"fefw", "fps60", "0", Norm::Bool, true, "60 fps"},
-    {"fefw", "fps120", "0", Norm::Bool, true, "120 fps"},
-    {"fefw", "smooth_step", "auto", Norm::Text, true, "smooth time step"},
+    {"fefw", "render_ratio", "0", Norm::Number, false, "render scale", live_scale},
+    {"fefw", "render", "", Norm::Text, false, "fixed render size", live_scale},
+    {"fefw", "shadow_size", "0", Norm::Number, false, "shadow resolution", live_rebuild},
+    {"fefw", "quality", "console", Norm::Text, false, "quality", live_rebuild},
+    {"fefw", "fps60", "0", Norm::Bool, false, "60 fps", live_rate},
+    {"fefw", "fps120", "0", Norm::Bool, false, "120 fps", live_rate},
+    {"fefw", "smooth_step", "auto", Norm::Text, false, "smooth time step", live_smooth},
     {"fefw", "clock_log", "10", Norm::Number, false, "game clock log"},
-    {"dlss", "upscaler", "taau", Norm::Text, true, "upscaler"},
+    {"dlss", "upscaler", "taau", Norm::Text, false, "upscaler", live_upscaler},
     {"dlss", "preset", "default", Norm::Text, false, "DLSS model"},
     {"nvn", "shading_rate", "off", Norm::Text, false, "scene shading rate"},
-    {"nvn", "dynres", "0", Norm::Bool, true, "dynamic resolution"},
+    {"nvn", "dynres", "0", Norm::Bool, false, "dynamic resolution", live_dynres},
     {"nvn", "dynres_target", "0", Norm::Number, false, "dynamic resolution target"},
     {"nvn", "dynres_min", "0.7", Norm::Number, false, "dynamic resolution lowest scale"},
     {"nvn", "dynres_gain", "3", Norm::Number, false, "dynamic resolution least gain"},
     {"dlss", "frame_gen", "0", Norm::Text, true, "frame generation"},
-    {"dlss", "sharpness", "0", Norm::Number, true, "FSR 3 sharpening"},
-    {"dlss", "history_weight", "12", Norm::Number, true, "TAAU history"},
+    {"dlss", "sharpness", "0", Norm::Number, false, "FSR 3 sharpening", live_tuning},
+    {"dlss", "history_weight", "12", Norm::Number, false, "TAAU history", live_tuning},
     {"media", "movies", "host", Norm::Text, true, "movies"},
     {"log", "level", "info", Norm::Text, false, "log level"},
-    {"gfx", "log_fps", "0", Norm::Bool, true, "frame rate log"},
-    {"play", "log_status", "0", Norm::Bool, true, "play status log"},
+    {"gfx", "log_fps", "0", Norm::Bool, false, "frame rate log"},          // vk_renderer.cpp reads it again every 128 frames
+    {"play", "log_status", "0", Norm::Bool, false, "play status log"},     // play.cpp reads it again every two seconds
     {"input", "jc2_mouse", "auto", Norm::Text, false, "mouse controls"},
-    {"diag", "hitch_summary_s", "10", Norm::Number, true, "frame summary log"},
+    {"diag", "hitch_summary_s", "10", Norm::Number, false, "frame summary log", live_hitch},
 };
 
 const IniKey* ini_key(const char* sec, const char* key) {
@@ -167,6 +195,10 @@ struct Menu {
     double phase_prev[kHpCount] = {}, phase_ms[kHpCount] = {};
     uint64_t frames_prev = 0;
     double sample_at = -1, frame_ms_avg = 0;
+    // Debug page, CPU: sampled twice a second while the page is open
+    cpu::Load cpu_load;
+    std::vector<cpu::ThreadLoad> cpu_threads;
+    double cpu_at = -1;
 };
 
 Menu& menu() {
@@ -192,10 +224,11 @@ const std::string& ini_boot(Menu& m, const IniKey& k) {
 }
 bool ini_pending(Menu& m, const IniKey& k) { return k.restart && normalized(k, ini_now(k)) != normalized(k, ini_boot(m, k)); }
 
-void ini_put(Menu& m, const IniKey& k, const std::string& value) {
+void ini_put(Menu& m, const IniKey& k, const std::string& value, bool live = true) {
     ini_boot(m, k);   // the value in force is known before the first write
     std::string err;
     if (config_write(k.sec, k.key, value, &err)) {
+        if (live && k.live) k.live();
         NXLOG_I(kTag, "[%s] %s = %s written to %s%s", k.sec, k.key, value.c_str(), config_file_path().c_str(),
                 k.restart ? " (applies on restart)" : "");
         notify(m, std::string("Saved [") + k.sec + "] " + k.key + " = " + value + (k.restart ? "  (applies on restart)" : ""));
@@ -493,10 +526,40 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
 }
 
 // ---- Graphics ---------------------------------------------------------------------------------------------------------------------------
-constexpr const char* kOutputNames[] = {"Console (the game's choice: 1440p docked)", "1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
-                                        "2560 x 1080 (21:9)", "3440 x 1440 (21:9)", "5120 x 1440 (32:9, drawn at 3840 x 1080)", "The window's size at start"};
-constexpr const char* kOutputVals[] = {"console", "720p", "1080p", "1440p", "2160p", "2560x1080", "3440x1440", "5120x1440", "window"};
-constexpr int kOutputCount = static_cast<int>(std::size(kOutputVals));
+// The output list (ObeliskChamber_presets.h kOutputChoices) named by shape, then "This monitor" (the display the window is on) when its
+// size is known. Rebuilt when the menu draws, so a window moved to another display shows that one.
+struct OutputList {
+    std::vector<std::string> names, vals;
+    std::vector<const char*> name_ptrs;
+    int monitor = -1;    // the index of the "This monitor" entry, -1 when there is none
+};
+std::string output_choice_name(const OutputChoice& o) {
+    std::string n;
+    if (!std::strcmp(o.shape, "16:9")) n = "16:9  ";
+    else if (!std::strcmp(o.shape, "21:9")) n = "21:9 ultrawide  ";
+    else if (!std::strcmp(o.shape, "32:9")) n = "32:9 super ultrawide  ";
+    n += o.size;
+    if (*o.note) n += std::string(" (") + o.note + ")";
+    return n;
+}
+const OutputList& output_list() {
+    static OutputList l;
+    static std::string monitor_was = "?";
+    const std::string mon = monitor_output_value();
+    if (mon == monitor_was && !l.vals.empty()) return l;
+    monitor_was = mon;
+    l = OutputList{};
+    for (const OutputChoice& o : kOutputChoices) l.names.push_back(output_choice_name(o)), l.vals.emplace_back(o.value);
+    if (!mon.empty()) {
+        int w = 0, h = 0;
+        std::sscanf(mon.c_str(), "%dx%d", &w, &h);
+        l.monitor = static_cast<int>(l.vals.size());
+        l.names.push_back("This monitor: " + std::to_string(w) + " x " + std::to_string(h) + " (" + shape_of(w, h) + ")");
+        l.vals.push_back(mon);
+    }
+    for (const std::string& n : l.names) l.name_ptrs.push_back(n.c_str());
+    return l;
+}
 constexpr const char* kWideNames[] = {"Auto (outputs wider than 16:9)", "Off (16:9, stretched)"};
 constexpr const char* kWideVals[] = {"auto", "off"};
 constexpr const char* kRatioNames[] = {"Game default (half per side)", "33% (ultra performance)", "50% (performance)", "59% (balanced)",
@@ -504,8 +567,9 @@ constexpr const char* kRatioNames[] = {"Game default (half per side)", "33% (ult
 constexpr const char* kRatioVals[] = {"0", "0.33", "0.5", "0.59", "0.67", "0.75", "0.85", "1.0"};
 constexpr const char* kShadowNames[] = {"Game default (2048 docked)", "1024", "1536", "2048", "3072", "4096", "6144", "8192"};
 constexpr const char* kShadowVals[] = {"0", "1024", "1536", "2048", "3072", "4096", "6144", "8192"};
-constexpr const char* kQualityNames[] = {"Console (handheld configs keep their cuts)", "Docked quality in every config"};
-constexpr const char* kQualityVals[] = {"console", "docked"};
+constexpr const char* kQualityNames[] = {"Console (handheld configs keep their cuts)", "Docked quality in every config",
+                                         "Handheld quality in every config (lighter)"};
+constexpr const char* kQualityVals[] = {"console", "docked", "handheld"};
 constexpr const char* kUpscalerNames[] = {"TAAU (built in, temporal)", "DLSS (NVIDIA RTX, through Streamline)", "FSR 3 (AMD FidelityFX)",
                                           "XeSS (Intel, any GPU with DP4a)", "Bilinear (no anti-aliasing)", "Auto (DLSS, else XeSS, else FSR 3, else TAAU)"};
 constexpr const char* kUpscalerVals[] = {"taau", "dlss", "fsr3", "xess", "bilinear", "auto"};
@@ -539,24 +603,79 @@ void output_size(const std::string& v, bool wide, int* w, int* h) {
     }
 }
 
+// Graphics preset: writes render scale, shadow resolution and quality together (ObeliskChamber_presets.h). The row shows the preset the
+// three keys hold now, Custom when they hold anything else.
+void preset_row(Menu& m) {
+    const IniKey* keys[3] = {ini_key("fefw", "render_ratio"), ini_key("fefw", "shadow_size"), ini_key("fefw", "quality")};
+    row(m, "Graphics preset", When::Live,
+        "Sets Render scale, Shadow resolution and Quality below together. Low: 50% render, 1024 shadows, handheld effects. Medium: the "
+        "console's picture (the defaults). High: 67% render, 4096 shadows, docked effects. Ultra: native render (DLAA), 8192 shadows, docked "
+        "effects. Changing one of the three afterwards shows Custom. Output size and the upscaler are not touched.");
+    for (const IniKey* k : keys)
+        if (env_locked(*k)) return;
+    static const char* names[kGraphicsPresetCount];
+    for (int i = 0; i < kGraphicsPresetCount; ++i) names[i] = kGraphicsPresets[i].name;
+    int idx = graphics_preset_current();
+    if (combo(m, "##preset", &idx, names, kGraphicsPresetCount, "Custom")) {
+        const GraphicsPreset& p = kGraphicsPresets[idx];
+        ini_put(m, *keys[0], p.render_ratio, false);
+        ini_put(m, *keys[1], p.shadow_size, false);
+        ini_put(m, *keys[2], p.quality, false);
+        live_rebuild();   // one rebuild for the three
+        NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s", p.name, p.render_ratio, p.shadow_size, p.quality);
+        notify(m, std::string(tr("Graphics preset")) + ": " + tr(p.name));
+    }
+}
+
+// Under the Ultrawide row: a wide output with Ultrawide off is stretched; a 16:9 output on a wide monitor is pillarboxed. Says which.
+void wide_notes() {
+    int ow = 0, oh = 0;
+    const bool wide_on = lower(ini_now(*ini_key("fefw", "ultrawide"))) != "off";
+    output_size(ini_now(*ini_key("fefw", "output")), true, &ow, &oh);   // true: the shape as asked for
+    const bool out_wide = ow > 0 && oh > 0 && wide_aspect(ow, oh);
+    int mw = 0, mh = 0;
+    const bool mon_wide = platform::desktop_pixel_size(&mw, &mh) && wide_aspect(mw, mh);
+    std::string note;
+    if (out_wide && !wide_on) {
+        note = tr("This output is wider than 16:9 but Ultrawide is Off: the 16:9 picture is stretched. Set Ultrawide to Auto.");
+    } else if (!out_wide && mon_wide) {
+        char buf[256];
+        const std::string shape = shape_of(mw, mh);
+        std::snprintf(buf, sizeof buf, tr("This monitor is %d x %d (%s). For a wide picture pick This monitor or a %s size as Output size."), mw, mh,
+                      shape.c_str(), shape.c_str());
+        note = buf;
+    }
+    if (note.empty()) return;
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextColored(kOrange, "%s", note.c_str());
+    ImGui::PopTextWrapPos();
+}
+
 void resolution_group(Menu& m) {
     section("Resolution");
-    ImGui::TextWrapped("%s", tr("The game chooses its render configuration once, at start: these apply on restart (notes/resolution.md)."));
+    ImGui::TextWrapped("%s", tr("Output size and Ultrawide apply on restart (the game builds its picture size once). The preset, render scale, "
+                                "shadows and quality apply at once, with a short pause while the game rebuilds its render targets."));
     if (begin_rows("res")) {
+        preset_row(m);
         // the output: the entries, or a WxH from the ini shown as it is
         const IniKey& out = *ini_key("fefw", "output");
         {
             const std::string v = lower(ini_now(out));
             const char* cur = v == "4k" ? "2160p" : v.c_str();
             row(m, "Output size", When::Restart,
-                "The size the game renders its picture, UI and post effects at (its DLSS output). Up to 3840 x 2160 at 16:9; wider shapes "
-                "need Ultrawide. The window scales it (Display > Scaling to the window).");
+                "The size the game renders its picture, UI and post effects at (its DLSS output), not the window's size. For an ultrawide "
+                "monitor pick a 21:9 or 32:9 size, or This monitor, and keep Ultrawide on Auto; Borderless fullscreen (Display) then fills the "
+                "screen. Up to 3840 x 2160; a larger size keeps its shape and is drawn smaller. The window scales it (Display > Scaling to the window).");
             if (!env_locked(out)) {
+                const OutputList& ol = output_list();
+                const int n = static_cast<int>(ol.vals.size());
                 int idx = -1;
-                for (int i = 0; i < kOutputCount; ++i)
-                    if (cur == std::string(kOutputVals[i])) idx = i;
+                for (int i = 0; i < n && idx < 0; ++i)
+                    if (cur == ol.vals[static_cast<size_t>(i)]) idx = i;
                 const std::string other = std::string(tr("Custom")) + ": " + ini_now(out);
-                if (combo(m, "##out", &idx, kOutputNames, kOutputCount, other.c_str(), true)) ini_put(m, out, kOutputVals[idx]);
+                if (combo(m, "##out", &idx, ol.name_ptrs.data(), n, other.c_str(), true)) ini_put(m, out, ol.vals[static_cast<size_t>(idx)]);
                 pending_note(ini_pending(m, out), ini_boot(m, out));
             }
         }
@@ -565,6 +684,7 @@ void resolution_group(Menu& m) {
                       "keeps the menus, HUD, text and movies in the centred 16:9 area, after Kompas9's ultrawide patch. A narrower output "
                       "(16:10) gets the 16:9 picture letterboxed. Off: the game's 16:9 picture is stretched to a wide output.",
                       kWideNames, kWideVals, 2);
+        wide_notes();
         ini_combo_row(m, *ini_key("fefw", "render_ratio"), "Render scale",
                       "The 3D render size per side as a share of the output; the game's upscaler (Graphics > Upscaler) fills the rest. "
                       "100% renders at the output size and only anti-aliases.",
@@ -581,7 +701,7 @@ void resolution_group(Menu& m) {
             const IniKey& gk = *ini_key("nvn", "dynres_gain");
             const int pct = nxrt::nvn::backend_dynres_scale_percent();
             const std::string now_note = pct > 0 ? std::string(tr("Dynamic resolution is running. Scale now")) + ": " + std::to_string(pct) + "%. "
-                                                 : std::string(tr("Dynamic resolution is not running (turn it on above and restart).")) + " ";
+                                                 : std::string(tr("Dynamic resolution is not running (turn it on above; it needs an Output size other than Console).")) + " ";
             ini_combo_row(m, tk, "  Target frame rate",
                           (now_note + tr("The frame rate dynamic resolution works towards. Set it at or under the frame rate cap. Paused: full "
                                          "size until a target is chosen.")).c_str(),
@@ -599,7 +719,7 @@ void resolution_group(Menu& m) {
         }
         const IniKey& fixed = *ini_key("fefw", "render");
         if (!ini_now(fixed).empty() || ini_pending(m, fixed)) {
-            row(m, "Fixed render size", When::Restart, "[fefw] render = WxH wins over the render scale. Clear it to use the scale.");
+            row(m, "Fixed render size", When::Live, "[fefw] render = WxH wins over the render scale. Clear it to use the scale.");
             if (!env_locked(fixed)) {
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextUnformatted(ini_now(fixed).empty() ? tr("(cleared)") : ini_now(fixed).c_str());
@@ -614,7 +734,7 @@ void resolution_group(Menu& m) {
                       kShadowNames, kShadowVals, 8);
         ini_combo_row(m, *ini_key("fefw", "quality"), "Quality",
                       "Docked gives every render configuration the docked one's shadows and effects, so a handheld or 1080p answer keeps them.",
-                      kQualityNames, kQualityVals, 2);
+                      kQualityNames, kQualityVals, 3);
         end_rows();
     }
     // what the chosen sizes mean
@@ -646,9 +766,12 @@ void upscaler_group(Menu& m) {
                       "FSR 3 runs on any GPU with AMD's FidelityFX DLLs (upscalers\\fsr next to the launcher, or [upscale] fsr_dll); "
                       "XeSS runs on any GPU with DP4a (best on Intel Arc) and needs libxess.dll (upscalers\\xess next to the launcher, or "
                       "[upscale] xess_dll) and the Visual C++ 2015-2022 runtime. One that cannot run falls back to TAAU and the log names the "
-                      "missing file. Choosing DLSS or XeSS (or Auto with the DLLs present) takes effect at the next start.",
+                      "missing file. TAAU, Bilinear and FSR 3 switch at once. DLSS and XeSS switch at once when the game started with them (DLSS loads "
+                      "before the GPU is set up, XeSS needs the GPU set up for it); otherwise TAAU runs until the next start.",
                       kUpscalerNames, kUpscalerVals, 6);
         const std::string u = lower(ini_now(up));
+        if (!env_locked(up) && !nxrt::nvn::backend_upscaler_ready(u.c_str()))
+            ImGui::TextColored(kOrange, "%s", tr("This upscaler was not set up when the game started: TAAU runs until the next start."));
         if (u == "dlss" || u == "auto") {
             const IniKey& pk = *ini_key("dlss", "preset");
             ini_combo_row(m, pk, "DLSS model",
@@ -876,11 +999,11 @@ void fps_name(int v, char* buf, size_t n) {
 void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Overlay& ov) {
     const ClockInfo ck = clock_info();
     section("The game's frame rate");
-    ImGui::TextWrapped("%s", tr("The game steps its world by its own frame rate; the hooks that change it are installed at start."));
+    ImGui::TextWrapped("%s", tr("The game steps its world by its own frame rate. A change applies at once in gameplay, else from the next gameplay scene."));
     if (begin_rows("game")) {
         const IniKey& k60 = *ini_key("fefw", "fps60");
         const IniKey& k120 = *ini_key("fefw", "fps120");
-        row(m, "Gameplay frame rate", When::Restart,
+        row(m, "Gameplay frame rate", When::Live,
             "30 is the game's own. 60 runs gameplay at 60 at the right speed (dialogue text types twice as fast). 120 needs a frame limit of 120 "
             "or more and a fast PC; frame-counted effects such as the dialogue typing run 4 times as fast.");
         if (!(ini_env(k60) || ini_env(k120))) {
@@ -980,7 +1103,7 @@ void audio_page(UiHost& host, Menu& m) {
                 if (!dev.name.empty()) m.audio_devices.push_back(dev.name);
             m.audio_loaded = true;
         }
-        row(m, "Output device", When::Restart, "The game opens its audio device once.");
+        row(m, "Output device", When::Live, "Where the sound plays. A change opens the new device within a second.");
         std::vector<const char*> names = {"System default"};
         for (const std::string& s : m.audio_devices) names.push_back(s.c_str());
         int idx = a.device.empty() || a.device == "default" ? 0 : -1;
@@ -990,7 +1113,6 @@ void audio_page(UiHost& host, Menu& m) {
             a.device = idx == 0 ? "default" : m.audio_devices[static_cast<size_t>(idx - 1)];
             apply(host, m);
         }
-        pending_note(a.device != m.boot.audio.device, m.boot.audio.device);
         end_rows();
     }
 }
@@ -1297,6 +1419,90 @@ void sample_timings(Menu& m, gfx::Renderer* r) {
     m.sample_at = now;
 }
 
+// Debug > CPU: the processor (read once), the game's console cores on it, and the load twice a second: the process, every program, memory, and
+// the busiest threads (percent of one hardware thread). nxrt/cpu_info.h.
+std::string processor_list(uint64_t mask) {
+    std::string t;
+    for (int b = 0; b < 64; ++b)
+        if (mask >> b & 1) t += (t.empty() ? "" : ", ") + std::to_string(b);
+    return t;
+}
+
+void cpu_log(const Menu& m) {
+    std::string lines = "CPU (F1 menu): " + cpu::summary_line();
+    if (const char* b = cpu::game_build()) lines += std::string("; game code build ") + b;
+    char buf[256];
+    std::snprintf(buf, sizeof buf, "\n  load: process %.1f%% (%.2f threads), all programs %.1f%%; working set %.2f GB, committed %.2f GB, RAM free %.2f GB",
+                  m.cpu_load.process_pct, m.cpu_load.process_threads, m.cpu_load.system_pct, m.cpu_load.working_set / 1073741824.0,
+                  m.cpu_load.committed / 1073741824.0, m.cpu_load.ram_avail / 1073741824.0);
+    lines += buf;
+    for (const cpu::ThreadLoad& t : m.cpu_threads) {
+        std::snprintf(buf, sizeof buf, "\n  %-24s tid %-6u %5.1f%% of a thread, ideal processor %d", t.name.c_str(), t.tid, t.pct, t.ideal);
+        lines += buf;
+    }
+    NXLOG_I(kTag, "%s", lines.c_str());
+}
+
+void cpu_group(Menu& m) {
+    section("CPU");
+    const cpu::Static& c = cpu::info();
+    const double now = ImGui::GetTime();
+    if (m.cpu_at < 0 || now - m.cpu_at >= 0.5) {
+        m.cpu_load = cpu::sample();
+        m.cpu_threads = cpu::thread_loads(10);
+        m.cpu_at = now;
+    }
+    ImGui::TextUnformatted(c.brand.empty() ? tr("Unknown processor") : c.brand.c_str());
+    char split[96] = "";
+    if (c.perf_cores || c.eff_cores)
+        std::snprintf(split, sizeof split, tr(" (%d performance with %d threads, %d efficiency)"), c.perf_cores, c.perf_threads, c.eff_cores);
+    ImGui::TextDisabled(tr("%d cores%s, %d threads; base clock %.2f GHz; L2 %.1f MB, L3 %.1f MB; %.1f GB of memory"), c.cores, split, c.logical,
+                        c.base_mhz / 1000.0, c.l2_kb / 1024.0, c.l3_kb / 1024.0, static_cast<double>(c.ram_total) / 1073741824.0);
+    const char* build = cpu::game_build();
+    ImGui::TextDisabled(tr("Instruction sets: %s. Game code build: %s."), cpu::features_text(c).c_str(), build ? build : tr("not reported"));
+    const kernel::SchedInfo si = kernel::sched_info();
+    if (si.active) {
+        uint64_t used = 0;
+        for (int i = 0; i < si.cores && i < 16; ++i) used |= si.host_masks[i];
+        ImGui::TextDisabled(tr("The game's %d console cores: hardware threads %s (%s)"), si.cores, processor_list(used).c_str(),
+                            si.soft ? tr("preferred, may move") : tr("pinned"));
+    } else {
+        ImGui::TextDisabled("%s", tr("The game's console cores: not pinned (fewer hardware threads than console cores, or [sched] console_cores = 0)."));
+    }
+    const cpu::Load& l = m.cpu_load;
+    if (l.valid) {
+        ImGui::Text(tr("Load: the game %.0f%% of the CPU (%.1f threads busy), all programs %.0f%%"), l.process_pct, l.process_threads, l.system_pct);
+        ImGui::Text(tr("Memory: the game %.2f GB in use, %.2f GB committed; %.1f of %.1f GB free"), l.working_set / 1073741824.0,
+                    l.committed / 1073741824.0, l.ram_avail / 1073741824.0, static_cast<double>(c.ram_total) / 1073741824.0);
+    } else {
+        ImGui::TextDisabled("%s", tr("Load: measuring..."));
+    }
+    if (!m.cpu_threads.empty() &&
+        ImGui::BeginTable("cputhreads", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersInnerV)) {
+        ImGui::TableSetupColumn(tr("Busiest threads"), ImGuiTableColumnFlags_WidthStretch, 0.56f);
+        ImGui::TableSetupColumn(tr("% of one thread"), ImGuiTableColumnFlags_WidthStretch, 0.22f);
+        ImGui::TableSetupColumn(tr("Ideal processor"), ImGuiTableColumnFlags_WidthStretch, 0.22f);
+        ImGui::TableHeadersRow();
+        for (const cpu::ThreadLoad& t : m.cpu_threads) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(t.name.c_str());
+            ImGui::TableSetColumnIndex(1);
+            if (t.pct >= 90.0) ImGui::TextColored(kOrange, "%.0f%%", t.pct);   // a thread that has a hardware thread to itself and still wants more
+            else ImGui::Text("%.0f%%", t.pct);
+            ImGui::TableSetColumnIndex(2);
+            if (t.ideal >= 0) ImGui::Text("%d", t.ideal);
+            else ImGui::TextDisabled("-");
+        }
+        ImGui::EndTable();
+        ImGui::TextDisabled("%s", tr("A thread near 100% is busy all the time: it sets the frame rate whatever the GPU does."));
+    }
+    if (button(m, "Write the CPU details to the log")) {
+        cpu_log(m);
+        notify(m, "CPU details written to the log.");
+    }
+}
+
 void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
     gfx::Renderer* r = ov.context().renderer;
     section("Frame times");
@@ -1359,6 +1565,8 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
         NXLOG_I(kTag, "frame times (F1 menu):\n%s", frame_times_summary(30.0).c_str());
         notify(m, "Frame time summary written to the log.");
     }
+
+    cpu_group(m);
 
     section("Game clock");
     const ClockInfo ck = clock_info();

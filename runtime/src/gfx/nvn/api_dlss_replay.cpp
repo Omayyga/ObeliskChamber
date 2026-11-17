@@ -54,18 +54,23 @@ struct Settings {
     float sharpness = 0.0f;  // the SDK upscalers' sharpening
 };
 
-// The two values a menu changes while the game runs (backend_upscale_tuning); below zero: the ini's.
+// The values a menu changes while the game runs (backend_upscale_tuning, backend_set_upscaler); below zero: the ini's.
 std::atomic<int> g_weight_x100{-1}, g_sharp_x1000{-1};
+std::atomic<int> g_upscaler_live{-1};   // an Upscaler
+
+// An [dlss] upscaler word; false (and Taau) for an unknown one.
+bool parse_upscaler(std::string u, Upscaler* out) {
+    for (char& c : u) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    *out = u == "bilinear" || u == "spatial" ? Upscaler::Bilinear : u == "fsr3" || u == "fsr" ? Upscaler::Fsr3 : u == "dlss" ? Upscaler::Dlss
+         : u == "xess" ? Upscaler::Xess : u == "auto" ? Upscaler::Auto : Upscaler::Taau;
+    return u == "taau" || u == "bilinear" || u == "spatial" || u == "fsr3" || u == "fsr" || u == "dlss" || u == "xess" || u == "auto";
+}
 
 const Settings& settings() {
     static const Settings s = [] {
         Settings r;
-        std::string u = config_get_str("dlss", "upscaler", "taau");
-        for (char& c : u) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        r.upscaler = u == "bilinear" || u == "spatial" ? Upscaler::Bilinear : u == "fsr3" || u == "fsr" ? Upscaler::Fsr3 : u == "dlss" ? Upscaler::Dlss
-                   : u == "xess" ? Upscaler::Xess : u == "auto" ? Upscaler::Auto : Upscaler::Taau;
-        if (u != "taau" && u != "bilinear" && u != "spatial" && u != "fsr3" && u != "fsr" && u != "dlss" && u != "xess" && u != "auto")
-            NXLOG_W(kTag, "[dlss] upscaler = %s is not known: taau", u.c_str());
+        const std::string u = config_get_str("dlss", "upscaler", "taau");
+        if (!parse_upscaler(u, &r.upscaler)) NXLOG_W(kTag, "[dlss] upscaler = %s is not known: taau", u.c_str());
         r.jitter_sign = static_cast<int>(config_get_int("dlss", "jitter_sign", 0));
         r.mv_sign = static_cast<int>(config_get_int("dlss", "mv_sign", 0));
         r.max_weight = static_cast<float>(std::clamp(config_get_double("dlss", "history_weight", 12.0), 2.0, 64.0));
@@ -128,6 +133,7 @@ struct NetGpu {
     History hist;
     Img sdk[4];          // the SDK upscalers' colour, depth, motion (input size) and output (output size)
     bool sdk_valid = false;   // the SDK upscaler's own history holds this network's last frame
+    int sdk_u = -1;           // the SDK upscaler that history belongs to (a menu can switch it: backend_set_upscaler)
     VkExtent2D sdk_in = {}, sdk_out = {};
     Img dump;            // [dlss] dump_every: the input region as rgba16f
     bool dump_pair = false;   // the next evaluation is dumped too
@@ -545,8 +551,10 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
     NetGpu& n = *net_gpu(net);
     History& h = n.hist;
 
-    Upscaler u = s.upscaler;
-    const render_status::Backend configured = status_backend(s.upscaler);
+    const int live_u = g_upscaler_live.load(std::memory_order_relaxed);
+    const Upscaler chosen = live_u >= 0 ? static_cast<Upscaler>(live_u) : s.upscaler;
+    Upscaler u = chosen;
+    const render_status::Backend configured = status_backend(chosen);
     if (u == Upscaler::Auto)
         u = extras::temporal_dlss_started() ? Upscaler::Dlss
           : extras::temporal_xess_ready()   ? Upscaler::Xess
@@ -639,12 +647,13 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
     std::copy(tf.mv_offset, tf.mv_offset + 2, prep.mv_offset);
 
     if (u == Upscaler::Fsr3 || u == Upscaler::Dlss || u == Upscaler::Xess) {
-        const bool sdk_reset = p.reset != 0 || !n.sdk_valid || n.sdk_in.width != in_img.width || n.sdk_in.height != in_img.height ||
-                               n.sdk_out.width != out_img.width || n.sdk_out.height != out_img.height;
+        const bool sdk_reset = p.reset != 0 || !n.sdk_valid || n.sdk_u != static_cast<int>(u) || n.sdk_in.width != in_img.width ||
+                               n.sdk_in.height != in_img.height || n.sdk_out.width != out_img.width || n.sdk_out.height != out_img.height;
         const char* why = nullptr;
         if (run_sdk(f, u, n, *e, prep, in_img, out_img, tf.jitter, sdk_reset, frame_ms, &why)) {
             blit_out(f, n.sdk[3].img, out, ro);
             n.sdk_valid = true;
+            n.sdk_u = static_cast<int>(u);
             n.sdk_in = in_img;
             n.sdk_out = out_img;
             n.resets += sdk_reset ? 1 : 0;
@@ -657,9 +666,9 @@ void dlss_replay(gpu::Frame& f, Obj* o) {
             feed_framegen(f, n, prep, in_img, tf.jitter, sdk_reset, tf.depth_inverted, true);
             return;
         }
-        static bool told = false;
-        if (!told && !(why && why[0])) {   // a per-frame failure is logged by the backend, with its retry
-            told = true;
+        static bool told[6] = {};   // once per upscaler: a menu can switch to another one that cannot run either
+        if (!told[static_cast<int>(u)] && !(why && why[0])) {   // a per-frame failure is logged by the backend, with its retry
+            told[static_cast<int>(u)] = true;
             NXLOG_W(kTag, "%s is not available (its DLLs, or Streamline not started): the built-in temporal upscaler is used", upscaler_name(u));
         }
         {
@@ -742,5 +751,26 @@ void backend_upscale_tuning(double history_weight, double sharpness) {
     if (sharpness >= 0.0) be::g_sharp_x1000.store(static_cast<int>(std::lround(std::clamp(sharpness, 0.0, 1.0) * 1000.0)));
     NXLOG_I("nvn.dlss", "[live] TAAU history weight %.0f, sharpening %.2f", static_cast<double>(be::live_max_weight()),
             static_cast<double>(be::live_sharpness()));
+}
+void backend_set_upscaler(const char* word) {
+    be::Upscaler u;
+    if (!word || !be::parse_upscaler(word, &u)) {
+        be::g_upscaler_live.store(-1);
+        return;
+    }
+    be::g_upscaler_live.store(static_cast<int>(u));
+    NXLOG_I("nvn.dlss", "[live] upscaler %s%s", be::upscaler_name(u),
+            backend_upscaler_ready(word) ? "" : " (not set up in this run: TAAU until the next start)");
+}
+
+bool backend_upscaler_ready(const char* word) {
+    be::Upscaler u;
+    if (!word || !be::parse_upscaler(word, &u)) return true;
+    switch (u) {
+        case be::Upscaler::Dlss: return extras::temporal_dlss_started();
+        case be::Upscaler::Xess: return extras::temporal_xess_ready();
+        case be::Upscaler::Fsr3: return extras::temporal_ffx_available();
+        default: return true;   // TAAU, bilinear; Auto picks among what is ready
+    }
 }
 }  // namespace nxrt::nvn
