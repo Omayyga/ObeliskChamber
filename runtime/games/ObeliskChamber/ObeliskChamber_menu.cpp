@@ -125,6 +125,10 @@ constexpr IniKey kIni[] = {
     {"fefw", "render", "", Norm::Text, false, "fixed render size", live_scale},
     {"fefw", "shadow_size", "0", Norm::Number, false, "shadow resolution", live_rebuild},
     {"fefw", "quality", "console", Norm::Text, false, "quality", live_rebuild},
+    {"fefw", "reflections", "full", Norm::Text, true, "reflections"},
+    {"fefw", "ambient_occlusion", "1", Norm::Bool, true, "ambient occlusion"},
+    {"fefw", "crowd_detail", "full", Norm::Text, true, "crowd detail"},
+    {"fefw", "scenery_detail", "full", Norm::Text, true, "scenery detail"},
     {"fefw", "fps60", "0", Norm::Bool, false, "60 fps", live_rate},
     {"fefw", "fps120", "0", Norm::Bool, false, "120 fps", live_rate},
     {"fefw", "smooth_step", "auto", Norm::Text, false, "smooth time step", live_smooth},
@@ -608,11 +612,13 @@ void output_size(const std::string& v, bool wide, int* w, int* h) {
 // Graphics preset: writes render scale, shadow resolution and quality together (ObeliskChamber_presets.h). The row shows the preset the
 // three keys hold now, Custom when they hold anything else.
 void preset_row(Menu& m) {
-    const IniKey* keys[3] = {ini_key("fefw", "render_ratio"), ini_key("fefw", "shadow_size"), ini_key("fefw", "quality")};
+    const IniKey* keys[7];
+    for (int i = 0; i < 7; ++i) keys[i] = ini_key("fefw", kPresetKeys[i]);
     row(m, "Graphics preset", When::Live,
-        "Sets Render scale, Shadow resolution and Quality below together. Low: 50% render, 1024 shadows, handheld effects. Medium: the "
+        "Sets Render scale, Shadow resolution, Quality and the four detail rows below together. Low: 50% render, 1024 shadows, handheld "
+        "effects, reduced reflections, no ambient occlusion, simpler crowds and scenery (the detail rows apply at the next start). Medium: the "
         "console's picture (the defaults). High: 67% render, 4096 shadows, docked effects. Ultra: native render (DLAA), 8192 shadows, docked "
-        "effects. Changing one of the three afterwards shows Custom. Output size and the upscaler are not touched.");
+        "effects. Changing one of them afterwards shows Custom. Output size and the upscaler are not touched.");
     for (const IniKey* k : keys)
         if (env_locked(*k)) return;
     static const char* names[kGraphicsPresetCount];
@@ -620,11 +626,10 @@ void preset_row(Menu& m) {
     int idx = graphics_preset_current();
     if (combo(m, "##preset", &idx, names, kGraphicsPresetCount, "Custom")) {
         const GraphicsPreset& p = kGraphicsPresets[idx];
-        ini_put(m, *keys[0], p.render_ratio, false);
-        ini_put(m, *keys[1], p.shadow_size, false);
-        ini_put(m, *keys[2], p.quality, false);
-        live_rebuild();   // one rebuild for the three
-        NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s", p.name, p.render_ratio, p.shadow_size, p.quality);
+        for (int i = 0; i < 7; ++i) ini_put(m, *keys[i], preset_value(p, i), false);
+        live_rebuild();   // one rebuild for the three live ones; the detail keys apply at the next start
+        NXLOG_I(kTag, "graphics preset %s: render_ratio %s, shadow_size %s, quality %s, reflections %s, ambient_occlusion %s, crowd_detail %s, scenery_detail %s", p.name,
+                p.render_ratio, p.shadow_size, p.quality, p.reflections, p.ambient_occlusion, p.crowd_detail, p.scenery_detail);
         notify(m, std::string(tr("Graphics preset")) + ": " + tr(p.name));
     }
 }
@@ -737,6 +742,21 @@ void resolution_group(Menu& m) {
         ini_combo_row(m, *ini_key("fefw", "quality"), "Quality",
                       "Docked gives every render configuration the docked one's shadows and effects, so a handheld or 1080p answer keeps them.",
                       kQualityNames, kQualityVals, 3);
+        // the game's own graphics data, edited as it loads (ObeliskChamber_detail.cpp)
+        constexpr const char* kReflNames[] = {"Full", "Reduced (8 rays, a little grainier)", "Off"};
+        constexpr const char* kReflVals[] = {"full", "reduced", "off"};
+        ini_combo_row(m, *ini_key("fefw", "reflections"), "Reflections",
+                      "Screen-space reflections on floors and water. Reduced takes 8 rays instead of 32; mostly helps in the hubs.", kReflNames, kReflVals, 3);
+        constexpr const char* kOnOff[] = {"On", "Off"};
+        constexpr const char* kOnOffVals[] = {"1", "0"};
+        ini_combo_row(m, *ini_key("fefw", "ambient_occlusion"), "Ambient occlusion",
+                      "The soft shading in corners. Off saves GPU time everywhere, with flatter lighting.", kOnOff, kOnOffVals, 2);
+        constexpr const char* kDetailNames[] = {"Full", "Reduced"};
+        constexpr const char* kDetailVals[] = {"full", "reduced"};
+        ini_combo_row(m, *ini_key("fefw", "crowd_detail"), "Crowd detail",
+                      "Reduced: crowd characters switch to their simpler models twice as soon, for busy towns and battles.", kDetailNames, kDetailVals, 2);
+        ini_combo_row(m, *ini_key("fefw", "scenery_detail"), "Scenery detail",
+                      "Reduced: scenery switches to its simpler versions at 60% of the distance (50 m becomes 30 m).", kDetailNames, kDetailVals, 2);
         end_rows();
     }
     // what the chosen sizes mean

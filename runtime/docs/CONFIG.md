@@ -284,6 +284,10 @@ Rules:
 | `fefw` | `save_slot` | `000` | `NXRT_FEFW_SAVE_SLOT` | `games/ObeliskChamber/ObeliskChamber_saveslot.cpp` | The save folder in use (three digits). Written by the game's menus; a folder without a save falls back to the first one that has one. |
 | `fefw` | `mod_menu` | `true` | `NXRT_FEFW_MOD_MENU` | `games/ObeliskChamber/ObeliskChamber_modmenu.cpp` | Fortune's Weave: the title screen's DLC entry (the eShop on the console) reads "DLC / Mods" and opens a list of the mods folder (`[fs] mods`) made from the game's own Options screen, on two tabs: RomFS (mods with `romfs/`) and ExeFS (mods with `exefs/`). A row is named by the mod's folder; A switches it On or Off, which writes the mod's `mod.ini` (`romfs = on|off`, `exefs = on|off`; a missing file or line means on). An off part is left out as if its folder were not there: RomFS files and exefs DLLs from the next start, exefs `.ips` / `.pchtxt` patches from the next Set up. `mod.ini` can also be edited by hand. `false`: the entry is the game's own. |
 | `fefw` | `quality` | `console` | `NXRT_FEFW_QUALITY` | `games/ObeliskChamber/ObeliskChamber_res.cpp` | Fortune's Weave: `docked` gives every render config the docked config's quality settings (shadows and the handheld reductions), so handheld mode or a 1080p display answer keep them. The Recomp Options screen applies a change to the running game (the file is read at start). `handheld` gives every render config the first handheld config's quality fields instead (smaller shadow maps and the reductions the console makes in handheld mode), for a higher frame rate. |
+| `fefw` | `reflections` | `full` | `NXRT_FEFW_REFLECTIONS` | `games/ObeliskChamber/ObeliskChamber_detail.cpp` | Fortune's Weave: screen-space reflections. `full`; `reduced` sets `SSR.RaySamplingCount` 32 → 8 in the game's `Graphics/Settings/**/*.set` files (a little grainier, mostly helps in the hubs); `off` sets `SSR.Enabled` false. The files are edited in memory as the RomFS is set up (the code mods' file-edit path), keeping each value's MessagePack encoding; a file that does not parse is left alone. Log: `graphics detail:` at start and a count of the changed values at the first game clock line. Low preset: `reduced`. Applies at the next start. Settings after Fortune's Eden's Performance page. |
+| `fefw` | `ambient_occlusion` | `1` | `NXRT_FEFW_AMBIENT_OCCLUSION` | `games/ObeliskChamber/ObeliskChamber_detail.cpp` | Fortune's Weave: `0` sets `AO.SSAO_Enabled` false in the same `.set` files: flatter corners, less GPU time everywhere. Low preset: `0`. Applies at the next start. |
+| `fefw` | `crowd_detail` | `full` | `NXRT_FEFW_CROWD_DETAIL` | `games/ObeliskChamber/ObeliskChamber_detail.cpp` | Fortune's Weave: `reduced` doubles `presets.CharacterMob` / `CharacterLegion` `.Thresholds` in `Graphics/Settings/**/lodPresets.lod` (screen-size fractions), so crowd characters switch to simpler models twice as soon. Low preset: `reduced`. Applies at the next start. |
+| `fefw` | `scenery_detail` | `full` | `NXRT_FEFW_SCENERY_DETAIL` | `games/ObeliskChamber/ObeliskChamber_detail.cpp` | Fortune's Weave: `reduced` scales `presets.Map*.Thresholds` (distances in metres) in `lodPresets.lod` to 60 %: 50/100/150/200 m become 30/60/90/120 m and the 1000 m hiding distance 600 m. Low preset: `reduced`. Applies at the next start. |
 | `fefw` | `prompt_glyphs` | `1` | `NXRT_FEFW_PROMPT_GLYPHS` | `games/ObeliskChamber/ObeliskChamber_prompts.cpp` | Fortune's Weave: the button glyphs in the game's text (A, B, X, Y, L, R, ZL, ZR, +, - and the face-button position dots) follow `[prompts] style` in `controls.ini`: PlayStation, Xbox or keyboard keys, or the game's own Switch glyphs. Drawn into the game's extension-font sheets, live. `0` leaves the game's glyphs alone. Read at start. notes/prompts.md. |
 | `fefw` | `mouse_switch_now` | `1` | `NXRT_FEFW_MOUSE_SWITCH_NOW` | `games/ObeliskChamber/ObeliskChamber_mouse.cpp` | Fortune's Weave: the game's mouse controls follow the Joy-Con 2 mouse at once: on as soon as the mouse is really used, off as soon as a key or the pad is. The game itself waits 30 frames with the Joy-Con lying flat (its accelerometer, which a PC mouse never reports: without this only a fast flick starts mouse mode) and 120 frames after it is lifted. Only with the game's "Method for Switching to Mouse" on Automatic; the manual method (SL + SR) keeps the game's rules. `0`: the game's own timing. Read at start. |
 | `fefw` | `cursor_real_time` | `1` | `NXRT_FEFW_CURSOR_REAL_TIME` | `games/ObeliskChamber/ObeliskChamber_play.cpp` | Fortune's Weave: the battle map and world map cursor moves by the frame's real time step instead of 60 / target frame rate, so it keeps its speed when the game runs below its target (`fps60` / `fps120` not reached, heavy scenes; #40). The same speed as before when the frame rate is on target. Needs a `ObeliskChamber.exe` built with the 0.1.6 `main.sites` (inline sites 0x7358b8, 0x735934); an older one keeps the game's per-frame speed. Y (keyboard F) held is the game's own fast cursor. Read at start. |
@@ -440,18 +444,19 @@ Rules:
 ### Fortune's Weave graphics presets
 
 The launcher's Picture tab, Recomp Options (Graphics) and the F1 menu (Graphics > Resolution) offer **Graphics preset**: Low, Medium, High,
-Ultra. A preset is not a key: picking one writes the three keys below, and the preset shown is the one whose values the file holds now
+Ultra. A preset is not a key: picking one writes the seven keys below, and the preset shown is the one whose values the file holds now
 (*Custom* when none matches). Output size, the upscaler and frame generation are left alone. The table lives in
 `games/ObeliskChamber/ObeliskChamber_presets.h` and `launcher/src/pages/settings.js` (`PRESETS`); keep both and this table in step.
 
-| Preset | `[fefw] render_ratio` | `[fefw] shadow_size` | `[fefw] quality` |
-|---|---|---|---|
-| Low | `0.5` | `1024` | `handheld` |
-| Medium (the defaults, the console's picture) | `0` | `0` | `console` |
-| High | `0.67` | `4096` | `docked` |
-| Ultra | `1.0` (DLAA) | `8192` (about 1.3 GB more video memory) | `docked` |
+| Preset | `[fefw] render_ratio` | `[fefw] shadow_size` | `[fefw] quality` | `reflections` | `ambient_occlusion` | `crowd_detail` | `scenery_detail` |
+|---|---|---|---|---|---|---|---|
+| Low | `0.5` | `1024` | `handheld` | `reduced` | `0` | `reduced` | `reduced` |
+| Medium (the defaults, the console's picture) | `0` | `0` | `console` | `full` | `1` | `full` | `full` |
+| High | `0.67` | `4096` | `docked` | `full` | `1` | `full` | `full` |
+| Ultra | `1.0` (DLAA) | `8192` (about 1.3 GB more video memory) | `docked` | `full` | `1` | `full` | `full` |
 
-Recomp Options and the F1 menu apply a preset to the running game at once (two short pauses while the game rebuilds its render targets).
+Recomp Options and the F1 menu apply the first three to the running game at once (two short pauses while the game rebuilds its render
+targets); the four detail keys edit the game's graphics data files and apply at the next start.
 Above a 1440p output the render is held to half per side unless the render-target pool is extended, so High and Ultra render at 50% there.
 
 ### Fortune's Weave: what the menus change live
