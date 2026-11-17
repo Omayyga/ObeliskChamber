@@ -20,7 +20,9 @@ if ($sccache) {
     $sccache = $sccache.Replace('\', '/')
     $cfg += " -DCMAKE_C_COMPILER_LAUNCHER=`"$sccache`" -DCMAKE_CXX_COMPILER_LAUNCHER=`"$sccache`""
 }
-if ($LibDir) { $cfg += " -DFEFW_LIB_DIR=`"$LibDir`"" }
+if (-not $LibDir) { $LibDir = Join-Path $root "..\work\build\fefw" }
+$LibDir = $LibDir.Replace('\', '/')
+$cfg += " -DFEFW_LIB_DIR=`"$LibDir`""
 # ThinLTO follows the flags the lifted libraries were built with (docs/PGO.md): -flto in NX_EXTRA_FLAGS turns on the LTO link options.
 $lto = if ($env:NX_EXTRA_FLAGS -match '-flto') { 'ON' } else { 'OFF' }
 $cfg += " -DFEFW_THINLTO=$lto -DFEFW_LTO_JOBS=`"$env:NX_LTO_JOBS`""
@@ -29,4 +31,11 @@ $cfg += " -DFEFW_RT_FLAGS=`"$env:NX_RT_FLAGS`""
 if ($CMakeArgs) { $cfg += " $CMakeArgs" }
 $tgt = if ($Target -eq "fefw_obj") { "CMakeFiles/fefw.dir/src/fefw_main.cpp.obj" } else { $Target }
 cmd /c "call `"$env_cmd`" && $cfg && cmake --build `"$bd`" --target $tgt -j $Jobs"
-exit $LASTEXITCODE
+$code = $LASTEXITCODE
+if ($code -ne 0) { exit $code }
+$main_sites = Join-Path $LibDir "main.sites"
+$exe_sites = Join-Path $bd "ObeliskChamber.sites"
+if ((Test-Path $main_sites) -and (Test-Path $bd)) {
+    Copy-Item -Path $main_sites -Destination $exe_sites -Force
+}
+exit 0

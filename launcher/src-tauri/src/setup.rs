@@ -259,6 +259,25 @@ fn site_mod(where_: &str) -> &str {
     where_.split('/').next().unwrap_or(where_)
 }
 
+/// Mods with a hook site that the lifted module libraries lack (work/build/fefw/main.sites). Empty when
+/// all mod sites are present in main.sites, or when a .sites file has an error (reported by mod_sites_problem).
+/// When main.sites does not exist yet (before the first lift), compares against the base recomp/games/fefw/main.sites.
+pub fn mods_missing_lift_sites(p: &Paths) -> Vec<String> {
+    let site_file = p.libs().join("main.sites");
+    let base_file = p.repo.join("recomp").join("games").join("fefw").join("main.sites");
+    let check_file = if site_file.is_file() { &site_file } else { &base_file };
+    let Some((_, lifted)) = read_site_list(check_file) else { return vec![] };
+    let lifted: std::collections::HashSet<(String, u64)> = lifted.into_iter().collect();
+    let mut names: Vec<String> = Vec::new();
+    for (where_, kind, a) in mod_sites(p).unwrap_or_default() {
+        let name = site_mod(&where_).to_string();
+        if !lifted.contains(&(kind, a)) && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Mods with a hook site that the built ObeliskChamber.exe was not lifted with (its ObeliskChamber.sites next to it). Empty when the
 /// exe or its list is not there yet (the lift / exe steps are not done then anyway), or when a .sites file has an error (reported
 /// by mod_sites_problem instead).
@@ -443,7 +462,9 @@ fn libs_ok(p: &Paths) -> bool {
 
 fn exe_ok(p: &Paths) -> bool {
     let exe = mtime(&p.exe());
-    exe.is_some() && MODULES.iter().all(|m| mtime(&p.libs().join(format!("fefw_{m}.lib"))) <= exe)
+    exe.is_some()
+        && MODULES.iter().all(|m| mtime(&p.libs().join(format!("fefw_{m}.lib"))) <= exe)
+        && mods_missing_sites(p).is_empty()
 }
 
 fn textures_ok(p: &Paths) -> bool {
@@ -468,7 +489,7 @@ pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
         "build" => package_build_ok(p),
         "python" => python_ok(p),
         "exefs" => exefs_ok(p),
-        "lift" => libs_ok(p) && mod_sites_problem(p).is_none() && mods_missing_sites(p).is_empty(),
+        "lift" => libs_ok(p) && mod_sites_problem(p).is_none() && mods_missing_lift_sites(p).is_empty(),
         "exe" => exe_ok(p),
         "textures" => textures_ok(p),
         "harness" => p.harness().is_file() && shaders_ok(p),
@@ -492,7 +513,7 @@ fn missing_sites_detail(p: &Paths) -> String {
     if let Some(problem) = mod_sites_problem(p) {
         return problem;
     }
-    let names = mods_missing_sites(p);
+    let names = mods_missing_lift_sites(p);
     if names.is_empty() {
         String::new()
     } else {
@@ -929,7 +950,7 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
             return Ok(false);
         }
     }
-    if !libs_ok(p) || mod_sites_problem(p).is_some() || !mods_missing_sites(p).is_empty() {
+    if !libs_ok(p) || mod_sites_problem(p).is_some() || !mods_missing_lift_sites(p).is_empty() {
         let sites = lift_sites_file(p)?;
         let mut c = Command::new("cmd.exe");
         c.args(["/d", "/c", "recomp\\scripts\\build_game.cmd", "fefw"]).env("NX_JOBS", jobs.to_string()).env("FEFW_SITES", &sites);
@@ -946,7 +967,18 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
     }
     if !exe_ok(p) {
         let mut c = Command::new(powershell());
-        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1", "-Jobs", &jobs.to_string()]);
+        let lib_dir = p.libs();
+        c.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "game-build\\scripts\\build_fefw.ps1",
+            "-Jobs",
+            &jobs.to_string(),
+            "-LibDir",
+            lib_dir.to_str().unwrap(),
+        ]);
         if !r.run("exe", "Building ObeliskChamber.exe", c, repo)? {
             return Ok(false);
         }
@@ -1069,6 +1101,8 @@ mod tests {
         assert_eq!(mod_sites(&p).unwrap().len(), 2); // the two midhooks of Some_Mod
         // no exe list yet: nothing to compare with
         assert!(mods_missing_sites(&p).is_empty());
+        // no lift list yet: compared with base main.sites, missing Some_Mod's new site
+        assert_eq!(mods_missing_lift_sites(&p), vec!["Some_Mod".to_string()]);
         let list = p.exe().with_extension("sites");
         fs::create_dir_all(list.parent().unwrap()).unwrap();
         fs::write(&list, fs::read_to_string(&own).unwrap()).unwrap();
@@ -1079,6 +1113,10 @@ mod tests {
         assert!(text.contains("midhook 0x71016f21f4   # Some_Mod/exefs/some.sites:3"));
         assert_eq!(text.matches("0x710188bd30").count(), 1); // not added twice
         assert!(!text.contains("0x7100001000"));
+        // libraries lifted from that list: nothing missing in lift step
+        fs::create_dir_all(p.libs()).unwrap();
+        fs::write(p.libs().join("main.sites"), &text).unwrap();
+        assert!(mods_missing_lift_sites(&p).is_empty());
         // the exe built from that list: nothing missing any more
         fs::write(&list, &text).unwrap();
         assert!(mods_missing_sites(&p).is_empty());
