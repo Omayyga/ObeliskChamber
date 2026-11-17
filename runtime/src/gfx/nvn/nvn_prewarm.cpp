@@ -224,6 +224,7 @@ void worker_main() {
             }
         }
         g_cv.notify_all();
+        pace_shader_work();                    // a key-file pipeline built ahead: nothing waits for it yet
     }
 }
 
