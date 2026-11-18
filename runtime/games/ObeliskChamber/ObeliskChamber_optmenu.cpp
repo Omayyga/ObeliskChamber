@@ -1086,12 +1086,19 @@ uint64_t find_no_first() {
         return static_cast<uint64_t>(static_cast<int64_t>(at) + imm * 4);
     };
     bool after_prompt = false;
+    std::string seen;   // the direct calls met, for the log when the call is not found
     for (int i = 0; i < 400; ++i) {
         uint32_t w = 0;
         rd(fn + i * 4, &w);
         if (w == 0xd65f03c0u) break;   // ret
         const uint64_t t = bl_target(fn + i * 4, w);
+        if (w == 0x52800180u) seen += " mov-w0-12@" + std::to_string(i);
         if (!t) continue;
+        if (seen.size() < 600) {
+            char b[40];
+            std::snprintf(b, sizeof b, " bl@%d:0x%llx", i, static_cast<unsigned long long>(t - g_base));
+            seen += b;
+        }
         if (!after_prompt) {
             after_prompt = t == g_base + kPrompt;
             continue;
@@ -1101,8 +1108,10 @@ uint64_t find_no_first() {
             rd(fn + (i + k) * 4, &v);
             if (v == 0x52800180u) return fn_lookup(t) ? t : 0;   // mov w0, #12
         }
-        return 0;
+        break;
     }
+    NXLOG_I(kTag, "quit: Return to Title's ACall 0x%llx (the prompt helper 0x%llx): %s", static_cast<unsigned long long>(fn - g_base),
+            static_cast<unsigned long long>(kPrompt), seen.empty() ? "no direct calls" : seen.c_str());
     return 0;
 }
 

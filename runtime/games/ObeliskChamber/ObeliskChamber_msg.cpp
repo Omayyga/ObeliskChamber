@@ -9,6 +9,8 @@
 // or an ATR1 with a string area after its records, is left as it is, and our dialog then falls back to the overlay's prompt.
 #include "ObeliskChamber_game.h"
 
+#include <zstd.h>
+
 #include <atomic>
 #include <cctype>
 #include <cstdint>
@@ -233,21 +235,56 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
     return w.b;
 }
 
+bool ends_with(const std::string& s, const char* tail) {
+    const size_t n = std::strlen(tail);
+    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
+}
+std::atomic<int> g_seen{0};
 bool match_msbt(const std::string& key) {
-    return key.rfind("/msg/", 0) == 0 && key.size() > 5 && key.compare(key.size() - 5, 5, ".msbt") == 0;
+    if (key.find("/msg/") == std::string::npos) return false;
+    if (g_seen.fetch_add(1) < 6) NXLOG_I(kTag, "message folder file: %s", key.c_str());   // what the folder holds (names, compression)
+    return ends_with(key, ".msbt") || ends_with(key, ".msbt.zst") || ends_with(key, ".msbt.zs");
 }
 void edit_msbt(const NxModFile* f, void*) {
     std::string path = f->path ? f->path : "", why;
     std::string lower = path;
     for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     const bool zh = lower.find("zh") != std::string::npos;   // Msg/CNzh, Msg/TWzh
-    std::vector<uint8_t> out = add_messages(f->data, static_cast<size_t>(f->size), zh, &why);
+    // zstd-compressed files (.msbt.zst): edited inside, compressed again
+    const bool zst = f->size >= 4 && f->data[0] == 0x28 && f->data[1] == 0xb5 && f->data[2] == 0x2f && f->data[3] == 0xfd;
+    std::vector<uint8_t> plain;
+    if (zst) {
+        const unsigned long long n = ZSTD_getFrameContentSize(f->data, static_cast<size_t>(f->size));
+        if (n == ZSTD_CONTENTSIZE_ERROR || n == ZSTD_CONTENTSIZE_UNKNOWN || n > (64ull << 20)) {
+            NXLOG_W(kTag, "%s: zstd frame without a size: left alone", path.c_str());
+            return;
+        }
+        plain.resize(static_cast<size_t>(n));
+        const size_t r = ZSTD_decompress(plain.data(), plain.size(), f->data, static_cast<size_t>(f->size));
+        if (ZSTD_isError(r) || r != n) {
+            NXLOG_W(kTag, "%s: does not decompress: left alone", path.c_str());
+            return;
+        }
+    }
+    const uint8_t* src = zst ? plain.data() : f->data;
+    const size_t src_n = zst ? plain.size() : static_cast<size_t>(f->size);
+    std::vector<uint8_t> out = add_messages(src, src_n, zh, &why);
     if (out.empty()) {
         if (!why.empty() && why != "not an MSBT file") {
             g_skipped.fetch_add(1);
             NXLOG_W(kTag, "%s: our messages not added (%s)", path.c_str(), why.c_str());
         }
         return;
+    }
+    if (zst) {
+        std::vector<uint8_t> comp(ZSTD_compressBound(out.size()));
+        const size_t r = ZSTD_compress(comp.data(), comp.size(), out.data(), out.size(), 3);
+        if (ZSTD_isError(r)) {
+            NXLOG_W(kTag, "%s: does not compress again: left alone", path.c_str());
+            return;
+        }
+        comp.resize(r);
+        out.swap(comp);
     }
     f->replace(f, out.data(), out.size());
     if (g_files.fetch_add(1) == 0)
