@@ -26,6 +26,9 @@ param(
     [int]$TimeoutS = 600
 )
 $ErrorActionPreference = "Stop"
+# `pwsh -File` (as from cmd) hands "-Names on,off" over as one string, not two
+if ($Names.Count -eq 1 -and $Names[0].Contains(",")) { $Names = $Names[0].Split(",") }
+if ($Names.Count -ne 2 -or -not $Names[0] -or -not $Names[1]) { throw "-Names needs two names, e.g. -Names on,off" }
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Exe) { $Exe = Join-Path $root "game-build\fefw\build\release\ObeliskChamber.exe" }
 if (-not $Route) { $Route = Join-Path $PSScriptRoot "routes\fefw_map.tt" }
