@@ -118,6 +118,9 @@ MouseInfo mouse_info();
 // ObeliskChamber_sysmenu.cpp: a "Recomp Options" entry under System in the game's + menu that opens the F1 menu ([fefw] system_menu_entry)
 void sysmenu_install(uint64_t base);
 void sysmenu_frame();                  // main thread, once per frame
+// ObeliskChamber_menu.cpp: the next time the overlay shows, it is the quit prompt (Yes exits as the F1 menu's Quit game does, No / B
+// closes it) instead of the settings menu. From the System menu's Quit Game entry ([fefw] system_menu_quit).
+void menu_ask_quit();
 // ObeliskChamber_optmenu.cpp: the recomp's settings as a screen of the game's own Options class, opened by that entry ([fefw] native_options)
 void optmenu_install(uint64_t base);
 void optmenu_frame();                  // main thread, once per frame

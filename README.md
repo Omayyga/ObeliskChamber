@@ -63,6 +63,8 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 - **Recomp Options**: a screen under **+ > System**, built from the game's own Settings widgets, with Display, Graphics, Frame Rate
   and Audio tabs. Most settings apply to the running game (render scale, shadow resolution, quality, frame rate, dynamic resolution
   and more); **-** restores the defaults after a confirmation
+- **Quit Game**: the last entry under **+ > System**. It asks for a confirmation, then ends the game the same way as the F1 menu's
+  **Quit game**
 - **Save slots**: several saves side by side, chosen from the game's own Continue, New Game and Delete Save entries on the title
 - **Save and Load lists** in the + menu: one press saves or loads a slot through the game's own prompts, and each row shows the
   chapter and play time
@@ -212,7 +214,8 @@ key and they show keys, touch the controller and they show its buttons. The keyb
 
 The movement keys push the stick all the way. **F1** (settings), **F2** (frame rate counter) and **Alt+Enter** (full screen) are
 the runtime's own keys. **F1 > Controls** lists the keys as they are now. To leave the game cleanly, use **Quit game** at the
-bottom of the F1 menu (click it twice) or close the window (**Alt+F4**): both save the settings and end the game normally.
+bottom of the F1 menu (click it twice), **Quit Game** under **+ > System**, or close the window (**Alt+F4**): each saves the settings
+and ends the game normally.
 
 To change a key, close the game and edit `[bindings.all]` in `controls.ini` in the run folder (the game creates it on its first
 start). Each line is `key = action`:
