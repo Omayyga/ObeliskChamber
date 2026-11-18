@@ -1094,13 +1094,24 @@ uint64_t find_no_first() {
         const uint64_t t = bl_target(fn + i * 4, w);
         if (w == 0x52800180u) seen += " mov-w0-12@" + std::to_string(i);
         if (!t) continue;
-        if (seen.size() < 600) {
+        if (seen.size() < 1200) {
             char b[40];
             std::snprintf(b, sizeof b, " bl@%d:0x%llx", i, static_cast<unsigned long long>(t - g_base));
             seen += b;
         }
         if (!after_prompt) {
             after_prompt = t == g_base + kPrompt;
+            if (after_prompt) {   // the instructions after the prompt helper's call, for the log when the cursor call is not a BL
+                seen += " | after it:";
+                for (int k = 1; k <= 40; ++k) {
+                    uint32_t v = 0;
+                    rd(fn + (i + k) * 4, &v);
+                    char b[12];
+                    std::snprintf(b, sizeof b, " %08x", v);
+                    seen += b;
+                }
+                seen += " |";
+            }
             continue;
         }
         for (int k = 1; k <= 8; ++k) {

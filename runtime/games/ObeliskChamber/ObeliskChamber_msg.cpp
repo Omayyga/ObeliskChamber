@@ -4,9 +4,10 @@
 //
 // The game reads Msg/<language>/<name>.msbt (MsgStdBn, Nintendo's LMS message format) and looks a message up by its label, a C string
 // ("MID_Restart_ReturnTitle_Confirm"); a label no file has shows as nothing. As the RomFS is laid out (services/mods_dll.cpp
-// add_runtime_edit), every message file that holds the dialogs' own "MID_Sys_Yes" gets our labels too: a message in TXT2, a label in LBL1
-// (the label hash table is laid out again), and a copy of MID_Sys_Yes's attributes (ATR1) and style (TSY1). A file with any other section,
-// or an ATR1 with a string area after its records, is left as it is, and our dialog then falls back to the overlay's prompt.
+// add_runtime_edit), each language's Msg/<language>/System.msbt.zst (zstd; the file with the dialogs' own "MID_Sys_Yes") gets our labels
+// too: a message in TXT2, a label in LBL1 (the label hash table is laid out again), and a copy of MID_Sys_Yes's attributes (ATR1) and
+// style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. A file with any other section, or an ATR1 with a string area
+// after its records, is left as it is, and our dialog then falls back to the overlay's prompt.
 #include "ObeliskChamber_game.h"
 
 #include <zstd.h>
@@ -134,6 +135,7 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
         else if (!std::strcmp(s.magic, "ATR1")) atr = &s;
         else if (!std::strcmp(s.magic, "TSY1")) tsy = &s;
         else if (!std::strcmp(s.magic, "TXT2")) txt = &s;
+        else if (!std::strcmp(s.magic, "ATO1")) {}   // attribute offsets: indexed by attribute, not by message (copied as it is)
         else if (other.empty()) other = s.magic;
     }
     if (!lbl || !txt) { *why = "no LBL1 or TXT2"; return {}; }
@@ -239,11 +241,10 @@ bool ends_with(const std::string& s, const char* tail) {
     const size_t n = std::strlen(tail);
     return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
 }
-std::atomic<int> g_seen{0};
+// Only Msg/<language>/System.msbt(.zst), the file with the dialogs' labels: every message file of the folder (thousands: one per scene
+// and language) read, unpacked and parsed at start-up took 19 s on a PC.
 bool match_msbt(const std::string& key) {
-    if (key.find("/msg/") == std::string::npos) return false;
-    if (g_seen.fetch_add(1) < 6) NXLOG_I(kTag, "message folder file: %s", key.c_str());   // what the folder holds (names, compression)
-    return ends_with(key, ".msbt") || ends_with(key, ".msbt.zst") || ends_with(key, ".msbt.zs");
+    return key.rfind("/msg/", 0) == 0 && (ends_with(key, "/system.msbt") || ends_with(key, "/system.msbt.zst"));
 }
 void edit_msbt(const NxModFile* f, void*) {
     std::string path = f->path ? f->path : "", why;
