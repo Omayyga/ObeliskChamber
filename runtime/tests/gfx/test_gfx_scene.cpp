@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 
 #include "gfx_test_util.h"
+#include "sdr_output.h"
 NXTEST_GROUP(gfx_scene)
 
 using namespace gfxtest;
@@ -62,6 +63,7 @@ NXTEST(validation_clean_over_300_frames_with_a_window) {
 }
 
 NXTEST(headless_screenshot_matches_the_reference) {
+    SdrOutput sdr;   // the reference is the SDR picture (sdr_output.h)
     SceneRunDesc d = base_desc();
     d.width = 640;
     d.height = 360;
@@ -96,6 +98,7 @@ NXTEST(headless_screenshot_matches_the_reference) {
 }
 
 NXTEST(windowed_screenshot_matches_the_same_reference) {
+    SdrOutput sdr;   // the reference is the SDR picture (sdr_output.h)
     // The swapchain path (B8G8R8A8 swapchain image, window size) gives the same picture as the offscreen path.
     SceneRunDesc d = base_desc();
     d.headless = false;
@@ -119,6 +122,7 @@ NXTEST(windowed_screenshot_matches_the_same_reference) {
 }
 
 NXTEST(same_scene_on_the_integrated_gpu) {
+    SdrOutput sdr;   // the reference is the SDR picture (sdr_output.h)
     SceneRunDesc d = base_desc();
     d.width = 640;
     d.height = 360;

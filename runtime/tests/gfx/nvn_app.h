@@ -23,6 +23,7 @@
 #include "nvn_abi.h"
 #include "nvn_gpu.h"
 #include "project_root.h"
+#include "sdr_output.h"
 #include "nvn_shaders.h"
 #include "test_framework.h"
 
@@ -119,6 +120,7 @@ struct AppOpts {
 class App {
 public:
     Api api;
+    gfxtest::SdrOutput sdr;   // the frames are compared with SDR colours (sdr_output.h); before the renderer, gone after it
     std::unique_ptr<nxrt::gfx::Device> dev;
     std::unique_ptr<nxrt::gfx::Renderer> rend;
     std::unique_ptr<NVNdevice> device;

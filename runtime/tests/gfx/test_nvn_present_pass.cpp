@@ -15,6 +15,7 @@
 
 #include "nvn_present_pass.h"
 #include "nxrt/gfx.h"
+#include "sdr_output.h"
 #include "test_framework.h"
 NXTEST_GROUP(gfx_nvn_present_pass)
 
@@ -105,6 +106,7 @@ bool make_source(Device& dev, Image* out) {
 }
 
 struct Rig {
+    gfxtest::SdrOutput sdr;   // compared with SDR colours (sdr_output.h); before the renderer, gone after it
     std::unique_ptr<Device> dev;
     std::unique_ptr<Renderer> rend;
     PresentPass pass;
