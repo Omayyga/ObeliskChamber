@@ -71,8 +71,11 @@ public:
     // set_keyboard_pad. The chord ([gfx] overlay_pad, default "minus+plus"; "none" turns it off) shows and hides the overlay. While it is
     // visible the pad drives ImGui's gamepad navigation: A activate, B back, the d-pad and the left stick move, L / R and ZL / ZR are the
     // shoulders (X, Y, + and - are not passed on). Returns the buttons the game must not see: all while visible, then those still held from
-    // the press that closed it until they are released.
-    uint64_t set_menu_pad(uint64_t buttons, int lx, int ly);
+    // the press that closed it until they are released. The right stick (rx, ry, the same range) is not given to ImGui: a game's menu reads
+    // it with menu_right_stick (Fortune's Weave moves its F1 window with it).
+    uint64_t set_menu_pad(uint64_t buttons, int lx, int ly, int rx = 0, int ry = 0);
+    // The right stick at the last pad poll, -1..1 each (y: up = +); 0, 0 while the overlay is hidden.
+    void menu_right_stick(float* x, float* y) const;
 
     // Applies menu choices that cannot be made in the middle of a frame. Call before Renderer::begin_frame().
     void apply_pending();

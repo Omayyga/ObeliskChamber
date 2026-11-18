@@ -13,8 +13,8 @@
 //   process tree (0x657fd0)        a new process becomes its parent's +0x28 (the newest child); BasicMenu's items: vectors at +0xe8 and +0x100
 //   ACall results (PlayACallSe)    1 = refused (the "NG" sound), 2 = decided, 9 / 10 = opened something; 0 = nothing, no sound
 //
-// So: slot 25 of the System item's vtable points at a host thunk that runs the game's function and then adds one more item to the sub
-// menu it made. That item is the MouseGuide item's shape with a vtable of its own (a copy with GetText and ACall replaced by thunks):
+// So: slot 25 of the System item's vtable points at a host thunk that runs the game's function and then adds our items to the sub
+// menu it made: Recomp Options after the game's Options entry, and Quit Game at the end ([fefw] system_menu_quit, default on). That item is the MouseGuide item's shape with a vtable of its own (a copy with GetText and ACall replaced by thunks):
 // its text is ours (no message file needed) and A opens the overlay, which takes the pad while it is up (gfx/overlay.cpp).
 #include <atomic>
 #include <cstdint>
@@ -41,11 +41,14 @@ constexpr uint64_t kMenuRoot = 0x98, kProcChild = 0x28, kMenuItems = 0xe8, kMenu
 constexpr uint32_t kOpenedSubMenu = 10;
 
 uint64_t g_base = 0;
-bool g_on = true, g_done = false, g_failed = false;
+bool g_on = true, g_quit_on = true, g_done = false, g_failed = false;
 uint64_t g_vt[2 + kSlots] = {};          // the entry's vtable: offset-to-top, type info, then the slots (a copy of MouseGuide's)
+uint64_t g_vt_quit[2 + kSlots] = {};     // Quit Game's: the same copy with its own GetText and ACall
 uint64_t g_thunk_system = 0;
 std::atomic<uint64_t> g_added{0}, g_opened{0};
 const char kLabel[] = "Recomp Options";   // UTF-8: the game showed only "R" for a UTF-16 string
+const char kQuitLabel[] = "Quit Game";
+std::atomic<uint64_t> g_quit_asked{0};
 
 template <class T> bool rd(uint64_t a, T* out) {
     if (!a || !mem::is_mapped(a, sizeof(T))) return false;
@@ -87,17 +90,26 @@ void add_entry(::Ctx* c, uint64_t system_item) {
         return;
     }
     if (!rd(g_base + kHeapGot, &heap_var) || !rd(heap_var, &heap) || !heap) return;
-    const uint64_t item = call(c, g_base + kAllocate, heap, kItemBytes, 16, 0);
-    if (!item || !mem::is_mapped(item, kItemBytes)) return;
-    std::memset(reinterpret_cast<void*>(item), 0, kItemBytes);
-    wr<uint64_t>(item, reinterpret_cast<uint64_t>(&g_vt[2]));
-    wr<uint16_t>(item + 0x50, 0x0101);
-    wr<uint8_t>(item + kItemReady, 1);
-    call(c, g_base + kAddItem, sub, item);
-    // straight after the game's own options entry (the first one)
-    move_last(sub + kMenuItems, item, 1);
-    move_last(sub + kMenuItems2, item, 1);
-    if (g_added.fetch_add(1) == 0) NXLOG_I(kTag, "Recomp Options added to the System menu");
+    auto make = [&](const uint64_t* vt) -> uint64_t {   // an item of the MouseGuide shape with our vtable, added at the end of the sub menu
+        const uint64_t item = call(c, g_base + kAllocate, heap, kItemBytes, 16, 0);
+        if (!item || !mem::is_mapped(item, kItemBytes)) return 0;
+        std::memset(reinterpret_cast<void*>(item), 0, kItemBytes);
+        wr<uint64_t>(item, reinterpret_cast<uint64_t>(vt));
+        wr<uint16_t>(item + 0x50, 0x0101);
+        wr<uint8_t>(item + kItemReady, 1);
+        call(c, g_base + kAddItem, sub, item);
+        return item;
+    };
+    if (g_on) {
+        const uint64_t item = make(&g_vt[2]);
+        if (!item) return;
+        // straight after the game's own options entry (the first one)
+        move_last(sub + kMenuItems, item, 1);
+        move_last(sub + kMenuItems2, item, 1);
+    }
+    if (g_quit_on) make(&g_vt_quit[2]);   // the last entry, after the game's Return to Title
+    if (g_added.fetch_add(1) == 0)
+        NXLOG_I(kTag, "System menu entries added:%s%s", g_on ? " Recomp Options" : "", g_quit_on ? " Quit Game" : "");
 }
 
 // SystemMenuItem_System::ACall: the game's, then our entry
@@ -108,11 +120,33 @@ void system_acall(::Ctx* c) {
     c->x[30] = lr;
     c->fn = fn;
     const uint64_t ret = c->x[0];
-    if (static_cast<uint32_t>(ret) == kOpenedSubMenu && g_on) add_entry(c, item);
+    if (static_cast<uint32_t>(ret) == kOpenedSubMenu && (g_on || g_quit_on)) add_entry(c, item);
     c->x[0] = ret;
 }
 
 void entry_text(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(kLabel); }
+void quit_text(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(kQuitLabel); }
+
+// Quit Game: the game's own yes / no dialog with our message (ObeliskChamber_optmenu.cpp optmenu_ask_quit). Without it (native_options off,
+// the message files not edited, another build): the decide sound and the overlay's quit prompt (ObeliskChamber_menu.cpp). Either Yes exits
+// as the F1 menu's Quit game does. The game's menu stays as it is under the overlay, which takes the pad while it is up.
+void quit_acall(::Ctx* c) {
+    const uint64_t item = c->x[0];
+    uint8_t ready = 0;
+    if (!rd(item + kItemReady, &ready) || ready != 1) {
+        c->x[0] = 1;
+        return;
+    }
+    if (optmenu_ask_quit(c, item)) {   // the game's own yes / no dialog, as its Return to Title entry opens one
+        c->x[0] = 12;
+        return;
+    }
+    if (g_quit_asked.fetch_add(1) == 0) NXLOG_I(kTag, "Quit Game: the overlay's quit prompt is shown (the game's dialog is not available)");
+    call(c, g_vt_quit[2 + kSlotDecideSe], item);
+    menu_ask_quit();
+    play::open_settings_menu();
+    c->x[0] = 0;
+}
 
 void entry_acall(::Ctx* c) {
     const uint64_t item = c->x[0];
@@ -135,11 +169,12 @@ void entry_acall(::Ctx* c) {
 void sysmenu_install(uint64_t base) {
     g_base = base;
     g_on = config_get_bool("fefw", "system_menu_entry", true);
+    g_quit_on = config_get_bool("fefw", "system_menu_quit", true);
 }
 
 // Main thread, once per frame: patches the vtable once the game's data is there (the modules are not loaded at install).
 void sysmenu_frame() {
-    if (g_done || g_failed || !g_on || !g_base) return;
+    if (g_done || g_failed || !(g_on || g_quit_on) || !g_base) return;
     const uint64_t slot = g_base + kVtSystem + kSlotACall * 8;
     uint64_t cur = 0, text = 0;
     if (!rd(slot, &cur) || !cur) return;
@@ -158,10 +193,14 @@ void sysmenu_frame() {
     }
     g_vt[2 + kSlotGetText] = hle_register("fefw.sysmenu.entry_text", entry_text);
     g_vt[2 + kSlotACall] = hle_register("fefw.sysmenu.entry_acall", entry_acall);
+    std::memcpy(g_vt_quit, g_vt, sizeof g_vt_quit);
+    g_vt_quit[2 + kSlotGetText] = hle_register("fefw.sysmenu.quit_text", quit_text);
+    g_vt_quit[2 + kSlotACall] = hle_register("fefw.sysmenu.quit_acall", quit_acall);
     g_thunk_system = hle_register("fefw.sysmenu.system_acall", system_acall);
     mem::protect(slot & ~0xfffull, 0x1000, mem::Prot::RW);
     wr<uint64_t>(slot, g_thunk_system);
     g_done = true;
-    NXLOG_I(kTag, "System menu hooked: + > System gets a Recomp Options entry ([fefw] system_menu_entry)");
+    NXLOG_I(kTag, "System menu hooked: + > System gets%s%s ([fefw] system_menu_entry, system_menu_quit)", g_on ? " Recomp Options" : "",
+            g_quit_on ? " Quit Game" : "");
 }
 }  // namespace nxrt::games::ObeliskChamber

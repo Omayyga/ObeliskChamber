@@ -118,10 +118,21 @@ MouseInfo mouse_info();
 // ObeliskChamber_sysmenu.cpp: a "Recomp Options" entry under System in the game's + menu that opens the F1 menu ([fefw] system_menu_entry)
 void sysmenu_install(uint64_t base);
 void sysmenu_frame();                  // main thread, once per frame
+// ObeliskChamber_menu.cpp: the next time the overlay shows, it is the quit prompt (Yes exits as the F1 menu's Quit game does, No / B
+// closes it) instead of the settings menu. From the System menu's Quit Game entry ([fefw] system_menu_quit).
+void menu_ask_quit();
+// ObeliskChamber_msg.cpp: our messages in the game's message files (the dialogs' file, every language), so the game's own dialogs show
+// our text. msg_install before the game's file system is set up; msg_ready once a file got them.
+constexpr const char* kQuitMid = "MID_ObeliskChamber_Quit_Confirm";
+void msg_install();
+bool msg_ready();
 // ObeliskChamber_optmenu.cpp: the recomp's settings as a screen of the game's own Options class, opened by that entry ([fefw] native_options)
 void optmenu_install(uint64_t base);
 void optmenu_frame();                  // main thread, once per frame
 bool optmenu_open(::Ctx* c, uint64_t item);   // from the entry's ACall; false: not available (the F1 menu is used)
+// The game's own yes / no dialog asking kQuitMid over the menu of `item` (No chosen at first); Yes ends the game as the F1 menu's Quit game
+// does. From the Quit Game entry's ACall, which then answers 12 (a dialog is up). False: not available (the overlay's prompt is used).
+bool optmenu_ask_quit(::Ctx* c, uint64_t item);
 // A pick list on that screen class: up to three tabs (L / R), `count` rows, each on one tab with a label and a describing value, a help
 // line, and pick(c, row) on A. pick answers what the list does next: 3 closes it, 12 leaves it waiting under a dialog the pick opened,
 // 13 keeps it open and redraws the row's value, 0 does nothing more. The callbacks run on the game's main thread and write UTF-8 into `out`.

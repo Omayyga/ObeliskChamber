@@ -19,6 +19,8 @@
 #include "ObeliskChamber_presets.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <array>
 #include <cstdlib>
 #include <cctype>
@@ -1677,7 +1679,77 @@ std::string pending_list(Menu& m) {
     return s;
 }
 
+// ---- the quit prompt (the System menu's Quit Game, [fefw] system_menu_quit) ------------------------------------------------------------
+// Asked for on the game's main thread (ObeliskChamber_sysmenu.cpp), shown by the overlay's next frames in place of the settings menu.
+// A request that the overlay did not show within a second (the overlay could not open) is dropped, so a later F1 opens the settings.
+std::atomic<int64_t> g_quit_asked_ms{0};
+int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool g_quit_showing = false;
+double g_quit_shown_at = 0;   // ImGui time the prompt opened: a press within 0.3 s of it is the A that chose Quit Game, not an answer
+
+// true while the prompt is shown (the settings menu is not drawn this frame)
+bool quit_prompt(gfx::Overlay& ov, bool opened) {
+    const int64_t asked = g_quit_asked_ms.load(std::memory_order_acquire);
+    if (opened) {
+        g_quit_showing = asked && now_ms() - asked < 1000;   // a fresh request: this opening is the prompt's
+        g_quit_shown_at = ImGui::GetTime();
+    }
+    const bool settled = ImGui::GetTime() - g_quit_shown_at > 0.3;
+    g_quit_asked_ms.store(0, std::memory_order_release);
+    if (!g_quit_showing) return false;
+    auto close = [&] {
+        g_quit_showing = false;
+        ov.request_hide();
+    };
+    const bool back = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    if (back && settled) {
+        close();
+        return true;
+    }
+    const ImVec2 disp = ImGui::GetIO().DisplaySize;
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 130));
+    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (opened) ImGui::SetNextWindowFocus();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(10));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(5));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(28), px(22)));
+    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                                ImGuiWindowFlags_AlwaysAutoResize;
+    if (ImGui::Begin("##fefw_quit_prompt", nullptr, wf)) {
+        const char* ask = tr("Quit the game?");
+        const char* note = tr("Progress since your last save will be lost.");
+        const char* yes = tr("Yes");
+        const char* no = tr("No");
+        ImGui::TextColored(kAccent, "%s", ask);
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", note);
+        ImGui::Spacing();
+        ImGui::Spacing();
+        const float bw = std::max(ImGui::CalcTextSize(yes).x, ImGui::CalcTextSize(no).x) + ImGui::GetStyle().FramePadding.x * 8;
+        const float total = bw * 2 + ImGui::GetStyle().ItemSpacing.x;
+        const float avail = std::max(ImGui::CalcTextSize(ask).x, ImGui::CalcTextSize(note).x);
+        if (avail > total) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - total) * 0.5f);
+        if (ImGui::Button(yes, ImVec2(bw, 0)) && settled) {
+            NXLOG_I(kTag, "quit prompt: Yes");
+            play::exit_process(0, "pass", "quit from the System menu");   // the same exit as the F1 menu's Quit game
+        }
+        ImGui::SameLine();
+        if (opened) {   // the cursor starts on No: a slip of A does not end the session
+            ImGui::SetKeyboardFocusHere();
+            ImGui::SetItemDefaultFocus();
+        }
+        if (ImGui::Button(no, ImVec2(bw, 0)) && settled) close();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
+    return true;
+}
+
 }  // namespace
+
+void menu_ask_quit() { g_quit_asked_ms.store(now_ms(), std::memory_order_release); }
 
 // ---- the window -------------------------------------------------------------------------------------------------------------------------
 void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
@@ -1693,6 +1765,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
     const int frame = ImGui::GetFrameCount();
     const bool opened = frame != m.last_frame + 1;
     m.last_frame = frame;
+    if (quit_prompt(ov, opened)) return;   // the System menu's Quit Game asked for the quit prompt
     if (opened) {   // the gamepad cursor starts on the first row of the page shown, so A and the d-pad work at once
         m.focus_first = true;
         m.focus_tab = m.tab;
@@ -1713,23 +1786,42 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         }
     }
 
+    // The game stays as it is behind the window (no dimming): the picture settings (HDR, filters) are judged while the menu is open. The
+    // window can be moved: dragged with the mouse, or with the right stick; it keeps its place while the game runs (centred at first; a
+    // new window size moves it back until 120 px of it are on screen).
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 130));
     const float w = std::min(disp.x - px(32), std::max(px(720), std::min(px(1180), disp.x * 0.86f)));
     const float h = std::min(disp.y - px(32), std::max(px(480), std::min(px(860), disp.y * 0.88f)));
-    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // Where the window is now: ImGui moves a window being dragged in NewFrame, before this runs, so its position is read here (setting the
+    // position kept from the last frame instead put it back every frame, and a mouse drag did nothing).
+    static bool placed = false;
+    ImVec2 pos((disp.x - w) * 0.5f, (disp.y - h) * 0.5f);
+    if (const ImGuiWindow* win = ImGui::FindWindowByName("##fefw_menu"); win && placed) pos = win->Pos;
+    placed = true;
+    const float keep = px(120);       // this much of the window stays on screen
+    {
+        float rx = 0.f, ry = 0.f;
+        ov.menu_right_stick(&rx, &ry);
+        auto curve = [](float v) { const float a = std::fabs(v); return a < 0.2f ? 0.f : (v < 0 ? -1.f : 1.f) * (a - 0.2f) / 0.8f * (a - 0.2f) / 0.8f; };
+        const float speed = px(1400) * ImGui::GetIO().DeltaTime;   // pixels a frame at full tilt
+        pos.x += curve(rx) * speed;
+        pos.y -= curve(ry) * speed;   // stick up = +, the screen's y goes down
+    }
+    pos.x = std::clamp(pos.x, keep - w, disp.x - keep);
+    pos.y = std::clamp(pos.y, 0.f, disp.y - keep);
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
     if (opened) ImGui::SetNextWindowFocus();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(10));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(5));
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(8), px(4)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(14)));
-    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
+    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings;   // movable: dragged by any empty spot
     if (ImGui::Begin("##fefw_menu", nullptr, wf)) {
         ImGui::TextColored(kAccent, "%s", tr("Fire Emblem: Fortune's Weave"));
         ImGui::SameLine();
         ImGui::TextDisabled("%s", tr(" settings"));
-        const char* hint = "L / R tabs   A select   B close";
+        const char* hint = "L / R tabs   A select   B close   right stick or drag: move";
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
         ImGui::TextDisabled("%s", tr(hint));
 
