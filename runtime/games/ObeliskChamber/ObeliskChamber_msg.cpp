@@ -169,10 +169,56 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
     if (hash_other) { *why = "the label table uses another hash"; return {}; }
     if (static_cast<uint32_t>(anchor) >= msgs) { *why = "the anchor's index is out of range"; return {}; }
     uint32_t attr_size = 0;
+    std::vector<size_t> attr_offs;   // the record fields that are offsets of strings after the records, from ATR1's start (shifted below)
     if (atr) {
         const uint32_t count = r.u32(atr->at);
         attr_size = r.u32(atr->at + 4);
-        if (count != msgs || atr->size != 8 + size_t(count) * attr_size) { *why = "ATR1 has more than its records"; return {}; }
+        const size_t recs_end = 8 + size_t(count) * attr_size;
+        if (count != msgs || atr->size < recs_end || attr_size > 256) { *why = "ATR1 does not have one record a message"; return {}; }
+        if (atr->size > recs_end) {
+            // A string area after the records (string attributes): fields whose value, in every record, is an offset from ATR1's start into
+            // that area at the start of a string (or 0 / ~0 for none) are offsets; they move by the records added. An offset from the area's
+            // own start would not move: such fields are left alone. Without any field like that the area cannot be kept right: left alone.
+            const size_t unit = enc == 1 ? 2 : enc == 2 ? 4 : 1;
+            auto string_start = [&](size_t off) {   // off: from ATR1's start
+                if (off < recs_end || off >= atr->size) return false;
+                if (off == recs_end) return true;
+                for (size_t k = 0; k < unit; ++k)
+                    if (p[atr->at + off - unit + k] != 0) return false;
+                return true;
+            };
+            const size_t step = attr_size % 4 == 0 ? 4 : 1;
+            for (size_t f = 0; f + 4 <= attr_size; f += step) {
+                bool all = true, any = false;
+                for (uint32_t m = 0; m < count && all; ++m) {
+                    const uint32_t v = r.u32(atr->at + 8 + size_t(m) * attr_size + f);
+                    if (v == 0 || v == 0xffffffffu) continue;
+                    any = true;
+                    all = string_start(v);
+                }
+                if (all && any) {
+                    attr_offs.push_back(f);
+                    if (step == 1) f += 3;
+                }
+            }
+            if (attr_offs.empty()) {   // what the log needs to see the layout
+                char b[64];
+                std::snprintf(b, sizeof b, "ATR1's string area: no record field points into it (%u records of %u bytes, area %zu bytes;",
+                              count, attr_size, atr->size - recs_end);
+                *why = b;
+                for (int m = 0; m < 3 && m < static_cast<int>(count); ++m) {
+                    *why += " record";
+                    for (size_t k = 0; k < attr_size && k < 24; ++k) { std::snprintf(b, sizeof b, " %02x", p[atr->at + 8 + size_t(m) * attr_size + k]); *why += b; }
+                    *why += ";";
+                }
+                *why += " area";
+                for (size_t k = 0; k < 32 && recs_end + k < atr->size; ++k) { std::snprintf(b, sizeof b, " %02x", p[atr->at + recs_end + k]); *why += b; }
+                *why += ")";
+                return {};
+            }
+            if (notes) *notes += " ATR1: " + std::to_string(attr_size) + "-byte records, string area of " + std::to_string(atr->size - recs_end) +
+                                 " bytes, " + std::to_string(attr_offs.size()) + " offset field(s) moved;";
+        }
     }
     if (tsy && tsy->size != size_t(msgs) * 4) { *why = "TSY1 is not one entry a message"; return {}; }
     if (txt->size < 4 + size_t(msgs) * 4) { *why = "TXT2 too short"; return {}; }
@@ -208,11 +254,22 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
                     d.u32(l->index);
                 }
         } else if (&s == atr) {
+            const size_t recs_end = 8 + size_t(msgs) * attr_size;
+            const uint32_t shift = add * attr_size;
             d.u32(msgs + add);
             d.u32(attr_size);
-            d.b.insert(d.b.end(), p + s.at + 8, p + s.at + s.size);
+            const size_t recs_at = d.b.size();
+            d.b.insert(d.b.end(), p + s.at + 8, p + s.at + recs_end);
             for (uint32_t i = 0; i < add; ++i)
                 d.b.insert(d.b.end(), p + s.at + 8 + size_t(anchor) * attr_size, p + s.at + 8 + size_t(anchor + 1) * attr_size);
+            for (uint32_t m = 0; m < msgs + add; ++m)   // the string offsets move past the records added
+                for (size_t f : attr_offs) {
+                    const size_t at_f = recs_at + size_t(m) * attr_size + f;
+                    Rd rr{d.b.data(), d.b.size(), r.be};
+                    const uint32_t v = rr.u32(at_f);
+                    if (v != 0 && v != 0xffffffffu) d.put_u32(at_f, v + shift);
+                }
+            d.b.insert(d.b.end(), p + s.at + recs_end, p + s.at + s.size);
         } else if (&s == tsy) {
             d.b.assign(p + s.at, p + s.at + s.size);
             for (uint32_t i = 0; i < add; ++i) d.u32(r.u32(s.at + size_t(anchor) * 4));
