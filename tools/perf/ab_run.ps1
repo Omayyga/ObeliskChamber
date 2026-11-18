@@ -84,7 +84,7 @@ for ($r = 1; $r -le $Runs; $r++) {
             [Environment]::SetEnvironmentVariable("NXRT_TEST_SHOT_DIR", $shots)
             [Environment]::SetEnvironmentVariable("NXRT_LOG", $log)     # an ini's [log] path wins over --log; the environment wins over both
             # the PC mouse over the game window would wake the Joy-Con 2 mouse and move the menus' cursor under the route's presses
-            if (-not $vars[$v].ContainsKey("NXRT_INPUT_JC2_MOUSE")) { [Environment]::SetEnvironmentVariable("NXRT_INPUT_JC2_MOUSE", "off") }
+            if (-not $vars[$v].Contains("NXRT_INPUT_JC2_MOUSE")) { [Environment]::SetEnvironmentVariable("NXRT_INPUT_JC2_MOUSE", "off") }
             Write-Host ("run {0}/{1}: {2} ..." -f $r, $Runs, $name) -NoNewline
             $t0 = Get-Date
             $p = Start-Process -FilePath $exes[$v] -ArgumentList @("--ini", "`"$Ini`"", "--log", "`"$log`"") -WorkingDirectory $runDir -PassThru
