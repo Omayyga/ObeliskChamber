@@ -101,8 +101,8 @@ struct IniKey {
 void live_scale() { res_live_apply(false); }        // render scale, fixed render size: a new size rebuilds by itself
 void live_rebuild() { res_live_apply(true); }       // shadows, quality: the same size, so the rebuild is forced (two short pauses)
 void live_rate() {
-    const bool f120 = config_get_bool("fefw", "fps120", false), f60 = config_get_bool("fefw", "fps60", false);
-    play_set_rate(f120 ? 120 : f60 ? 60 : 30);
+    const bool f240 = config_get_bool("fefw", "fps240", false), f120 = config_get_bool("fefw", "fps120", false), f60 = config_get_bool("fefw", "fps60", false);
+    play_set_rate(f240 ? 240 : f120 ? 120 : f60 ? 60 : 30);
 }
 void live_smooth() {
     std::string v = config_get_str("fefw", "smooth_step", "auto");
@@ -133,6 +133,7 @@ constexpr IniKey kIni[] = {
     {"fefw", "scenery_detail", "full", Norm::Text, true, "scenery detail"},
     {"fefw", "fps60", "0", Norm::Bool, false, "60 fps", live_rate},
     {"fefw", "fps120", "0", Norm::Bool, false, "120 fps", live_rate},
+    {"fefw", "fps240", "0", Norm::Bool, false, "240 fps (testing)", live_rate},
     {"fefw", "smooth_step", "auto", Norm::Text, false, "smooth time step", live_smooth},
     {"fefw", "frame_fixes", "1", Norm::Bool, false, "frame-rate fixes", live_frame_fixes},
     {"fefw", "clock_log", "10", Norm::Number, false, "game clock log"},
@@ -1029,24 +1030,31 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
     if (begin_rows("game")) {
         const IniKey& k60 = *ini_key("fefw", "fps60");
         const IniKey& k120 = *ini_key("fefw", "fps120");
+        const IniKey& k240 = *ini_key("fefw", "fps240");
         row(m, "Gameplay frame rate", When::Live,
             "30 is the game's own. 60 runs gameplay at 60 at the right speed. 120 needs a frame limit of 120 or more and a fast PC. "
+            "240 is for testing: it lets the frame rate rise until the CPU or GPU stops it; above 240 the game would run fast. "
             "Frame-rate fixes below keep frame-counted effects at their 30 fps speed.");
-        if (!(ini_env(k60) || ini_env(k120))) {
+        if (!(ini_env(k60) || ini_env(k120) || ini_env(k240))) {
             const auto is_on = [](const IniKey& k) { return normalized(k, ini_now(k)) == "1"; };
-            int idx = is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
-            constexpr const char* kNames[] = {"30 (the game's own)", "60", "120"};
-            if (combo(m, "##rate", &idx, kNames, 3)) {
-                if (idx == 2) ini_put(m, k120, "1");
+            int idx = is_on(k240) ? 3 : is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
+            constexpr const char* kNames[] = {"30 (the game's own)", "60", "120", "240 (testing)"};
+            if (combo(m, "##rate", &idx, kNames, 4)) {
+                if (idx == 3) ini_put(m, k240, "1");
                 else {
-                    ini_put(m, k60, idx == 1 ? "1" : "0");
-                    if (is_on(k120)) ini_put(m, k120, "0");
+                    if (is_on(k240)) ini_put(m, k240, "0");
+                    if (idx == 2) ini_put(m, k120, "1");
+                    else {
+                        ini_put(m, k60, idx == 1 ? "1" : "0");
+                        if (is_on(k120)) ini_put(m, k120, "0");
+                    }
                 }
             }
-            const int running = ck.fps120 ? 2 : ck.fps60 ? 1 : 0;   // the hooks installed at start
+            const int running = ck.fps240 ? 3 : ck.fps120 ? 2 : ck.fps60 ? 1 : 0;   // the hooks installed at start
             pending_note(idx != running, kNames[running]);
         } else {
-            ImGui::TextDisabled(tr("set by the environment (%s / %s)"), config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
+            ImGui::TextDisabled(tr("set by the environment (%s / %s / %s)"), config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str(),
+                                config_env_name("fefw", "fps240").c_str());
         }
         constexpr const char* kSmooth[] = {"Auto (on at 60 and 120)", "On", "Off"};
         constexpr const char* kSmoothVals[] = {"auto", "1", "0"};
@@ -1089,7 +1097,7 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
             apply(host, m);
         }
         {
-            const int want = ck.fps120 ? 120 : ck.fps60 ? 60 : 0;      // the gameplay rate the hooks installed at start run at
+            const int want = ck.fps240 ? 240 : ck.fps120 ? 120 : ck.fps60 ? 60 : 0;      // the gameplay rate the hooks installed at start run at
             const FrameLimiter* l = ov.context().limiter;
             if (want > 0 && d.fps_cap > 0 && d.fps_cap < want)
                 ImGui::TextColored(kOrange, tr("%d fps gameplay raises this limit to %d fps while it is on (the setting itself stays %d)."), want, want, d.fps_cap);
@@ -1606,7 +1614,8 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
                     ck.display, static_cast<double>(ck.step));
     else
         ImGui::TextDisabled("%s", tr("Not running yet (title or loading)."));
-    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
+    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, fps240 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off",
+                        ck.fps240 ? "on" : "off", ck.smooth ? "on" : "off");
 
     section("Ultrawide");
     const WideInfo wi = wide_info();

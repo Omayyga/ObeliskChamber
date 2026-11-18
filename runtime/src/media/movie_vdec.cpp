@@ -42,6 +42,7 @@
 
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/log.h"
@@ -723,7 +724,7 @@ bool install_movie_decoder_hle() {
             return;
         }
         g_log = config_get_bool("media", "video_decoder_log", false);
-        const int64_t auto_threads = std::clamp<int64_t>(static_cast<int64_t>(std::thread::hardware_concurrency()) / 2, 4, 8);
+        const int64_t auto_threads = std::clamp<int64_t>(static_cast<int64_t>(nxrt::host_threads()) / 2, 4, 8);
         const int64_t threads = config_get_int("media", "video_decoder_threads", 0);
         g_threads = static_cast<int>(threads <= 0 ? auto_threads : std::clamp<int64_t>(threads, 1, 16));
         g_ahead = static_cast<size_t>(std::clamp<int64_t>(config_get_int("media", "video_decode_ahead", 30), 4, 120));

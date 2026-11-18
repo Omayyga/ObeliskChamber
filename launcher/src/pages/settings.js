@@ -253,7 +253,8 @@ export async function render(el, ctx) {
   };
   const WRITE = {
     select: (f, x) => [[f.sec, f.key, x]],
-    rate: (f, x) => [[f.sec, f.keys[0], x === '60' ? '1' : '0'], [f.sec, f.keys[1], x === '120' ? '1' : '0']],
+    // [fefw] fps240 (testing, set in the game's F1 menu) wins over both: a choice made here turns it off
+    rate: (f, x) => [[f.sec, f.keys[0], x === '60' ? '1' : '0'], [f.sec, f.keys[1], x === '120' ? '1' : '0'], [f.sec, 'fps240', '0']],
     toggle: (f, x) => [[f.sec, f.key, x ? (f.on ?? '1') : (f.off ?? '0')]],
     size: (f, x) => [
       [f.sec, f.keys[0], String(clamp(parseInt(x.w, 10) || 1280, 320, 16384))],

@@ -254,6 +254,9 @@ void monitor_run(double summary_s) {
     using Clock = std::chrono::steady_clock;
     const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(summary_s > 0 ? summary_s : 1e6));
     auto next_summary = Clock::now() + period;
+    static const double session_s = config_get_double("diag", "session_s", 300.0);
+    const auto session_period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(session_s > 0 ? session_s : 1e9));
+    auto next_session = Clock::now() + session_period;
     auto last_line = Clock::now() - std::chrono::seconds(10);
     uint64_t last_n = g_ring_n.load(std::memory_order_acquire);
     bool seen_frames = last_n > 0;
@@ -276,6 +279,10 @@ void monitor_run(double summary_s) {
                 NXLOG_W("hitch", "%s", format_event(worst, cnt - 1).c_str());
                 last_line = now;
             }
+        }
+        if (session_s > 0 && now >= next_session) {
+            next_session = now + session_period;
+            if (g_ring_n.load(std::memory_order_acquire) > 1) session_log("session so far");
         }
         if (summary_s > 0 && now >= next_summary) {
             next_summary = now + period;
@@ -411,10 +418,71 @@ GaugeCounter::GaugeCounter(const char* name) : name_(name) {
 }
 GaugeCounter::~GaugeCounter() { gauge_unregister(name_.c_str()); }
 
+// ---- the session's frame times (session_summary) ---------------------------------------------------------------------------------------------
+namespace {
+constexpr int kSessionBins = 4000;                  // 0.25 ms each: 0 to 1000 ms
+std::atomic<uint32_t> g_sess_bin[kSessionBins];
+std::atomic<uint64_t> g_sess_long{0};               // frames of 1 s or more
+std::atomic<uint64_t> g_sess_long_us_sum{0};        // their time, us
+std::atomic<uint64_t> g_sess_max_us{0};
+std::atomic<uint64_t> g_sess_us_sum{0};             // all frames' time, us
+
+void session_note(uint64_t ticks) {
+    const double ms = static_cast<double>(ticks) * 1000.0 / qpc_freq();
+    const uint64_t us = static_cast<uint64_t>(ms * 1000.0);
+    g_sess_us_sum.fetch_add(us, std::memory_order_relaxed);
+    if (us > g_sess_max_us.load(std::memory_order_relaxed)) g_sess_max_us.store(us, std::memory_order_relaxed);   // one writer: the presenting thread
+    const int bin = static_cast<int>(ms * 4.0);
+    if (bin < kSessionBins) {
+        g_sess_bin[bin].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_sess_long.fetch_add(1, std::memory_order_relaxed);
+        g_sess_long_us_sum.fetch_add(us, std::memory_order_relaxed);
+    }
+}
+}  // namespace
+
+std::string session_summary() {
+    static uint32_t bins[kSessionBins];
+    static std::mutex mu;                           // the copy above is shared by callers
+    std::lock_guard<std::mutex> lk(mu);
+    uint64_t n = 0, over100 = 0;
+    for (int i = 0; i < kSessionBins; ++i) {
+        bins[i] = g_sess_bin[i].load(std::memory_order_relaxed);
+        n += bins[i];
+        if (i >= 400) over100 += bins[i];
+    }
+    const uint64_t nlong = g_sess_long.load(std::memory_order_relaxed);
+    n += nlong;
+    over100 += nlong;
+    if (!n) return "no frames presented";
+    // the frame time below which a share q of the frames lie, at the top of its bin (a frame of 1 s or more: the longest frame)
+    const double max_ms = static_cast<double>(g_sess_max_us.load(std::memory_order_relaxed)) / 1000.0;
+    auto pct_ms = [&](double q) {
+        const uint64_t want = static_cast<uint64_t>(std::ceil(q * static_cast<double>(n)));
+        uint64_t acc = 0;
+        for (int i = 0; i < kSessionBins; ++i) {
+            acc += bins[i];
+            if (acc >= want) return std::min(max_ms, (i + 1) * 0.25);
+        }
+        return max_ms;
+    };
+    const double secs = static_cast<double>(g_sess_us_sum.load(std::memory_order_relaxed)) / 1e6;
+    const double p99 = pct_ms(0.99), p999 = pct_ms(0.999);
+    char b[320];
+    std::snprintf(b, sizeof b, "%llu frames in %.0f s: mean %.1f fps, 1%% low %.1f fps, 0.1%% low %.1f fps, longest %.1f ms, %llu over 100 ms",
+                  static_cast<unsigned long long>(n), secs, secs > 0 ? static_cast<double>(n) / secs : 0.0, p99 > 0 ? 1000.0 / p99 : 0.0,
+                  p999 > 0 ? 1000.0 / p999 : 0.0, max_ms, static_cast<unsigned long long>(over100));
+    return b;
+}
+
+void session_log(const char* when) { NXLOG_I("session", "%s: %s", when ? when : "session", session_summary().c_str()); }
+
 void soak_note_frame() {
     const uint64_t n = g_ring_n.load(std::memory_order_relaxed);
     const uint64_t t = qpc();
     const uint64_t prev_t = n > 0 ? g_ring[(n - 1) % kRing].load(std::memory_order_relaxed) : 0;
+    if (prev_t && t > prev_t) session_note(t - prev_t);
     g_ring[n % kRing].store(t, std::memory_order_relaxed);
     g_ring_n.store(n + 1, std::memory_order_release);
     hitch_on_frame(t, prev_t, n + 1);

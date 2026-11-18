@@ -613,14 +613,16 @@ bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && 
 // to_pass: the caller only starts another pass or changes image layouts next (ensure_pass, prepare_textures); with tracked barriers the pass
 // then ends without a barrier when it only wrote its attachments. Any other caller gets a full barrier, also for passes ended earlier
 // without one.
-void end_pass(bool to_pass = false) {
+// The caller's function and line count the pass end (and any barrier it records) for gpustats ([prof] gpu_stats).
+void end_pass(bool to_pass = false, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE()) {
     if (!P.open) {
         if (!to_pass && !g_pending.empty()) {
-            memory_barrier(F->cb);
+            memory_barrier(F->cb, site_fn, site_line);
             g_pending.clear();
         }
         return;
     }
+    site_count(kSitePassEnd, site_fn, site_line);
     xfb_end_in_pass();
     vkCmdEndRendering(F->cb);
     P.open = false;
@@ -643,7 +645,7 @@ void end_pass(bool to_pass = false) {
         for (uint32_t i = 0; i < P.ncolor; ++i) remember(P.color[i].tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (!P.depth_ro) remember(P.depth.tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     } else {
-        memory_barrier(F->cb);
+        memory_barrier(F->cb, site_fn, site_line);
         g_pending.clear();
     }
     g_pass_unsafe = false;

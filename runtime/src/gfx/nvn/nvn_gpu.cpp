@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <condition_variable>
 #include <cstring>
@@ -24,6 +25,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
@@ -611,6 +613,9 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
     NXLOG_I("nvn.gpustats", "GPU busy ms/frame avg %.2f p50 %.2f p90 %.2f p99 %.2f max %.2f | idle inside submissions avg %.2f ms/frame",
             bsum / static_cast<double>(nb), bpct(0.5), bpct(0.9), bpct(0.99), vb.empty() ? 0.0 : static_cast<double>(vb.back()),
             (sum - bsum) / static_cast<double>(n));
+    // M2 (Road to 0.4.0): where the full barriers and the pass ends come from, by the calling function and line, the most frequent first
+    NXLOG_I("nvn.gpustats", "full barriers by caller %s", site_report(kSiteBarrier, frames, 12).c_str());
+    NXLOG_I("nvn.gpustats", "pass ends by caller %s", site_report(kSitePassEnd, frames, 12).c_str());
     if (!st.gp.empty()) {
         // the pass profiler's intervals by label, the most expensive first ("pass WxH cN:fmt dfmt": one render pass; "cs <hash>": one dispatch)
         std::vector<std::pair<double, std::string>> by;
@@ -1023,7 +1028,78 @@ uint64_t memory_barrier_count(VkCommandBuffer cb) {
     return it == t_barriers_in_cb.end() ? 0 : it->second;
 }
 
-void memory_barrier(VkCommandBuffer cb) {
+// ---- call-site counts (gpustats) ----------------------------------------------------------------------------------------------
+// Key: the site's function-name pointer (a string literal of the compiler's, one per function) with its line in the top 16 bits. Slots are
+// claimed once with a compare-exchange and never freed, so the counting threads (the render thread, the recording paths of DLSS and
+// residency) need no lock; the report reads and remembers the totals.
+namespace {
+constexpr size_t kSites = 256;
+struct Site {
+    std::atomic<uint64_t> key{0};
+    std::atomic<const char*> fn{nullptr};
+    std::atomic<uint64_t> n{0};
+    uint64_t seen = 0;                           // the total at the previous report (the reporting thread only)
+};
+Site g_sites[kSiteKinds][kSites];
+std::atomic<uint64_t> g_site_other[kSiteKinds];
+uint64_t g_site_other_seen[kSiteKinds] = {};
+}  // namespace
+
+void site_count(int kind, const char* fn, int line) {
+    if (kind < 0 || kind >= kSiteKinds) return;
+    const uint64_t key = (reinterpret_cast<uintptr_t>(fn) & 0xffffffffffffull) | (static_cast<uint64_t>(line & 0xffff) << 48);
+    if (!key) return;
+    Site* tab = g_sites[kind];
+    size_t i = static_cast<size_t>((key * 0x9e3779b97f4a7c15ull) >> 56) % kSites;
+    for (size_t probes = 0; probes < kSites; ++probes, i = (i + 1) % kSites) {
+        uint64_t k = tab[i].key.load(std::memory_order_acquire);
+        if (k == 0) {
+            if (tab[i].key.compare_exchange_strong(k, key, std::memory_order_acq_rel)) {
+                tab[i].fn.store(fn, std::memory_order_release);
+                k = key;
+            }
+        }
+        if (k == key) {
+            tab[i].n.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_site_other[kind].fetch_add(1, std::memory_order_relaxed);
+}
+
+std::string site_report(int kind, double frames, int top) {
+    if (kind < 0 || kind >= kSiteKinds || !(frames > 0)) return {};
+    std::vector<std::pair<uint64_t, std::string>> by;
+    uint64_t total = 0;
+    for (Site& s : g_sites[kind]) {
+        const uint64_t k = s.key.load(std::memory_order_acquire);
+        if (!k) continue;
+        const uint64_t v = s.n.load(std::memory_order_relaxed), d = v - s.seen;
+        s.seen = v;
+        if (!d) continue;
+        const char* fn = s.fn.load(std::memory_order_acquire);
+        char b[160];
+        std::snprintf(b, sizeof b, "%s:%u", fn ? fn : "?", static_cast<unsigned>(k >> 48));
+        by.emplace_back(d, b);
+        total += d;
+    }
+    const uint64_t ov = g_site_other[kind].load(std::memory_order_relaxed), od = ov - g_site_other_seen[kind];
+    g_site_other_seen[kind] = ov;
+    if (od) { by.emplace_back(od, "other"); total += od; }
+    std::sort(by.begin(), by.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    char b[64];
+    std::snprintf(b, sizeof b, "%.1f/frame:", static_cast<double>(total) / frames);
+    std::string out = b;
+    for (size_t i = 0; i < by.size() && static_cast<int>(i) < top; ++i) {
+        std::snprintf(b, sizeof b, " %.1f", static_cast<double>(by[i].first) / frames);
+        out += (i ? ", " : " ") + by[i].second + b;
+    }
+    if (by.size() > static_cast<size_t>(top)) out += ", ...";
+    return out;
+}
+
+void memory_barrier(VkCommandBuffer cb, const char* site_fn, int site_line) {
+    site_count(kSiteBarrier, site_fn, site_line);
     g_gauge_barriers_mem.add(1);
     ++t_barriers_in_cb[cb];
     VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};

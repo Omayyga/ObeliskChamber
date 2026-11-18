@@ -122,5 +122,11 @@ bool hitch_frame_age(uint64_t* frames, double* age_ms);
 // frame: replay, present, idle), for A/B runs (tools/perf/perf_report.py, docs/PERF_ROUTES.md). A scripted run's `@log SCENE start <name>` /
 // `@log SCENE end <name>` call it; a second begin restarts the window. Any thread.
 void hitch_scene(const char* label, bool begin);
+// The whole session's frame times (FR2, Road to 0.4.0): every presented frame since start goes into a 0.25 ms histogram (to 1 s; longer frames
+// are counted apart with the longest kept), so a run of hours still counts each frame. One line: frames, seconds, mean fps, 1% and 0.1% lows
+// (the fps of the 99th / 99.9th percentile frame time), the longest frame and the frames over 100 ms. The hitch monitor logs it every
+// `[diag] session_s` (default 300, 0 = off) as "session so far"; play mode's exit and svcExitProcess log it "at exit". Any thread.
+std::string session_summary();
+void session_log(const char* when);
 
 }  // namespace nxrt

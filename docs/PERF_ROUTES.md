@@ -91,6 +91,25 @@ pwsh -File tools\perf\ab_run.ps1 -B "NXRT_NVN_REAPER=false" -Names on,off
 - Logs, screenshots and `report.md` go to `work\perf\<date-time>`. Each run takes about two minutes; don't use the PC meanwhile.
 - `-Exe`, `-Ini`, `-Route`, `-Out` point elsewhere; `-TimeoutS` (600) stops a run whose route got stuck.
 
+## 3b. Potato mode and the CPU limit
+
+To see what a small PC gets, or where a change to the CPU side pays, the CPU has to be the limit:
+
+- `[sched] cpu_limit = 4` holds the game to 4 physical cores (`cpu_limit_smt = false`: one thread each, `cpu_limit_cores = slow`: the
+  E-cores of a hybrid CPU). The runtime's thread pools and automatic choices follow the cores kept. The log's `sched` line names them.
+- `[fefw] fps240 = 1` (F1 > Frame rate: "240 (testing)") lifts the game's own 120 fps target, so at a low resolution the frame rate rises
+  until the CPU stops it. Set the frame limit to Unlimited and vsync off.
+- A low output size keeps the GPU out of the way (for example `[fefw] output = 720p`).
+- Optional caps for memory: `[gfx] residency_test_budget_mb` (video memory a smaller card would have) and `[nvn] tex_prep_mb` (texture preparation).
+
+As environment variables for `ab_run.ps1`: `NXRT_SCHED_CPU_LIMIT=4;NXRT_FEFW_FPS240=1` on both sides, and the change under test on one.
+
+What to read in the log:
+- `session:` lines (`[diag] session_s`, default every 5 minutes, and at exit): the whole session's mean fps, 1% and 0.1% lows, longest
+  frame and frames over 100 ms.
+- `nvn.gpustats` (`[prof] gpu_stats = 600`): GPU time per frame, and the `full barriers by caller` / `pass ends by caller` lines that
+  say which code records the barriers and ends the render passes.
+
 ## 4. The report
 
 `report.md` has one table per scene: each metric's median over the runs of each side, the spread (min..max) when there were

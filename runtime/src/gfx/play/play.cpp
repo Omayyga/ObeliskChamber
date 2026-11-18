@@ -9,6 +9,7 @@
 //   hid sampling thread                                      PlaySource::poll (200 Hz): reads the pad snapshot and asks the binding engine for the
 //                                                            keyboard and mouse contribution at that instant
 #include "nxrt/pgo.h"
+#include "nxrt/gauge.h"
 #include "nxrt/extras.h"
 #include "nxrt/lowlat.h"
 #include "nxrt/play.h"
@@ -495,6 +496,7 @@ void vib_sink(uint32_t slot, int hand, const hid::VibrationValue& v, void*) {
         st.dirty = false;
     }
     nvn::backend_flush_caches();                    // the pipeline cache; this path does not shut the back end down
+    nxrt::session_log("session at exit");          // the whole session's frame times (fps, 1% and 0.1% lows)
     nxrt::log_flush();
     nxrt::profile_flush();                          // profile-guided builds: the counters (TerminateProcess skips the profile runtime's atexit)
     if (tt::enabled() && !tt::finished()) tt::end_run(code, verdict, message);     // writes result.json, then terminates

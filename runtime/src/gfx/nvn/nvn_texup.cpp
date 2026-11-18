@@ -21,6 +21,7 @@
 #include <vector>
 
 #include <nxrt/config.h>
+#include <nxrt/cpu_limit.h>
 #include <nxrt/log.h>
 
 namespace nxrt::nvn::be::texup {
@@ -103,7 +104,7 @@ namespace {
 // Caller holds mu.
 void read_settings_locked(State& s) {
     if (s.want_threads >= 0) return;
-    const int cpus = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    const int cpus = static_cast<int>(std::max(1u, nxrt::host_threads()));
     // Polish nothing waits for: one thread up to 15 hardware threads, two from 16 (it was up to four, which with the first pass kept a laptop's
     // cores busy for minutes after each new area, #122)
     s.want_threads = static_cast<int>(std::clamp<int64_t>(config_get_int("gfx", "astc_upgrade_threads", std::max(1, std::min(2, cpus / 8))), 0, 16));

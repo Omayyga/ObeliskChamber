@@ -84,6 +84,7 @@ the seven keys below. If you change one of them yourself, the menus show **Custo
 | Key | Default | What it does | Change it if... |
 |---|---|---|---|
 | `[fefw] fps60` / `fps120` | `0` / `0` | Gameplay at 60 or 120 fps at the right game speed (`fps120` wins) | Your PC and display can hold 60 or 120 |
+| `[fefw] fps240` | `0` | Testing only: a 240 fps target, so at low resolutions the frame rate is not stopped at 120 before the CPU is | Measuring how far your CPU goes; not for normal play |
 | `[fefw] frame_fixes` | `1` | At 60 and 120 fps, systems made for 30 fps keep their real speed: capes and hair, physics, cutscene camera shake, animation eases, map markers, menu timers, dialogue typing. Live in F1 | Set `0` only to compare. Without it those systems run 2x fast at 60 and 4x at 120 |
 | `[fefw] frame_fixes_skip` | empty | Groups to leave alone: `dt`, `shader`, `physics`, `cloth`, `quake`, `anim`, `map`, `ui`, `text` | You're narrowing down a problem for a report |
 | `[fefw] smooth_step` | on with fps60 / fps120 | Spreads the game's catch-up time over frames | Leave it |

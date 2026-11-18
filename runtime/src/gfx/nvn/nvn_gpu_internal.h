@@ -123,8 +123,15 @@ void gpass_stamp(Frame& f, const char* label, uint32_t arg = 0);
 // ---- barriers ---------------------------------------------------------------------------------------------------------------
 void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImageLayout to, VkImageAspectFlags aspect,
                    uint32_t base_level, uint32_t level_count, uint32_t base_layer, uint32_t layer_count);
-// All commands before, all commands after, all memory (used after passes, dispatches, copies and fills).
-void memory_barrier(VkCommandBuffer cb);
+// All commands before, all commands after, all memory (used after passes, dispatches, copies and fills). The caller's function and line
+// (filled in by the compiler) count the barrier for gpustats' "full barriers by caller" line ([prof] gpu_stats).
+void memory_barrier(VkCommandBuffer cb, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE());
+// Call-site counts for gpustats ([prof] gpu_stats): full memory barriers (kSiteBarrier) and render passes ended (kSitePassEnd, counted by
+// nvn_replay.cpp's end_pass with its own caller's site). A fixed table per kind; a site past its room is counted as "other".
+enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteKinds = 2 };
+void site_count(int kind, const char* fn, int line);
+// The counts since the previous call, per frame over `frames`, the largest first: "fn:line 12.3, fn:line 4.0, ..." (at most `top`).
+std::string site_report(int kind, double frames, int top);
 // Full memory barriers this thread recorded into `cb` so far: a change since a point in its recording means one lies between.
 uint64_t memory_barrier_count(VkCommandBuffer cb);
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and

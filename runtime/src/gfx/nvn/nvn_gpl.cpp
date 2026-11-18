@@ -48,6 +48,7 @@
 #endif
 
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -616,7 +617,7 @@ void init_once() {
     // more threads the spare cores build them ahead and a new program's first draw finds its parts ready.
     {
         const std::string c = config_get_str("nvn", "gpl_cold", "auto");
-        const unsigned hwc = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned hwc = std::max(1u, nxrt::host_threads());
         g_cold = (c == "auto") ? hwc > 8 : !(c == "false" || c == "0" || c == "off");
         NXLOG_I(kTag, "parts of programs not drawn yet: %s ([nvn] gpl_cold = %s%s)", g_cold ? "compiled ahead" : "compiled when a draw needs them",
                 c.c_str(), c == "auto" ? (hwc > 8 ? ", more than 8 hardware threads" : ", 8 hardware threads or fewer") : "");
@@ -632,7 +633,7 @@ void init_once() {
         return;
     }
     g_rasters.assign(1, RasterKey{});
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned hw = std::max(1u, nxrt::host_threads());
     // a quarter of the hardware threads, 1 to 6 (was a sixth, 1 to 4: 2 threads on an 8-core / 16-thread CPU); they run below normal priority
     const int64_t want = config_get_int("nvn", "gpl_threads", std::clamp<int64_t>(hw / 4, 1, 6));
     for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main, false);
@@ -1211,7 +1212,7 @@ bool gpl_prepare(const PrepareOptions& o, PrepareResult* res) {
     std::sort(progs.begin(), progs.end(), [](const ProgHashes& a, const ProgHashes& b) {
         return a.fs != b.fs ? a.fs < b.fs : a.vs != b.vs ? a.vs < b.vs : a.gs < b.gs;
     });
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned hw = std::max(1u, nxrt::host_threads());
     const int threads = o.threads > 0 ? o.threads : static_cast<int>(hw > 3 ? hw - 2 : 1);
     {
         std::lock_guard<std::mutex> lk(g_mu);

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "nvn_texdata.h"
+#include "nxrt/cpu_limit.h"
 
 #if defined(NXRT_HAVE_RGBCX)
 #include "rgbcx.h"   // its implementation, rgbcx.cpp, is a source of nxrt_gfx (cmake/gfx.cmake)
@@ -53,7 +54,7 @@ bool encode_bc1_image(uint32_t w, uint32_t h, const uint8_t* rgba, int level, ui
     bc1_init_once();
     level = std::clamp(level, static_cast<int>(rgbcx::MIN_LEVEL), static_cast<int>(rgbcx::MAX_LEVEL));
     // threads: 1 on a background job; 0 (all hardware threads, at most 8) for a texture the render thread waits for. Small levels stay on one thread.
-    uint32_t n = threads == 1 ? 1u : std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+    uint32_t n = threads == 1 ? 1u : std::max(1u, std::min(8u, nxrt::host_threads()));
     if (threads > 1) n = std::min<uint32_t>(n, static_cast<uint32_t>(threads));
     n = std::min<uint32_t>(n, std::max(1u, bw * bh / 4096));
     if (n <= 1) {
