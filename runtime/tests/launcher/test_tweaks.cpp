@@ -124,12 +124,16 @@ NXTEST(tweaks_suit_part_and_reset) {
     CHECK(!glow_effective(r.tweaks, r.tweaks.ball, &c));
 }
 
-NXTEST(tweaks_factory_file_has_the_section_off) {
+NXTEST(tweaks_written_file_has_the_section_off) {
+    // The settings file the game writes from the factory settings has [tweaks] with the glow off and every part on auto.
+    const std::string text = format_settings(nxrt::play::default_settings());
+    CHECK(text.find("[tweaks]\n") != std::string::npos);
+    CHECK(text.find("glow_color = off\n") != std::string::npos);
     Settings s;
     std::string err;
     std::vector<std::string> w;
-    REQUIRE(parse_settings(nxrt::play::default_settings_text(), &s, &err, &w));
+    REQUIRE(parse_settings(text, &s, &err, &w));
+    CHECK(w.empty());
     CHECK(!s.tweaks.glow_on);
     CHECK(s.tweaks.suit.mode == GlowMode::Auto && s.tweaks.ball.mode == GlowMode::Auto && s.tweaks.gun.mode == GlowMode::Auto);
-    CHECK(std::string(nxrt::play::default_settings_text()).find("[tweaks]") != std::string::npos);
 }

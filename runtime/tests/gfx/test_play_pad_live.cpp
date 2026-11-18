@@ -14,11 +14,13 @@
 #include "test_framework.h"
 
 #include "nxrt/config.h"
+#include "nxrt/game.h"
 #include "nxrt/hooks.h"
 #include "nxrt/input.h"
 #include "nxrt/input_source.h"
 #include "nxrt/platform.h"
 #include "nxrt/play.h"
+#include "play/play_game.h"
 
 namespace nxrt::services {
 void vibration_dispatch(uint32_t npad_slot, int hand, const hid::VibrationValue& v);   // src/services/input_source.cpp: what hid calls for a game's vibration command
@@ -33,7 +35,12 @@ namespace platform = nxrt::platform;
 namespace play = nxrt::play;
 
 constexpr uint64_t kBase = 0x5B00000000ull;
-constexpr uint64_t kUpdate = 0x3c81c8;
+
+// The registered game's frame boundary (GamePlay::frame_update): play mode pumps the pad into the hid state there.
+uint64_t frame_update() {
+    const nxrt::play::GamePlay* gp = nxrt::game::info().play;
+    return gp ? gp->frame_update : 0;
+}
 
 struct Rumble {
     uint16_t low = 0, high = 0;
@@ -62,6 +69,7 @@ bool setup() {
     std::filesystem::create_directories(dir);
     nxrt::config_set("play", "controls", (dir / "controls.ini").string().c_str());
     nxrt::config_set("play", "game_base", "0x5B00000000");
+    if (!frame_update()) return false;   // a test game without play mode: nothing pumps the pad
     if (!platform::init()) return false;
     play::load();
     play::StartOptions o;
@@ -99,7 +107,7 @@ hid::InputSnapshot sample() {
     SDL_UpdateJoysticks();
     platform::pump_events();
     ::Ctx c{};
-    nx_hook_entry(&c, kBase + kUpdate);
+    nx_hook_entry(&c, kBase + frame_update());
     hid::InputSnapshot s;
     auto src = hid::input_source();
     if (src) src->poll(s);

@@ -13,6 +13,7 @@
 
 #include "nxrt/input_source.h"
 #include "play/play_types.h"
+#include "play_sample_game.h"
 #include "test_framework.h"
 NXTEST_GROUP(play_config)
 
@@ -173,6 +174,7 @@ NXTEST(act_table_is_complete) {
 }
 
 NXTEST(parse_act_is_lenient) {
+    nxtest_play::SampleGame game;
     Act a = Act::None;
     CHECK(parse_act("FIRE", &a));
     CHECK(a == Act::Primary);
@@ -219,6 +221,7 @@ NXTEST(default_outputs_all_parse) {
 // ---- outputs -----------------------------------------------------------------------------------------------------------------
 
 NXTEST(output_parse_terms) {
+    nxtest_play::SampleGame game;
     Output o;
     REQUIRE(parse_output("ZR", &o));
     CHECK(o == make_out(btn(kBtnZR)));
@@ -372,6 +375,7 @@ NXTEST(input_every_scancode_name_parses_back) {
 // ---- factory settings --------------------------------------------------------------------------------------------------------
 
 NXTEST(default_settings_bindings_and_outputs) {
+    nxtest_play::SampleGame game;
     const Settings s = default_settings();
     CHECK(act_at(s, "W", Ctx::All) == Act::MoveForward);
     CHECK(act_at(s, "Mouse1", Ctx::All) == Act::Primary);
@@ -424,6 +428,7 @@ NXTEST(file_with_only_mouse_keeps_default_bindings) {
 }
 
 NXTEST(old_factory_lock_mode_moves_to_free_once) {
+    nxtest_play::SampleGame game;
     // A rev 2 file still on the old factory value takes the new one; a player's own choice in a current file stays.
     Settings s;
     std::string err;
@@ -446,6 +451,7 @@ NXTEST(one_bindings_section_drops_default_bindings) {
 }
 
 NXTEST(binding_trigger_and_ms_parse) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[bindings.gameplay]\nLeft Ctrl = morph hold 250\nSpace = jump toggle\nMouse1 = fire tap\n[meta]\ndefaults_rev = 2\n", &s, &err));
@@ -473,6 +479,7 @@ NXTEST(binding_keys_equals_and_semicolon) {
 }
 
 NXTEST(inline_comments_and_case) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     REQUIRE(parse_settings("[mouse] # the mouse\ninvert_y = 1 ; yes\nwheel_beams = off # no\n", &s, &err));
@@ -596,6 +603,7 @@ NXTEST(camera_gun_drives_view_parses_and_round_trips) {
 }
 
 NXTEST(camera_and_aim_defaults_are_free_and_on) {
+    nxtest_play::SampleGame game;
     const Settings d = default_settings();
     CHECK(d.aim.lock_mode == LockMode::Free);
     CHECK(d.aim.free_lock_margin == 0.15);
@@ -603,6 +611,7 @@ NXTEST(camera_and_aim_defaults_are_free_and_on) {
 }
 
 NXTEST(parse_errors_name_the_line) {
+    nxtest_play::SampleGame game;
     struct Case {
         const char* text;
         const char* expect;   // the start of err
@@ -638,6 +647,7 @@ NXTEST(failed_parse_does_not_touch_out) {
 }
 
 NXTEST(unknown_keys_and_sections_warn) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -651,6 +661,7 @@ NXTEST(unknown_keys_and_sections_warn) {
 // ---- writing and the round trip ----------------------------------------------------------------------------------------------
 
 NXTEST(format_has_sections_in_order) {
+    nxtest_play::SampleGame game;
     const std::string text = format_settings(default_settings());
     const char* order[] = {"[mouse]", "[pad]", "[timing]", "[display]", "[hdr]", "[upscale]", "[latency]", "[prompts]", "[switch]", "[bindings.all]", "[bindings.gameplay]",
                            "[bindings.morph]", "[bindings.map]", "[bindings.menu]", "[bindings.scan]"};
@@ -835,17 +846,15 @@ NXTEST(display_render_keys_defaults) {
     CHECK(d.fewer_gpu_waits);
 }
 
-NXTEST(default_settings_text_has_display_keys) {
-    const std::string text = default_settings_text();
-    const char* lines[] = {"render_scale = 100", "render_width = 0",  "render_height = 0", "aspect = 0",        "fov_offset = 0",
+NXTEST(written_file_has_display_keys) {
+    // The settings file the game writes (format_settings) names every display key with its factory value.
+    const std::string text = format_settings(default_settings());
+    const char* lines[] = {"render_scale = 100", "render_width = 0",  "render_height = 0", "aspect = auto",     "fov_offset = 0",
                            "dynamic_resolution = 0", "anisotropy = 0", "lod_bias = 0",    "bloom = 1",       "chromatic_aberration = 1",
                            "fast_gpu_memory = 1",    "fewer_gpu_waits = 1"};
-    for (const char* l : lines) CHECK_MSG(text.find(std::string("\n") + l + "\n") != std::string::npos, l);
-    // The four that only apply at the next start say so next to their key.
-    size_t restart_notes = 0;
-    for (size_t p = text.find("applies at the next start"); p != std::string::npos; p = text.find("applies at the next start", p + 1))
-        ++restart_notes;
-    CHECK(restart_notes >= 4u);
+    const size_t at = text.find("[display]\n");
+    REQUIRE_MSG(at != std::string::npos, "[display] section");
+    for (const char* l : lines) CHECK_MSG(text.find(std::string("\n") + l + "\n", at) != std::string::npos, l);
 }
 
 NXTEST(display_render_keys_parse) {
@@ -1088,9 +1097,9 @@ NXTEST(extras_bad_enum_words_name_the_allowed_ones) {
         const char* expect;
     };
     const Case bad[] = {
-        {"[hdr]\nmode = maybe\n", "line 2: mode must be off, auto or on, got 'maybe'"},
+        {"[hdr]\nmode = maybe\n", "line 2: mode must be off, auto, on or native, got 'maybe'"},
         {"[hdr]\nformat = hdr12\n", "line 2: format must be auto, hdr10 or scrgb, got 'hdr12'"},
-        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss or xess, got 'taa'"},
+        {"[upscale]\nmode = taa\n", "line 2: mode must be off, fsr1, spatial, fsr3, dlss, xess, nis or dlaa, got 'taa'"},
         {"[latency]\nmode = fast\n", "line 2: mode must be off, auto, on or boost, got 'fast'"},
         {"[latency]\nlog_timings = maybe\n", "line 2: log_timings must be 1/0"},
         {"[upscale]\nframe_generation = x\n", "line 2: frame_generation must be 1/0"},
@@ -1103,6 +1112,21 @@ NXTEST(extras_bad_enum_words_name_the_allowed_ones) {
     }
 }
 
+NXTEST(extras_hdr_native_round_trip) {
+    // native: the game's own HDR picture. "game" (a 0.3.0 test build's word) reads as native and is written as native.
+    for (const char* word : {"native", "game", "NATIVE"}) {
+        Settings s;
+        std::string err;
+        REQUIRE_MSG(parse_settings(std::string("[hdr]\nmode = ") + word + "\n", &s, &err), err);
+        CHECK(s.extras.hdr.mode == HdrMode::Native);
+        const std::string text = format_settings(s);
+        CHECK_MSG(text.find("[hdr]\nmode = native\n") != std::string::npos, word);
+        Settings r;
+        REQUIRE_MSG(parse_settings(text, &r, &err), err);
+        CHECK(same_settings(s, r));
+    }
+}
+
 NXTEST(extras_upscale_modes_round_trip) {
     struct Case {
         const char* word;      // as written in the file
@@ -1112,6 +1136,7 @@ NXTEST(extras_upscale_modes_round_trip) {
     const Case cases[] = {
         {"off", UpscaleMode::Off, "off"},   {"fsr1", UpscaleMode::Fsr1, "fsr1"}, {"spatial", UpscaleMode::Fsr1, "fsr1"},
         {"fsr3", UpscaleMode::Fsr3, "fsr3"}, {"dlss", UpscaleMode::Dlss, "dlss"}, {"xess", UpscaleMode::Xess, "xess"},
+        {"nis", UpscaleMode::Nis, "nis"},   {"dlaa", UpscaleMode::Dlaa, "dlaa"},
     };
     for (const Case& c : cases) {
         Settings s;
@@ -1163,7 +1188,8 @@ NXTEST(extras_keys_and_words_case_insensitive) {
 NXTEST(extras_defaults_are_written) {
     const std::string text = format_settings(default_settings());
     CHECK(text.find("[hdr]\nmode = auto\nformat = auto\npeak_nits = 0\npaper_white_nits = 0\nhighlight_boost = 1\n") != std::string::npos);
-    CHECK(text.find("[upscale]\nmode = off\nsharpness = 0.8\nscene_scale = 100\nfsr_dll = \ndlss_dll = \nxess_dll = \nframe_generation = 0\n") !=
+    CHECK(text.find("[upscale]\nmode = off\nquality = quality\nsharpness = 0.8\ndlss_preset = default\nscene_scale = 100\nfsr_dll = \ndlss_dll = \nxess_dll = \n"
+                   "frame_generation = 0\n") !=
           std::string::npos);
     CHECK(text.find("[latency]\nmode = off\nframes_ahead = 1\nlog_timings = 0\n") != std::string::npos);
 }
@@ -1175,7 +1201,8 @@ NXTEST(extras_full_file_round_trip) {
     const std::string text = format_settings(s);
     CHECK(text.find("[hdr]\nmode = on\nformat = hdr10\npeak_nits = 1000\npaper_white_nits = 250\nhighlight_boost = 1.5\n") !=
           std::string::npos);
-    CHECK(text.find("[upscale]\nmode = fsr1\nsharpness = 0.5\nscene_scale = 100\nfsr_dll = C:\\Tools\\amd_fidelityfx_vk.dll\n") != std::string::npos);
+    CHECK(text.find("[upscale]\nmode = fsr1\nquality = quality\nsharpness = 0.5\ndlss_preset = default\nscene_scale = 100\n"
+                   "fsr_dll = C:\\Tools\\amd_fidelityfx_vk.dll\n") != std::string::npos);
     CHECK(text.find("xess_dll = \nframe_generation = 1\n") != std::string::npos);
     CHECK(text.find("[latency]\nmode = boost\nframes_ahead = 2\nlog_timings = 1\n") != std::string::npos);
 
@@ -1310,6 +1337,7 @@ NXTEST(prompt_style_round_trip_every_style) {
 }
 
 NXTEST(default_settings_text_has_prompts_section) {
+    nxtest_play::SampleGame game;
     const std::string text = default_settings_text();
     const size_t at = text.find("[prompts]");
     REQUIRE_MSG(at != std::string::npos, "[prompts] section");
@@ -1442,6 +1470,7 @@ NXTEST(file_without_fps_and_padmap_keeps_defaults) {
 // ---- factory-defaults revision ([meta] defaults_rev, kDefaultAdditions in play_config.cpp) --------------------------------------------
 
 NXTEST(old_file_gets_new_factory_binding_on_map) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[bindings.map]\nReturn = confirm\n", &s, &err), err);
@@ -1471,6 +1500,7 @@ NXTEST(file_at_current_revision_is_not_migrated) {
 }
 
 NXTEST(format_round_trip_keeps_defaults_rev) {
+    nxtest_play::SampleGame game;
     const Settings s = default_settings();
     const std::string text = format_settings(s);
     CHECK(text.find("[meta]\ndefaults_rev = 3\n") != std::string::npos);
@@ -1483,6 +1513,7 @@ NXTEST(format_round_trip_keeps_defaults_rev) {
 }
 
 NXTEST(factory_text_is_at_current_revision) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings(default_settings_text(), &s, &err), err);
@@ -1493,6 +1524,7 @@ NXTEST(factory_text_is_at_current_revision) {
 }
 
 NXTEST(meta_defaults_rev_is_known_and_unknown_meta_key_warns) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     std::vector<std::string> w;
@@ -1505,6 +1537,7 @@ NXTEST(meta_defaults_rev_is_known_and_unknown_meta_key_warns) {
 }
 
 NXTEST(file_without_bindings_gets_factory_bindings_at_current_revision) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     REQUIRE_MSG(parse_settings("[mouse]\nyaw = 0.001\n", &s, &err), err);
@@ -1560,6 +1593,7 @@ NXTEST(pad_stick_keys_written_in_order) {
 }
 
 NXTEST(pad_stick_keys_range_errors) {
+    nxtest_play::SampleGame game;
     const struct {
         const char* text;
         const char* expect;
@@ -1692,8 +1726,8 @@ NXTEST(alt_sensitivity_keeps_a_separate_vertical) {
     CHECK(r.mouse.alt_pitch_rad == 0.0005);
 }
 
-NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
-    // the test executable registers Metroid Prime Remastered: its words for the alternate body's camera keys
+NXTEST(ball_camera_keys_with_the_sample_vocabulary) {
+    nxtest_play::SampleGame game;   // play_sample_game.h: its words for the alternate body's camera keys
     REQUIRE(std::string(key_alt_camera()) == "ball_camera");
     REQUIRE(std::string(key_alt_sens()) == "ball_sensitivity");
     REQUIRE(std::string(key_alt_yaw()) == "morph_yaw");
@@ -1719,6 +1753,7 @@ NXTEST(ball_camera_keys_with_the_mpr_vocabulary) {
 }
 
 NXTEST(ball_sensitivity_range) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     for (const char* bad : {"0", "-1", "0.05", "25", "1e9"})

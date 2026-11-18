@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Keyboard tab logic in apps/launcher/bindings_edit.cpp: the list rows, slot edits, clears and resets on the factory bindings.
-// Only in-memory settings are used; no file, no window.
+// Only in-memory settings are used; no file, no window. Every test runs with the sample game registered (play_sample_game.h): its rows,
+// names and factory bindings (fire on Mouse1, jump on Space). key_rows() keeps the rows it read first, so no test may run without it.
 #include "test_framework.h"
 
 #include <cstddef>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "bindings_edit.h"
+#include "play_sample_game.h"
 
 NXTEST_GROUP(launcher_bindings_edit)
 
@@ -70,7 +72,8 @@ Binding binding(const char* key_name, Ctx ctx, Act act) {
 }  // namespace
 
 NXTEST(every_row_has_an_action_name) {
-    CHECK_EQ(key_rows().size(), 26u);
+    nxtest_play::SampleGame game;
+    CHECK_EQ(key_rows().size(), static_cast<std::size_t>(nxtest_play::SampleGame::label_count()));
     for (const mprl::KeyRow& r : key_rows()) {
         CHECK(r.label != nullptr && r.label[0] != L'\0');
         CHECK(r.group != nullptr && r.group[0] != L'\0');
@@ -80,7 +83,8 @@ NXTEST(every_row_has_an_action_name) {
 }
 
 NXTEST(factory_fire_is_left_mouse_only) {
-    // The factory layer has one key for fire: Mouse1 (the registered game's factory controls.ini: games/mpr/mpr_defaults.cpp, [bindings.all]).
+    nxtest_play::SampleGame game;
+    // The factory layer has one key for fire: Mouse1 (the sample game's factory controls.ini, [bindings.all]).
     const Settings s = nxrt::play::default_settings();
     const std::vector<InputId> in = inputs_for(s, Act::Primary);
     CHECK_EQ(in.size(), 1u);
@@ -88,6 +92,7 @@ NXTEST(factory_fire_is_left_mouse_only) {
 }
 
 NXTEST(bind_slot_replaces_slot_zero_and_keeps_trigger) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     for (Binding& b : s.bindings)
         if (b.ctx == Ctx::All && b.act == Act::Primary) {
@@ -113,6 +118,7 @@ NXTEST(bind_slot_replaces_slot_zero_and_keeps_trigger) {
 }
 
 NXTEST(bind_slot_slot_one_appends) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     bind_slot(s, Act::Primary, 1, key("G"), nullptr);
     const std::vector<InputId> in = inputs_for(s, Act::Primary);
@@ -121,6 +127,7 @@ NXTEST(bind_slot_slot_one_appends) {
 }
 
 NXTEST(bind_slot_slot_one_without_first_key_fills_slot_zero) {
+    nxtest_play::SampleGame game;
     // BtnA has no factory key: slot 1 becomes the first key.
     Settings s = nxrt::play::default_settings();
     bind_slot(s, Act::BtnA, 1, key("G"), nullptr);
@@ -130,6 +137,7 @@ NXTEST(bind_slot_slot_one_without_first_key_fills_slot_zero) {
 }
 
 NXTEST(bind_slot_same_key_in_other_slot_is_dropped) {
+    nxtest_play::SampleGame game;
     // Mouse1 is already the first key of Fire. Setting it as the second key leaves one Mouse1 only.
     Settings s = nxrt::play::default_settings();
     Act displaced = Act::Jump;
@@ -141,6 +149,7 @@ NXTEST(bind_slot_same_key_in_other_slot_is_dropped) {
 }
 
 NXTEST(binding_space_to_fire_displaces_jump) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     Act displaced = Act::None;
     bind_slot(s, Act::Primary, 0, key("Space"), &displaced);
@@ -151,6 +160,7 @@ NXTEST(binding_space_to_fire_displaces_jump) {
 }
 
 NXTEST(clear_slot_removes_one_key) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     bind_slot(s, Act::Primary, 1, key("G"), nullptr);
     clear_slot(s, Act::Primary, 0);
@@ -163,6 +173,7 @@ NXTEST(clear_slot_removes_one_key) {
 }
 
 NXTEST(reset_restores_factory_bindings) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     bind_slot(s, Act::Primary, 0, key("G"), nullptr);
     clear_slot(s, Act::Jump, 0);
@@ -176,6 +187,7 @@ NXTEST(reset_restores_factory_bindings) {
 }
 
 NXTEST(reset_shown_bindings_leaves_other_contexts_alone) {
+    nxtest_play::SampleGame game;
     // Edit the factory layer (the keys this tab shows) and every other context.
     Settings s = nxrt::play::default_settings();
     bind_slot(s, Act::Primary, 0, key("G"), nullptr);
@@ -209,6 +221,7 @@ NXTEST(reset_shown_bindings_leaves_other_contexts_alone) {
 }
 
 NXTEST(reset_shown_bindings_fills_an_empty_factory_layer) {
+    nxtest_play::SampleGame game;
     // No All binding left at all: the reset adds the factory layer and keeps the other contexts.
     Settings s = nxrt::play::default_settings();
     const std::vector<Binding> others = layer(s, false);
@@ -221,6 +234,7 @@ NXTEST(reset_shown_bindings_fills_an_empty_factory_layer) {
 }
 
 NXTEST(other_contexts_are_not_touched) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     Binding menu;
     menu.in = key("G");
@@ -247,6 +261,7 @@ NXTEST(other_contexts_are_not_touched) {
 }
 
 NXTEST(inputs_for_without_bindings_is_empty) {
+    nxtest_play::SampleGame game;
     Settings s = nxrt::play::default_settings();
     for (int i = 0; i < 4 && !inputs_for(s, Act::Primary).empty(); ++i) clear_slot(s, Act::Primary, 0);
     CHECK(inputs_for(s, Act::Primary).empty());
@@ -254,6 +269,7 @@ NXTEST(inputs_for_without_bindings_is_empty) {
 }
 
 NXTEST(act_label_comes_from_the_rows) {
+    nxtest_play::SampleGame game;
     CHECK(act_label(Act::Jump) == L"Jump");
     CHECK(act_label(Act::AltForm) == L"Morph ball");
     CHECK(act_label(Act::BtnA).empty());
