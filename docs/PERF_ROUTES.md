@@ -90,6 +90,9 @@ pwsh -File tools\perf\ab_run.ps1 -B "NXRT_NVN_REAPER=false" -Names on,off
 - `-Runs 3` (default) runs each side three times, alternating A B, B A, A B, so slow drift over the session falls on both.
 - Logs, screenshots and `report.md` go to `work\perf\<date-time>`. Each run takes about two minutes; don't use the PC meanwhile.
 - `-Exe`, `-Ini`, `-Route`, `-Out` point elsewhere; `-TimeoutS` (600) stops a run whose route got stuck.
+- `-ExeB` runs side B with another build, to compare two builds with the same settings (for example master against a pull
+  request). Copy the whole `game-build\fefw\build\release` folder of the first build somewhere else before building the second:
+  `-Exe C:\ab\master\ObeliskChamber.exe -ExeB game-build\fefw\build\release\ObeliskChamber.exe -Names master,pr`.
 
 ## 3b. Potato mode and the CPU limit
 

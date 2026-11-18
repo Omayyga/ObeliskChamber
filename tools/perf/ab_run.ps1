@@ -5,6 +5,9 @@
 #
 #   pwsh -File tools\perf\ab_run.ps1 -B "NXRT_NVN_REAPER=false" -Names on,off
 #   pwsh -File tools\perf\ab_run.ps1 -A "NXRT_UPSCALE_DLSS_PRESET_AUTO=false" -B "" -Runs 4
+#   pwsh -File tools\perf\ab_run.ps1 -Exe C:\ab\master\ObeliskChamber.exe -ExeB game-build\fefw\build\release\ObeliskChamber.exe -Names master,pr
+#
+# -ExeB runs the B side with another build (two builds, same settings): copy the whole release folder of the old build somewhere first.
 #
 # A variant is a list of environment variables, `NAME=value` separated by ';' (empty: the ini as it is). Every [section] key of the
 # runtime has one: NXRT_<SECTION>_<KEY> in capitals (runtime/docs/CONFIG.md, the "Variable" column); the environment wins over the ini.
@@ -16,6 +19,7 @@ param(
     [string[]]$Names = @("A", "B"),
     [int]$Runs = 3,
     [string]$Exe = "",
+    [string]$ExeB = "",
     [string]$Ini = "C:\ObeliskChamber-run\ObeliskChamber.ini",
     [string]$Route = "",
     [string]$Out = "",
@@ -26,8 +30,12 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 if (-not $Exe) { $Exe = Join-Path $root "game-build\fefw\build\release\ObeliskChamber.exe" }
 if (-not $Route) { $Route = Join-Path $PSScriptRoot "routes\fefw_map.tt" }
 if (-not $Out) { $Out = Join-Path $root ("work\perf\" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
-foreach ($p in @($Exe, $Ini, $Route)) { if (-not (Test-Path $p)) { throw "not found: $p" } }
+if (-not $ExeB) { $ExeB = $Exe }
+foreach ($p in @($Exe, $ExeB, $Ini, $Route)) { if (-not (Test-Path $p)) { throw "not found: $p" } }
 $Route = (Resolve-Path $Route).Path
+$Exe = (Resolve-Path $Exe).Path
+$ExeB = (Resolve-Path $ExeB).Path
+$exes = @($Exe, $ExeB)
 $Ini = (Resolve-Path $Ini).Path
 New-Item -ItemType Directory -Force $Out | Out-Null
 $runDir = Split-Path -Parent $Ini
@@ -47,6 +55,7 @@ $vars = @((Parse-Vars $A), (Parse-Vars $B))
 $allNames = @($vars[0].Keys) + @($vars[1].Keys) | Select-Object -Unique
 
 Write-Host "exe:   $Exe"
+if ($ExeB -ne $Exe) { Write-Host "exe B: $ExeB" }
 Write-Host "ini:   $Ini"
 Write-Host "route: $Route"
 Write-Host "out:   $Out"
@@ -72,7 +81,7 @@ for ($r = 1; $r -le $Runs; $r++) {
             [Environment]::SetEnvironmentVariable("NXRT_TEST_SHOT_DIR", $shots)
             Write-Host ("run {0}/{1}: {2} ..." -f $r, $Runs, $name) -NoNewline
             $t0 = Get-Date
-            $p = Start-Process -FilePath $Exe -ArgumentList @("--ini", "`"$Ini`"", "--log", "`"$log`"") -WorkingDirectory $runDir -PassThru
+            $p = Start-Process -FilePath $exes[$v] -ArgumentList @("--ini", "`"$Ini`"", "--log", "`"$log`"") -WorkingDirectory $runDir -PassThru
             if (-not $p.WaitForExit($TimeoutS * 1000)) {
                 Stop-Process -Id $p.Id -Force
                 Write-Host " stopped after $TimeoutS s (the route did not end: check its screenshots in $shots)"
