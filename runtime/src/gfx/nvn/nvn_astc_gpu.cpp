@@ -120,6 +120,8 @@ struct State {
     std::atomic<int> speed{0};        // 0 not measured yet, 1 faster than kCacheRate, 2 slower (rate_now after 6 samples; read by any thread)
     bool upgrade = false;
     double budget_ms = 8.0;
+    double load_ms = 8.0;             // [gfx] astc_gpu_load_ms: the least budget a present gets for a while after a load frame (0: none)
+    double load_s = 3.0;              // [gfx] astc_gpu_load_s: how long that lasts
     // ---- render thread ----
     Scratch sc;
     uint64_t sc_gen = 0;              // bumped when the scratch buffer is made again
@@ -134,6 +136,8 @@ struct State {
     double spent_ms = 0.0;            // estimated GPU time of the passes recorded for that present
     uint64_t present_ns = 0;          // when that present was first seen
     double frame_ms = 1000.0 / 30.0;  // present interval, smoothed
+    uint64_t load_until_ns = 0;       // the load floor applies until then (a present interval over kLoadFrameMs started it)
+    uint64_t n_load_windows = 0;
     double rate = 150e3;              // texels per millisecond of GPU time (decode and encode), measured
     uint32_t rate_samples = 0;        // passes that went into it
     double peak = 0.0;                // the fastest pass rate seen: what the GPU can do (the game's own work on the GPU only makes passes look slower,
@@ -847,6 +851,8 @@ void init_locked() {
     }
     s.upgrade = nxrt::config_get_bool("gfx", "astc_gpu_upgrade", false);
     s.budget_ms = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_ms", 8.0), 0.5, 1000.0);
+    s.load_ms = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_load_ms", 8.0), 0.0, 1000.0);
+    s.load_s = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_load_s", 3.0), 0.0, 60.0);
     s.slow = std::clamp(nxrt::config_get_double("nvn", "astc_gpu_slow", 1.0), 1.0, 1000.0);
     const auto t0 = std::chrono::steady_clock::now();
     std::string why;
@@ -860,8 +866,8 @@ void init_locked() {
         return;
     }
     NXLOG_I(kTag, "ASTC textures are decoded and encoded on the GPU ([gfx] astc_gpu = %s): pipelines built in %.0f ms, self-test passed after %.0f ms; up to %.1f ms of GPU time per present, "
-                  "results %s, CPU re-encode %s",
-            m.c_str(), build_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), s.budget_ms,
+                  "at least %.1f ms for %.1f s after a load frame, results %s, CPU re-encode %s",
+            m.c_str(), build_ms, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), s.budget_ms, s.load_ms, s.load_s,
             s.cache == 1 ? "stored in [nvn] bc7_cache" : s.cache == 2 ? "stored in [nvn] bc7_cache only if this GPU turns out slow" : "not cached",
             s.upgrade ? "on ([gfx] astc_gpu_upgrade)" : "off");
     NXLOG_I(kTag, "BC7/BC1 entries of [nvn] bc7_cache are %s ([gfx] astc_gpu_cache_read = %s)",
@@ -940,11 +946,11 @@ void log_stats(bool force) {
     const double mt = static_cast<double>(s.timed_texels) / 1e6;
     NXLOG_I(kTag, "%llu textures (%.1f M texels) transcoded on the GPU, %.0f ms of render thread time for it (%.3f ms a texture): %.1f ms of GPU time over %llu timed passes (%.1f M texels, "
                   "%.2f ms per M texel, longest pass %.1f ms); %llu textures queued over the budget (their stand-ins on screen for %.0f ms on average, %.0f ms and %u presents at most; %zu "
-                  "waiting, %llu dropped as stale); %llu stored in the cache (%llu not), %llu failed",
+                  "waiting, %llu dropped as stale; %llu load windows); %llu stored in the cache (%llu not), %llu failed",
             static_cast<unsigned long long>(s.n_tex), static_cast<double>(s.n_texels) / 1e6, static_cast<double>(s.cpu_ns) * 1e-6,
             static_cast<double>(s.cpu_ns) * 1e-6 / static_cast<double>(s.n_tex), s.gpu_ms, static_cast<unsigned long long>(s.n_timed), mt, mt > 0 ? s.gpu_ms / mt : 0.0, s.max_ms,
             static_cast<unsigned long long>(s.n_deferred), s.n_waited ? s.sum_wait_ms / static_cast<double>(s.n_waited) : 0.0, s.max_wait_ms, s.max_wait_presents, s.q.size(),
-            static_cast<unsigned long long>(s.n_stale), static_cast<unsigned long long>(s.stored.load()), static_cast<unsigned long long>(s.store_failed.load()),
+            static_cast<unsigned long long>(s.n_stale), static_cast<unsigned long long>(s.n_load_windows), static_cast<unsigned long long>(s.stored.load()), static_cast<unsigned long long>(s.store_failed.load()),
             static_cast<unsigned long long>(s.n_failed));
 }
 
@@ -963,6 +969,11 @@ void update_work() {
 // from there, so the transcodes take the same share of every frame (a quarter with the default) whatever the frame rate. A long frame
 // raises it for the frames after it: the frame that loads an area takes seconds, and what the queue still holds then goes through in about
 // one more second of slow frames (the interval decays by a quarter a frame) instead of five seconds at the steady rate.
+// At a high frame rate that boost is gone within a few frames (0.1 s at 120), and the queue then drained at a quarter of a short frame:
+// stand-ins stayed on screen 1.5 s on average after loads at 120 fps. [gfx] astc_gpu_load_ms: for [gfx] astc_gpu_load_s after a present
+// interval over kLoadFrameMs (a load), a present's budget is at least that many ms while textures are queued; the frames after a load are
+// slower for that time, and the textures arrive sooner.
+constexpr double kLoadFrameMs = 100.0;
 void tick_present() {
     State& s = S();
     const uint32_t now = presents_now();
@@ -971,6 +982,10 @@ void tick_present() {
     if (s.present_ns && now > s.budget_at) {
         const double dt = static_cast<double>(t - s.present_ns) * 1e-6 / static_cast<double>(now - s.budget_at);   // ms per present since the last look
         s.frame_ms = std::clamp(0.7 * s.frame_ms + 0.3 * dt, 1.0, 1000.0);
+        if (dt > kLoadFrameMs && s.load_ms > 0.0 && s.load_s > 0.0) {
+            if (t >= s.load_until_ns) ++s.n_load_windows;
+            s.load_until_ns = t + static_cast<uint64_t>(s.load_s * 1e9);
+        }
     }
     s.present_ns = t;
     s.budget_at = now;
@@ -981,7 +996,9 @@ void tick_present() {
 
 double budget_now() {
     State& s = S();
-    return s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    const double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    if (s.load_until_ns && !s.q.empty() && s.present_ns < s.load_until_ns) return std::max(b, s.load_ms);   // [gfx] astc_gpu_load_ms
+    return b;
 }
 
 double rate_now() { return S().rate / S().slow; }
