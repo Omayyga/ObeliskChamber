@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "nxrt/config.h"
+#include "nxrt/game.h"
 #include "nxrt/log.h"
 #include "extras/hdr_math.h"
 
@@ -18,6 +19,20 @@ namespace {
 std::string lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+bool temporal_mode(UpscaleMode m) { return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::Xess; }
+
+// The mode that runs: a game that upscales its own scene (game::Info::own_upscaler) takes no temporal [upscale] mode on top of it (the
+// settings keep the word, so the file is written back unchanged). Logged once per mode.
+UpscaleMode effective_mode(UpscaleMode m) {
+    if (!temporal_mode(m) || !game::info().own_upscaler) return m;
+    static std::atomic<int> logged{-1};
+    if (logged.exchange(static_cast<int>(m)) != static_cast<int>(m))
+        NXLOG_I("extras", "[upscale] mode %s is ignored: this game upscales its own scene ([dlss] upscaler answers its DLSS calls), so a second "
+                          "temporal upscaler would only add work; FSR 1 and NIS still scale the picture to the window",
+                m == UpscaleMode::Fsr3 ? "fsr3" : m == UpscaleMode::Dlss ? "dlss" : m == UpscaleMode::Dlaa ? "dlaa" : "xess");
+    return UpscaleMode::Off;
 }
 
 std::mutex g_mu;
@@ -94,7 +109,7 @@ Settings settings() {
     if (!g_settings_set) {
         g_settings = settings_from_config();
         g_settings_set = true;
-        g_upscale_mode.store(static_cast<int>(g_settings.upscale.mode));
+        g_upscale_mode.store(static_cast<int>(effective_mode(g_settings.upscale.mode)));
         g_upscale_sharp.store(static_cast<float>(g_settings.upscale.sharpness));
         g_dlss_preset.store(g_settings.upscale.dlss_preset);
         g_scene_scale.store(g_settings.upscale.scene_scale);
@@ -108,7 +123,7 @@ void set_settings(const Settings& s) {
     std::lock_guard<std::mutex> lk(g_mu);
     g_settings = s;
     g_settings_set = true;
-    g_upscale_mode.store(static_cast<int>(s.upscale.mode));
+    g_upscale_mode.store(static_cast<int>(effective_mode(s.upscale.mode)));
     g_upscale_sharp.store(static_cast<float>(s.upscale.sharpness));
     g_dlss_preset.store(s.upscale.dlss_preset);
     g_scene_scale.store(s.upscale.scene_scale);
@@ -182,10 +197,7 @@ UpscaleQuality upscale_quality() {
     return static_cast<UpscaleQuality>(g_upscale_quality.load(std::memory_order_relaxed));
 }
 
-bool upscale_temporal() {
-    const UpscaleMode m = upscale_mode();
-    return m == UpscaleMode::Fsr3 || m == UpscaleMode::Dlss || m == UpscaleMode::Dlaa || m == UpscaleMode::Xess;
-}
+bool upscale_temporal() { return temporal_mode(upscale_mode()); }
 
 int quality_percent(UpscaleQuality q) {
     switch (q) {

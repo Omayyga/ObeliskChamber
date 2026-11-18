@@ -48,6 +48,9 @@ struct Info {
                                             // fails instead and the game moves on as after a skip
     bool movie_video_decoder = false;       // Switch 2: the game's player takes movie::VideoDecoder from its movie module; the host one decodes
                                             // AV1 into the player's CPU frames (media/movie_vdec.cpp, [media] movies = host; skip = the above)
+    bool own_upscaler = false;              // the game upscales its own scene (Fortune's Weave: its DLSS calls, answered by [dlss] upscaler):
+                                            // the runtime's temporal [upscale] modes (fsr3, dlss, dlaa, xess) would only add work on top of it,
+                                            // so they count as off (extras_state.cpp); the file keeps what was written
     bool vi_hdr_status_sdr = false;         // Switch 2: nn::vi::QueryDisplayHdrStatus answers an SDR display on the host (core/switch2.cpp)
     int present_interval_hz = 0;            // the game paces itself by the console's vsync and steps its logic by a fixed amount per frame:
                                             // the frame limiter holds it to this rate / the NVN window's present interval (60: interval 2 is

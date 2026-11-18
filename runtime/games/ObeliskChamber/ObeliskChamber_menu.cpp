@@ -497,6 +497,8 @@ void display_page(UiHost& host, Menu& m, const play::LiveStatus& live) {
             u.mode = kScaleModes[idx];
             apply(host, m);
         }
+        if (idx < 0 && u.mode != extras::UpscaleMode::Off)   // fsr3, dlss, dlaa or xess written by hand: the game's own upscaler does that job
+            ImGui::TextColored(kOrange, "%s", tr("The temporal mode in controls.ini is not used here: the game upscales its own scene (Upscaler, below)."));
         if (u.mode == extras::UpscaleMode::Fsr1 || u.mode == extras::UpscaleMode::Nis) {
             row(m, "Sharpness", When::Live, "1 is the sharpest.");
             if (slider(m, "##shp", &u.sharpness, 0.0, 1.0, 0.05, "%.2f")) apply(host, m);

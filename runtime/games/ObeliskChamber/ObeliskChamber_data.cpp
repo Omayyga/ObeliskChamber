@@ -23,6 +23,7 @@ const game::Info& data_info() {
         g.nvn_api_minor = 40;     // NintendoSDK 22.2.0's NVN2 driver: 231.40, shader binaries up to 201.20
         g.movie_fail_at_open = true;      // its movie player's constructor (main 0x1905920) aborts unless nn::movie::Initialize succeeds
         g.movie_video_decoder = true;     // AV1 movies through the host movie::VideoDecoder (subsdk2's), on the player's CPU-frame path
+        g.own_upscaler = true;            // its DLSS calls go to [dlss] upscaler; [upscale] temporal modes are ignored
         g.vi_hdr_status_sdr = true;       // the SDK's answer (format 1, HDR off) gives it 0 nits: NaN tone map and bloom (core/switch2.cpp)
         g.present_interval_hz = 60;       // logic steps 60 / target per frame; the present interval is 60 / target (notes/pacing.md)
         g.exe_name = "ObeliskChamber.exe";
