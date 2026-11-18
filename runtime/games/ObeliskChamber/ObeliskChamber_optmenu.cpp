@@ -604,6 +604,29 @@ void redraw_all(::Ctx* c, uint64_t item) {
         if (rd(p, &row) && row != item && row_of(row) && part_alive(row + kItemBase)) call(c, g_ivt[2 + kISlotRedraw], {row});
     }
 }
+// The rows' update (slot 18, every frame for a row on screen; the game's own, then ours). After a step on Graphics Preset, Render Scale, Shadow
+// Resolution or Quality every row draws its value again a few times over 0.6 s: those steps rebuild the render targets (twice: the second
+// rebuild a few frames later), and on a PC the preset row kept showing its old name though the step had happened and been drawn.
+uint64_t g_update_orig = 0;              // the game's slot 18 (also the pick list's, list_update)
+std::chrono::steady_clock::time_point g_rows_until, g_rows_gen_at;
+uint32_t g_rows_gen = 0, g_row_seen[kRowCount] = {};
+void rows_redraw_soon() { g_rows_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(600); }
+void item_update(::Ctx* c) {
+    const uint64_t item = c->x[0];
+    pass(c, g_update_orig);
+    const Row* r = row_of(item);
+    const auto now = std::chrono::steady_clock::now();
+    if (!r || now >= g_rows_until) return;
+    if (now - g_rows_gen_at > std::chrono::milliseconds(100)) {
+        g_rows_gen_at = now;
+        ++g_rows_gen;
+    }
+    uint32_t& seen = g_row_seen[r - kRows];
+    if (seen == g_rows_gen) return;
+    seen = g_rows_gen;
+    if (part_alive(item + kItemBase)) call(c, g_ivt[2 + kISlotRedraw], {item});
+}
+
 // slots 39 / 40: (item, wrap) -> changed, as the game's: the value, a redraw, the arrow's animation
 void item_step(::Ctx* c, int dir) {
     const uint64_t item = c->x[0];
@@ -614,7 +637,10 @@ void item_step(::Ctx* c, int dir) {
         return;
     }
     call(c, g_ivt[2 + kISlotRedraw], {item});
-    if (links_rows(r)) redraw_all(c, item);
+    if (links_rows(r)) {
+        redraw_all(c, item);
+        rows_redraw_soon();   // and again over the next frames: a step that rebuilds the render targets lost the value drawn now
+    }
     if (const uint64_t base = part_alive(item + kItemBase)) call(c, g_base + kArrow, {base, dir < 0 ? 1ull : 0ull});
     c->x[0] = 1;
 }
@@ -878,7 +904,7 @@ uint32_t g_list_gen = 0, g_list_seen[kListMax] = {};
 std::chrono::steady_clock::time_point g_list_gen_at;
 void list_update(::Ctx* c) {
     const uint64_t item = c->x[0];
-    pass(c, g_ivt[2 + kISlotUpdate]);
+    pass(c, g_update_orig);
     const int i = list_row(item);
     if (i >= 0) under_prompt(c, item);
     if (i < 0 || i >= kListMax || !g_list.dirty) return;
@@ -1292,6 +1318,8 @@ void optmenu_frame() {
     g_ivt[2 + kISlotNext] = hle_register("fefw.optmenu.item_next", item_next);
     g_ivt[2 + kISlotPrev] = hle_register("fefw.optmenu.item_prev", item_prev);
     g_ivt[2 + kISlotValue] = hle_register("fefw.optmenu.item_value", item_value);
+    g_update_orig = g_ivt[2 + kISlotUpdate];
+    g_ivt[2 + kISlotUpdate] = hle_register("fefw.optmenu.item_update", item_update);
     g_fvt[2 + kFSlotInvoke] = hle_register("fefw.optmenu.tab_label", tab_label);
     for (int slot : {kMSlotOnInit, kMSlotHelp, kMSlotMinus, kMSlotKeyHelp}) g_mvt2[2 + slot] = g_mvt[2 + slot];
     g_ivt2[2 + kISlotText] = hle_register("fefw.optmenu.list_text", list_text);
