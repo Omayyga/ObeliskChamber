@@ -97,7 +97,7 @@ To see what a small PC gets, or where a change to the CPU side pays, the CPU has
 
 - `[sched] cpu_limit = 4` holds the game to 4 physical cores (`cpu_limit_smt = false`: one thread each, `cpu_limit_cores = slow`: the
   E-cores of a hybrid CPU). The runtime's thread pools and automatic choices follow the cores kept. The log's `sched` line names them.
-- `[fefw] fps240 = 1` (F1 > Frame rate: "240 (testing)") lifts the game's own 120 fps target, so at a low resolution the frame rate rises
+- `[fefw] fps240 = 1` (in the ini only; F1 > Frame rate then shows "Custom") lifts the game's own 120 fps target, so at a low resolution the frame rate rises
   until the CPU stops it. Set the frame limit to Unlimited and vsync off.
 - A low output size keeps the GPU out of the way (for example `[fefw] output = 720p`).
 - Optional caps for memory: `[gfx] residency_test_budget_mb` (video memory a smaller card would have) and `[nvn] tex_prep_mb` (texture preparation).

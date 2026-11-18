@@ -133,7 +133,7 @@ constexpr IniKey kIni[] = {
     {"fefw", "scenery_detail", "full", Norm::Text, true, "scenery detail"},
     {"fefw", "fps60", "0", Norm::Bool, false, "60 fps", live_rate},
     {"fefw", "fps120", "0", Norm::Bool, false, "120 fps", live_rate},
-    {"fefw", "fps240", "0", Norm::Bool, false, "240 fps (testing)", live_rate},
+    {"fefw", "fps240", "0", Norm::Bool, false, "240 fps (testing, ini only)", live_rate},   // not offered in the menu: the rate combo clears it
     {"fefw", "smooth_step", "auto", Norm::Text, false, "smooth time step", live_smooth},
     {"fefw", "frame_fixes", "1", Norm::Bool, false, "frame-rate fixes", live_frame_fixes},
     {"fefw", "clock_log", "10", Norm::Number, false, "game clock log"},
@@ -1033,28 +1033,26 @@ void framerate_page(UiHost& host, Menu& m, const play::LiveStatus& live, gfx::Ov
         const IniKey& k240 = *ini_key("fefw", "fps240");
         row(m, "Gameplay frame rate", When::Live,
             "30 is the game's own. 60 runs gameplay at 60 at the right speed. 120 needs a frame limit of 120 or more and a fast PC. "
-            "240 is for testing: it lets the frame rate rise until the CPU or GPU stops it; above 240 the game would run fast. "
             "Frame-rate fixes below keep frame-counted effects at their 30 fps speed.");
         if (!(ini_env(k60) || ini_env(k120) || ini_env(k240))) {
             const auto is_on = [](const IniKey& k) { return normalized(k, ini_now(k)) == "1"; };
-            int idx = is_on(k240) ? 3 : is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
-            constexpr const char* kNames[] = {"30 (the game's own)", "60", "120", "240 (testing)"};
-            if (combo(m, "##rate", &idx, kNames, 4)) {
-                if (idx == 3) ini_put(m, k240, "1");
+            // [fefw] fps240 (testing) is an ini tweak only: the combo shows "Custom" while it is on, and a choice here turns it off
+            int idx = is_on(k240) ? -1 : is_on(k120) ? 2 : is_on(k60) ? 1 : 0;
+            constexpr const char* kNames[] = {"30 (the game's own)", "60", "120"};
+            if (combo(m, "##rate", &idx, kNames, 3)) {
+                if (is_on(k240)) ini_put(m, k240, "0");
+                if (idx == 2) ini_put(m, k120, "1");
                 else {
-                    if (is_on(k240)) ini_put(m, k240, "0");
-                    if (idx == 2) ini_put(m, k120, "1");
-                    else {
-                        ini_put(m, k60, idx == 1 ? "1" : "0");
-                        if (is_on(k120)) ini_put(m, k120, "0");
-                    }
+                    ini_put(m, k60, idx == 1 ? "1" : "0");
+                    if (is_on(k120)) ini_put(m, k120, "0");
                 }
             }
-            const int running = ck.fps240 ? 3 : ck.fps120 ? 2 : ck.fps60 ? 1 : 0;   // the hooks installed at start
-            pending_note(idx != running, kNames[running]);
+            if (!ck.fps240) {
+                const int running = ck.fps120 ? 2 : ck.fps60 ? 1 : 0;   // the hooks installed at start
+                pending_note(idx != running, kNames[running]);
+            }
         } else {
-            ImGui::TextDisabled(tr("set by the environment (%s / %s / %s)"), config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str(),
-                                config_env_name("fefw", "fps240").c_str());
+            ImGui::TextDisabled(tr("set by the environment (%s / %s)"), config_env_name("fefw", "fps60").c_str(), config_env_name("fefw", "fps120").c_str());
         }
         constexpr const char* kSmooth[] = {"Auto (on at 60 and 120)", "On", "Off"};
         constexpr const char* kSmoothVals[] = {"auto", "1", "0"};
@@ -1614,8 +1612,7 @@ void debug_page(UiHost& host, Menu& m, gfx::Overlay& ov) {
                     ck.display, static_cast<double>(ck.step));
     else
         ImGui::TextDisabled("%s", tr("Not running yet (title or loading)."));
-    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, fps240 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off",
-                        ck.fps240 ? "on" : "off", ck.smooth ? "on" : "off");
+    ImGui::TextDisabled(tr("Hooks at start: fps60 %s, fps120 %s, smooth step %s"), ck.fps60 ? "on" : "off", ck.fps120 ? "on" : "off", ck.smooth ? "on" : "off");
 
     section("Ultrawide");
     const WideInfo wi = wide_info();
