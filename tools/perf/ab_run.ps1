@@ -74,7 +74,7 @@ for ($r = 1; $r -le $Runs; $r++) {
         $log = Join-Path $Out ("{0}_{1}.log" -f $name, $r)
         $shots = Join-Path $Out ("shots_{0}_{1}" -f $name, $r)
         $saved = @{}
-        foreach ($n in $allNames + @("NXRT_TEST_SCRIPT", "NXRT_TEST_OUT", "NXRT_TEST_SHOT_DIR")) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+        foreach ($n in $allNames + @("NXRT_TEST_SCRIPT", "NXRT_TEST_OUT", "NXRT_TEST_SHOT_DIR", "NXRT_LOG")) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
         try {
             foreach ($n in $allNames) { [Environment]::SetEnvironmentVariable($n, $null) }
             $tag = "{0}-{1}-{2}" -f $name, $r, (Get-Date -Format "HHmmssfff")
@@ -82,6 +82,7 @@ for ($r = 1; $r -le $Runs; $r++) {
             [Environment]::SetEnvironmentVariable("NXRT_TEST_SCRIPT", $Route)
             [Environment]::SetEnvironmentVariable("NXRT_TEST_OUT", (Join-Path $Out ("tt_{0}_{1}" -f $name, $r)))
             [Environment]::SetEnvironmentVariable("NXRT_TEST_SHOT_DIR", $shots)
+            [Environment]::SetEnvironmentVariable("NXRT_LOG", $log)     # an ini's [log] path wins over --log; the environment wins over both
             Write-Host ("run {0}/{1}: {2} ..." -f $r, $Runs, $name) -NoNewline
             $t0 = Get-Date
             $p = Start-Process -FilePath $exes[$v] -ArgumentList @("--ini", "`"$Ini`"", "--log", "`"$log`"") -WorkingDirectory $runDir -PassThru
@@ -92,7 +93,7 @@ for ($r = 1; $r -le $Runs; $r++) {
             }
             Write-Host (" exit {0} after {1:N0} s" -f $p.ExitCode, ((Get-Date) - $t0).TotalSeconds)
             if ($p.ExitCode -ne 0) { Write-Warning "the route did not pass: look at the 'tt' lines in $log and the screenshots in $shots" }
-            $logs[$v] += $log
+            if (Test-Path $log) { $logs[$v] += $log } else { Write-Warning "no log at $log" }
         } finally {
             foreach ($kv in $saved.GetEnumerator()) { [Environment]::SetEnvironmentVariable($kv.Key, $kv.Value) }
         }
