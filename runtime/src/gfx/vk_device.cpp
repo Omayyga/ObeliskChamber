@@ -1031,7 +1031,11 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         q.intel_integrated = q.intel && props_.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
         q.budget_detail = quirk_key("budget_detail", q.intel);
         q.pressure_detail = quirk_key("pressure_detail", q.intel) && x_membudget;   // needs the OS's figures, not VMA's estimate
+        q.intel_compat = quirk_key("intel_compat", q.intel);
         g_quirks = q;
+        if (q.intel_compat)
+            NXLOG_I(kTag, "GPU quirks: [gfx] intel_compat on: lean_draws, residency, batch_ubo_updates, feedback_levels and depth_ro_sticky "
+                          "default to off, dispatch_barriers and game_barriers to full (keys set in the ini still win)");
         VmaBudget b[VK_MAX_MEMORY_HEAPS] = {};
         vmaGetHeapBudgets(vma_, b);
         const double budget_gib = static_cast<double>(b[device_local_heap(vma_)].budget) / (1024.0 * 1024.0 * 1024.0);
