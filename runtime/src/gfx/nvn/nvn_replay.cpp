@@ -418,8 +418,11 @@ struct RStats {
     uint64_t draws = 0, draws_desc = 0, draws_ubo = 0, draws_pipe = 0, sets = 0, set_hits = 0, set_writes = 0, res_tex = 0, res_img = 0, res_memo = 0;
     uint64_t binds = 0, binds_same = 0, layouts = 0, keys = 0, dispatches = 0;
     uint64_t miss_first = 0, miss_uboofs = 0, miss_ubo = 0, miss_tex = 0, miss_other = 0;   // set cache misses by what differs from the last set of that layout
+    uint64_t out_fast = 0, out_full_all = 0, out_full_gen = 0, out_full_unmemo = 0, out_prog = 0, out_prog_marked = 0;   // out_draw_bindings passes
 };
 RStats g_rs;
+int g_out_prog = -1;   // [nvn] out_prog_dirty, read once; [nvn] out_prog_ab flips it every stats window
+extern bool g_out_all;
 uint64_t g_rs_t = 0;   // TSC at the last phase mark
 // [nvn] rt_check = 1 (debug, default 0): every memo answer of the rt changes (resolve_memo, out_memo; pool_cache in nvn_objects.cpp, the
 // view and sampler caches in nvn_gpu_texture.cpp) is compared with the answer computed without it. A mismatch is logged (nvn.rtcheck,
@@ -490,6 +493,14 @@ void rs_report() {
             static_cast<double>(g_lean_push_full) * pf, static_cast<double>(g_lean_push_delta) * pf, static_cast<double>(g_lean_push_none) * pf,
             static_cast<double>(g_lean_push_writes) * pf);
     g_lean_push_full = g_lean_push_delta = g_lean_push_none = g_lean_push_writes = 0;
+    NXLOG_I("nvn.rstats", "out_prog_dirty %d: out passes/frame: short %.0f, full %.0f (program bind or reset %.0f, generation %.0f, unmemoised %.0f) | "
+            "program binds/frame %.0f, slots marked by them %.0f",
+            g_out_prog, s.out_fast * pf, static_cast<double>(s.out_full_all + s.out_full_gen + s.out_full_unmemo) * pf, s.out_full_all * pf,
+            s.out_full_gen * pf, s.out_full_unmemo * pf, s.out_prog * pf, s.out_prog_marked * pf);
+    {   // [nvn] out_prog_ab: the next window runs out_prog_dirty (and out_memo_held) the other way; a full pass makes the switch safe
+        static const bool ab = nxrt::config_get_int("nvn", "out_prog_ab", 0) > 0;
+        if (ab && g_out_prog >= 0) { g_out_prog = !g_out_prog; g_out_all = true; }
+    }
     {   // [nvn] lean_ab: the next window runs the other way (replay_begin_submit keeps the setting otherwise)
         static const bool ab = nxrt::config_get_int("nvn", "lean_ab", 0) > 0;
         if (ab) g_lean = !g_lean;
@@ -925,6 +936,7 @@ struct TexResolved {
     bool has_view = false;
     SamplerInfo smp;
     bool has_sampler = false;
+    bool sid0 = false;    // the handle's sampler id is 0: a texel-fetch handle (reserved_sampler)
 };
 
 // The scale nxrt/gfx_tuning.h asks for on uniform block `idx` of this binding's shader (1 = none): only the chosen fragment shader's block.
@@ -985,7 +997,7 @@ ResMemo* memo_for(const BindingDesc& d) {
 TexResolved resolve_texture_raw(const BindingDesc& d);
 TexResolved resolve_image_raw(const BindingDesc& d);
 bool same_resolved(const TexResolved& a, const TexResolved& b) {
-    if (a.tex != b.tex || a.has_view != b.has_view || a.has_sampler != b.has_sampler) return false;
+    if (a.tex != b.tex || a.has_view != b.has_view || a.has_sampler != b.has_sampler || a.sid0 != b.sid0) return false;
     if (a.has_sampler && !(a.smp == b.smp)) return false;
     if (!a.has_view) return true;
     const TextureViewInfo& x = a.view; const TextureViewInfo& y = b.view;
@@ -1037,6 +1049,11 @@ const TexResolved& resolve_image_ref(const BindingDesc& d, TexResolved& tmp) {
     return m->i;
 }
 
+bool reserved_sampler_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "reserved_sampler", true);
+    return on;
+}
+
 TexResolved resolve_texture_raw(const BindingDesc& d) {
     ++g_rs.res_tex;
     TexResolved r;
@@ -1052,6 +1069,7 @@ TexResolved resolve_texture_raw(const BindingDesc& d) {
         if (idx >= 0 && idx < 16) handle = S.img[d.nvn_stage][idx];
     }
     const uint32_t tid = handle_texture_id(handle), sid = handle_sampler_id(handle);
+    r.sid0 = sid == 0;
     if (S.tpool && static_cast<int>(tid) < S.tpool->count) {
         std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
         const TexturePool::Entry& e = S.tpool->entries[tid];
@@ -1734,7 +1752,51 @@ bool out_memo_on() {
     return on;
 }
 struct OutSlot { uint64_t addr = 0, size = 0, gen = ~0ull; };
-OutSlot g_out_slot[16 + kCompute * 32 + 4];
+constexpr int kOutSlots = 16 + kCompute * 32 + 4;   // vertex 16, then per graphics stage 16 uniform + 16 storage, then transform feedback 4
+OutSlot g_out_slot[kOutSlots];
+// [nvn] out_memo_dirty (default on): on top of the memo, a draw looks only at the slots a BindBuffers changed since the last check, while
+// out_gen() is the same and no slot was left unmemoised; a reset or a generation change checks every bound slot as before. A memoised slot
+// was clear at this generation and stays clear until its binding moves. Technique from EmblemWeave's perf branch (Stephen Jayakar,
+// 0c04e18): the full pass was 1.1 us a draw there, mostly confirming unchanged slots.
+bool g_out_all = true;                 // the next check visits every bound slot
+uint64_t g_out_last_gen = ~0ull;       // out_gen() at the last check
+bool g_out_unmemo = false;             // a bound slot ended unmemoised (its range shares a page with a held result)
+uint8_t g_out_dirty[kOutSlots] = {};
+uint16_t g_out_dirty_list[kOutSlots];
+int g_out_dirty_n = 0;
+bool out_memo_dirty_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "out_memo_dirty", true);
+    return on;
+}
+// [nvn] out_prog_dirty (default on, with out_memo_dirty): a program bind marks only the bound slots of a graphics stage that becomes active
+// (the short path skipped them while it was inactive), instead of making the next draw check every slot: a slot's answer depends on its
+// binding and out_gen() only. Technique from EmblemWeave (moistman7, ed40ace).
+bool out_prog_dirty_on() {
+    if (g_out_prog < 0) g_out_prog = nxrt::config_get_bool("nvn", "out_prog_dirty", true) ? 1 : 0;
+    return g_out_prog != 0;
+}
+// [nvn] out_memo_held (default on, needs out_prog_dirty): the bound slots left unmemoised are listed, and the next draw at the same
+// generation checks those and the changed slots instead of every bound slot. Each of the two alone only moves the full checks to the other
+// cause (ed40ace: 99.8 % of the plaza's draws took the short path with both, replay 9.9 -> 9.55 ms a frame at ~3,000 draws).
+bool out_memo_held_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "out_memo_held", true);
+    return on && out_prog_dirty_on();
+}
+uint16_t g_out_held_list[kOutSlots];   // the unmemoised bound slots of the last check (complete while g_out_held_ok)
+int g_out_held_n = 0;
+bool g_out_held_ok = false;
+inline void out_held_note(int idx, const OutSlot& m, uint64_t addr) {
+    if (addr && m.gen == ~0ull && g_out_held_n < kOutSlots) g_out_held_list[g_out_held_n++] = static_cast<uint16_t>(idx);
+}
+void out_slot_changed(int idx) {
+    if (idx < 0 || idx >= kOutSlots || g_out_dirty[idx]) return;
+    g_out_dirty[idx] = 1;
+    g_out_dirty_list[g_out_dirty_n++] = static_cast<uint16_t>(idx);
+}
+void out_dirty_clear() {
+    for (int i = 0; i < g_out_dirty_n; ++i) g_out_dirty[g_out_dirty_list[i]] = 0;
+    g_out_dirty_n = 0;
+}
 void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why, uint64_t gen) {
     if (!b.addr) return;
     if (m.gen != ~0ull && m.addr == b.addr && m.size == b.size &&
@@ -1753,12 +1815,72 @@ void out_draw_read_slot(OutSlot& m, const GState::Bind& b, bool copy_ok, int why
     out_draw_read(b.addr, b.size, copy_ok, why);
 }
 
+// The binding of slot idx (the order of g_out_slot), or null when its stage is inactive (the draw doesn't read it).
+const GState::Bind* out_slot_bind(int idx, VkDeviceSize ua, bool* copy_ok, int* why) {
+    if (idx < 16) { *copy_ok = true; *why = kOutDrawBuffer; return &S.vtx[idx]; }
+    if (idx < 16 + kCompute * 32) {
+        const int st = (idx - 16) / 32, j = (idx - 16) % 32;
+        if (!S.stage[st]) return nullptr;
+        if (j < 16) { const GState::Bind* b = &S.ubo[st][j]; *copy_ok = ua && (b->addr % ua) == 0; *why = kOutDrawBuffer; return b; }
+        *copy_ok = true; *why = kOutStorageXfb; return &S.ssbo[st][j - 16];
+    }
+    *copy_ok = false; *why = kOutStorageXfb; return &S.xfb[idx - 16 - kCompute * 32];
+}
+// One slot by index, as the full pass checks it.
+void out_check_slot(int idx, uint64_t gen, VkDeviceSize ua) {
+    bool copy_ok; int why;
+    const GState::Bind* b = out_slot_bind(idx, ua, &copy_ok, &why);
+    if (!b) return;
+    OutSlot& m = g_out_slot[idx];
+    out_draw_read_slot(m, *b, copy_ok, why, gen);
+    if (b->addr && m.gen == ~0ull) { g_out_unmemo = true; out_held_note(idx, m, b->addr); }
+}
+// One bound slot in the full pass: the memo, then the held list.
+inline void out_full_slot(int idx, const GState::Bind& b, bool copy_ok, int why, uint64_t gen) {
+    OutSlot& m = g_out_slot[idx];
+    out_draw_read_slot(m, b, copy_ok, why, gen);
+    if (b.addr && m.gen == ~0ull) { g_out_unmemo = true; out_held_note(idx, m, b.addr); }
+}
+
 // The reads of a draw's bound buffers (out_before_op).
 void out_draw_bindings() {
     if (out_memo_on()) {
         const uint64_t gen = out_gen();
         const VkDeviceSize ua = device().properties().limits.minUniformBufferOffsetAlignment;
-        OutSlot* m = g_out_slot;
+        const bool held_path = out_memo_held_on() && g_out_held_ok;
+        const bool fast = out_memo_dirty_on() && !g_out_all && (!g_out_unmemo || held_path) && gen == g_out_last_gen;
+        if (rs_on()) {
+            if (fast) ++g_rs.out_fast;
+            else if (g_out_all) ++g_rs.out_full_all;
+            else if (gen != g_out_last_gen) ++g_rs.out_full_gen;
+            else ++g_rs.out_full_unmemo;
+        }
+        if (fast) {
+            // the changed slots, and the slots left unmemoised at the last check (out_memo_held); the held list is made again
+            uint16_t prev[kOutSlots];
+            const int pn = g_out_unmemo ? g_out_held_n : 0;
+            if (pn) std::memcpy(prev, g_out_held_list, static_cast<size_t>(pn) * sizeof prev[0]);
+            g_out_held_n = 0;
+            g_out_unmemo = false;
+            for (int i = 0; i < g_out_dirty_n; ++i) out_check_slot(g_out_dirty_list[i], gen, ua);
+            for (int i = 0; i < pn; ++i) if (!g_out_dirty[prev[i]]) out_check_slot(prev[i], gen, ua);
+            if (rt_check()) {   // [nvn] rt_check: a slot the short path skipped has nothing held in its range
+                uint8_t was_held[kOutSlots] = {};
+                for (int i = 0; i < pn; ++i) was_held[prev[i]] = 1;
+                for (int idx = 0; idx < kOutSlots; ++idx) {
+                    if (g_out_dirty[idx] || was_held[idx]) continue;
+                    bool c; int w;
+                    const GState::Bind* b = out_slot_bind(idx, ua, &c, &w);
+                    if (b && b->addr) chk(!out_overlaps(b->addr, b->size ? b->size : 65536), "out memo dirty");
+                }
+            }
+            out_dirty_clear();
+            if (out_gen() != gen) g_out_all = true;   // a flush in it moved the generation
+            g_out_held_ok = true;
+            return;
+        }
+        g_out_unmemo = false;
+        g_out_held_n = 0;
         if (lean_on()) {   // only the bound slots, by the masks the BindBuffers op keeps: an unbound slot does nothing below either
             if (rt_check()) {
                 uint32_t v = 0;
@@ -1770,31 +1892,35 @@ void out_draw_bindings() {
                 chk(ok, "bound-slot masks");
             }
             for (uint32_t bm = g_bm_vtx; bm; bm &= bm - 1) {
-                const uint32_t k = static_cast<uint32_t>(std::countr_zero(bm));
-                out_draw_read_slot(m[k], S.vtx[k], true, kOutDrawBuffer, gen);
+                const int k = std::countr_zero(bm);
+                out_full_slot(k, S.vtx[k], true, kOutDrawBuffer, gen);
             }
-            m += 16;
-            for (int st = 0; st < kCompute; ++st, m += 32) {
+            for (int st = 0; st < kCompute; ++st) {
                 if (!S.stage[st]) continue;
+                const int base = 16 + st * 32;
                 for (uint32_t bm = g_bm_ubo[st]; bm; bm &= bm - 1) {
-                    const uint32_t k = static_cast<uint32_t>(std::countr_zero(bm));
-                    out_draw_read_slot(m[k], S.ubo[st][k], ua && (S.ubo[st][k].addr % ua) == 0, kOutDrawBuffer, gen);
+                    const int k = std::countr_zero(bm);
+                    out_full_slot(base + k, S.ubo[st][k], ua && (S.ubo[st][k].addr % ua) == 0, kOutDrawBuffer, gen);
                 }
                 for (uint32_t bm = g_bm_ssbo[st]; bm; bm &= bm - 1) {
-                    const uint32_t k = static_cast<uint32_t>(std::countr_zero(bm));
-                    out_draw_read_slot(m[16 + k], S.ssbo[st][k], true, kOutStorageXfb, gen);
+                    const int k = std::countr_zero(bm);
+                    out_full_slot(base + 16 + k, S.ssbo[st][k], true, kOutStorageXfb, gen);
                 }
             }
-            for (const GState::Bind& b : S.xfb) out_draw_read_slot(*m++, b, false, kOutStorageXfb, gen);
-            return;
+        } else {
+            for (int k = 0; k < 16; ++k) out_full_slot(k, S.vtx[k], true, kOutDrawBuffer, gen);
+            for (int st = 0; st < kCompute; ++st) {
+                if (!S.stage[st]) continue;
+                const int base = 16 + st * 32;
+                for (int k = 0; k < 16; ++k) out_full_slot(base + k, S.ubo[st][k], ua && (S.ubo[st][k].addr % ua) == 0, kOutDrawBuffer, gen);
+                for (int k = 0; k < 16; ++k) out_full_slot(base + 16 + k, S.ssbo[st][k], true, kOutStorageXfb, gen);
+            }
         }
-        for (const GState::Bind& b : S.vtx) out_draw_read_slot(*m++, b, true, kOutDrawBuffer, gen);
-        for (int st = 0; st < kCompute; ++st) {
-            if (!S.stage[st]) { m += 32; continue; }
-            for (const GState::Bind& b : S.ubo[st]) out_draw_read_slot(*m++, b, ua && (b.addr % ua) == 0, kOutDrawBuffer, gen);
-            for (const GState::Bind& b : S.ssbo[st]) out_draw_read_slot(*m++, b, true, kOutStorageXfb, gen);
-        }
-        for (const GState::Bind& b : S.xfb) out_draw_read_slot(*m++, b, false, kOutStorageXfb, gen);
+        for (int k = 0; k < 4; ++k) out_full_slot(16 + kCompute * 32 + k, S.xfb[k], false, kOutStorageXfb, gen);
+        g_out_held_ok = true;              // the pass saw every bound slot
+        g_out_last_gen = out_gen();        // after the pass: a flush in it may have moved the generation
+        g_out_all = g_out_last_gen != gen;
+        out_dirty_clear();
         return;
     }
     for (const GState::Bind& b : S.vtx) out_draw_read(b.addr, b.size, true, kOutDrawBuffer);
@@ -2330,6 +2456,12 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     static const bool int_nearest = nxrt::config_get_bool("nvn", "int_view_nearest", true);
                     const bool int_view = int_comp || (int_nearest && component >= 2);
                     if (r.has_sampler) ii.sampler = sampler_for(int_view ? unfiltered(r.smp) : r.smp);
+                    // [nvn] reserved_sampler (default on): a texel-fetch handle (sampler id 0, the driver's reserved range) sampled with filtering
+                    // gets the linear reserved sampler, as on the console; integer and depth textures keep the nearest dummy. Technique from
+                    // EmblemWeave (moistman7, ba21f5b): the sky's cloud texture was drawn as blocks of 7 to 9 pixels.
+                    else if (r.sid0 && component == 1 && !int_view && !(tex_aspect(r.tex) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+                             reserved_sampler_on())
+                        ii.sampler = reserved_sampler();
                     if (r.tex == g_su_tex && g_su_view) {            // the upscaled scene replaces the small one for this draw (S14)
                         ii.imageView = g_su_view;
                         ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -5102,6 +5234,18 @@ void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size, bool ba
 
 // ---- the interpreter ----------------------------------------------------------------------------------------------------------
 void apply_bind_program(const P_BindProgram& p) {
+    if (rs_on()) ++g_rs.out_prog;
+    if (out_prog_dirty_on() && out_memo_dirty_on()) {   // [nvn] out_prog_dirty: the bound slots of a graphics stage that becomes active
+        for (int st = 0; st < kCompute; ++st) {
+            if (!(p.stages & (1u << st)) || S.stage[st] || !p.program || !p.program->stage[st]) continue;
+            const int base = 16 + st * 32;
+            for (uint32_t bm = g_bm_ubo[st]; bm; bm &= bm - 1) out_slot_changed(base + std::countr_zero(bm));
+            for (uint32_t bm = g_bm_ssbo[st]; bm; bm &= bm - 1) out_slot_changed(base + 16 + std::countr_zero(bm));
+            if (rs_on()) g_rs.out_prog_marked += static_cast<uint64_t>(std::popcount(g_bm_ubo[st]) + std::popcount(g_bm_ssbo[st]));
+        }
+    } else {
+        g_out_all = true;   // out_draw_bindings: the active stages may change
+    }
     for (int st = 0; st < 6; ++st)
         if (p.stages & (1u << st)) S.stage[st] = p.program ? p.program->stage[st] : nullptr;
     if (g_trace && (p.stages & (1u << kCompute))) {
@@ -5296,10 +5440,23 @@ void run_list(const CmdList& list, int depth) {
                 for (uint32_t i = 0; i < p.count; ++i) {
                     const uint32_t k = p.first + i;
                     const uint32_t bit = 1u << (k & 15), set = rg[i].address ? bit : 0u;   // the bound-slot masks ([nvn] lean_draws)
-                    if (p.kind == kBufVertex && k < 16) { S.vtx[k] = {rg[i].address, rg[i].size}; g_bm_vtx = (g_bm_vtx & ~bit) | set; }
-                    else if (p.kind == kBufUniform && p.stage < 6 && k < 16) { S.ubo[p.stage][k] = {rg[i].address, rg[i].size}; g_bm_ubo[p.stage] = (g_bm_ubo[p.stage] & ~bit) | set; }
-                    else if (p.kind == kBufStorage && p.stage < 6 && k < 16) { S.ssbo[p.stage][k] = {rg[i].address, rg[i].size}; g_bm_ssbo[p.stage] = (g_bm_ssbo[p.stage] & ~bit) | set; }
-                    else if (p.kind == kBufXfb && k < 4) S.xfb[k] = {rg[i].address, rg[i].size};
+                    // out_slot_changed: the slot's place in g_out_slot ([nvn] out_memo_dirty; compute slots aren't checked for draws)
+                    if (p.kind == kBufVertex && k < 16) {
+                        S.vtx[k] = {rg[i].address, rg[i].size};
+                        g_bm_vtx = (g_bm_vtx & ~bit) | set;
+                        out_slot_changed(static_cast<int>(k));
+                    } else if (p.kind == kBufUniform && p.stage < 6 && k < 16) {
+                        S.ubo[p.stage][k] = {rg[i].address, rg[i].size};
+                        g_bm_ubo[p.stage] = (g_bm_ubo[p.stage] & ~bit) | set;
+                        if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + static_cast<int>(k));
+                    } else if (p.kind == kBufStorage && p.stage < 6 && k < 16) {
+                        S.ssbo[p.stage][k] = {rg[i].address, rg[i].size};
+                        g_bm_ssbo[p.stage] = (g_bm_ssbo[p.stage] & ~bit) | set;
+                        if (p.stage < kCompute) out_slot_changed(16 + static_cast<int>(p.stage) * 32 + 16 + static_cast<int>(k));
+                    } else if (p.kind == kBufXfb && k < 4) {
+                        S.xfb[k] = {rg[i].address, rg[i].size};
+                        out_slot_changed(16 + kCompute * 32 + static_cast<int>(k));
+                    }
                 }
                 break;
             }
@@ -6021,6 +6178,8 @@ void replay_shutdown() {
     g_pl = nullptr;                // the layouts are gone with the pipelines
     for (LayoutCacheSlot& sl : g_layout_cache) sl = LayoutCacheSlot();
     S = GState();
+    g_out_all = true;              // out_draw_bindings: every slot again
+    out_dirty_clear();
     raw_binds_reset();
     P = Pass();
     g_pending.clear();
