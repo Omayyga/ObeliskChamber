@@ -160,3 +160,6 @@ lifted game code on the players' side is unchanged (Set up compiles it with the 
   release-style game folder, never for a release.
 - Afterwards set `NX_RT_FLAGS=` again before other builds: the variable applies to every `build_fefw.ps1` run.
 - A runtime change since the profile only costs the changed functions their profile data. Record again when much of the render code changed.
+- A new profile written over the old file recompiles the whole runtime: the configure hashes the file (`fefw: runtime profile ... (id ...)`).
+  Before that, only changed sources were rebuilt, and ThinLTO stopped at the link with `linking module flags 'ProfileSummary': IDs have
+  conflicting values`. A build folder from before this change needs one clean rebuild (delete `build\rtdll`).
