@@ -33,9 +33,10 @@ $tgt = if ($Target -eq "fefw_obj") { "CMakeFiles/fefw.dir/src/fefw_main.cpp.obj"
 cmd /c "call `"$env_cmd`" && $cfg && cmake --build `"$bd`" --target $tgt -j $Jobs"
 $code = $LASTEXITCODE
 if ($code -ne 0) { exit $code }
-$main_sites = Join-Path $LibDir "main.sites"
-$exe_sites = Join-Path $bd "ObeliskChamber.sites"
-if ((Test-Path $main_sites) -and (Test-Path $bd)) {
-    Copy-Item -Path $main_sites -Destination $exe_sites -Force
+# ObeliskChamber.exe only: the site list its libraries were lifted with goes next to it (the CMake POST_BUILD copy exists only when main.sites
+# was there at configure time). Other targets (fefw_rt, fefw_obj) get no copy.
+if ($Target -eq "fefw") {
+    $main_sites = Join-Path $LibDir "main.sites"
+    if (Test-Path $main_sites) { Copy-Item -Path $main_sites -Destination (Join-Path $bd "ObeliskChamber.sites") -Force }
 }
 exit 0

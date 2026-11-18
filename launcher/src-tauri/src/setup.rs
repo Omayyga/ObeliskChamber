@@ -967,18 +967,8 @@ fn run_steps(r: &Runner, p: &Paths, jobs: usize) -> Result<bool, String> {
     }
     if !exe_ok(p) {
         let mut c = Command::new(powershell());
-        let lib_dir = p.libs();
-        c.args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            "game-build\\scripts\\build_fefw.ps1",
-            "-Jobs",
-            &jobs.to_string(),
-            "-LibDir",
-            lib_dir.to_str().unwrap(),
-        ]);
+        c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "game-build\\scripts\\build_fefw.ps1", "-Jobs", &jobs.to_string(), "-LibDir"])
+            .arg(p.libs());   // an OsStr argument: any folder name works
         if !r.run("exe", "Building ObeliskChamber.exe", c, repo)? {
             return Ok(false);
         }
