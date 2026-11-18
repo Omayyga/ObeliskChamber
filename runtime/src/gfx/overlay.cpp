@@ -207,6 +207,7 @@ struct Overlay::Impl {
     uint64_t menu_prev = 0;               // the buttons at the last poll
     uint64_t menu_mask = 0;               // held back from the game until released (the press that opened or closed the menu)
     std::atomic<bool> hold_on_hide{false};   // the overlay was hidden: what is held at the next poll stays away from the game
+    std::atomic<float> menu_rx{0.f}, menu_ry{0.f};   // the right stick at the last poll (menu_right_stick)
     uint64_t menu_stick = 0;              // d-pad bits the left stick pressed at the last poll
 
     // menu state applied by apply_pending()
@@ -899,7 +900,14 @@ void Overlay::set_menu(std::function<void()> fn) { impl_->menu = std::move(fn); 
 void Overlay::request_hide() { impl_->want_hide.store(true); }
 const Overlay::Context& Overlay::context() const { return impl_->ctx; }
 
-uint64_t Overlay::set_menu_pad(uint64_t b, int lx, int ly) {
+void Overlay::menu_right_stick(float* x, float* y) const {
+    *x = impl_->visible ? impl_->menu_rx.load(std::memory_order_relaxed) : 0.f;
+    *y = impl_->visible ? impl_->menu_ry.load(std::memory_order_relaxed) : 0.f;
+}
+
+uint64_t Overlay::set_menu_pad(uint64_t b, int lx, int ly, int rx, int ry) {
+    impl_->menu_rx.store(static_cast<float>(rx) / 32767.f, std::memory_order_relaxed);
+    impl_->menu_ry.store(static_cast<float>(ry) / 32767.f, std::memory_order_relaxed);
     Impl& s = *impl_;
     if (s.kb_poll()) {               // the on-screen keyboard has the pad (set_keyboard_pad)
         s.menu_prev = b;

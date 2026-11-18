@@ -762,7 +762,7 @@ void poll_pads(uint64_t now) {
         st.overlay->set_keyboard_abxy(st.settings.pad.label_abxy);
         pf.buttons &= ~st.overlay->set_keyboard_pad(pf.buttons, pf.left.x, pf.left.y);
         // the menu's pad chord and its gamepad navigation; the press that opens or closes it stays away from the game until released
-        pf.buttons &= ~st.overlay->set_menu_pad(pf.buttons, pf.left.x, pf.left.y);
+        pf.buttons &= ~st.overlay->set_menu_pad(pf.buttons, pf.left.x, pf.left.y, pf.right.x, pf.right.y);
     }
     // The settings menu or the on-screen keyboard is open: the pad does not reach the game (the keyboard and mouse are held back the same way in
     // handle_event).

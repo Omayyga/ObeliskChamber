@@ -1786,23 +1786,40 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         }
     }
 
+    // The game stays as it is behind the window (no dimming): the picture settings (HDR, filters) are judged while the menu is open. The
+    // window can be moved: dragged with the mouse, or with the right stick; it keeps its place while the game runs (centred at first, and
+    // again when a new window size leaves less than kKeep of it on screen).
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 130));
     const float w = std::min(disp.x - px(32), std::max(px(720), std::min(px(1180), disp.x * 0.86f)));
     const float h = std::min(disp.y - px(32), std::max(px(480), std::min(px(860), disp.y * 0.88f)));
-    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    static ImVec2 pos(-1.f, -1.f);    // the window's top left corner at the last frame (-1: not shown yet)
+    const float keep = px(120);       // this much of the window stays on screen
+    if (pos.x < 0 && pos.y < 0) pos = ImVec2((disp.x - w) * 0.5f, (disp.y - h) * 0.5f);
+    {
+        float rx = 0.f, ry = 0.f;
+        ov.menu_right_stick(&rx, &ry);
+        auto curve = [](float v) { const float a = std::fabs(v); return a < 0.2f ? 0.f : (v < 0 ? -1.f : 1.f) * (a - 0.2f) / 0.8f * (a - 0.2f) / 0.8f; };
+        const float speed = px(1400) * ImGui::GetIO().DeltaTime;   // pixels a frame at full tilt
+        pos.x += curve(rx) * speed;
+        pos.y -= curve(ry) * speed;   // stick up = +, the screen's y goes down
+    }
+    pos.x = std::clamp(pos.x, keep - w, disp.x - keep);
+    pos.y = std::clamp(pos.y, 0.f, disp.y - keep);
+    ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
     if (opened) ImGui::SetNextWindowFocus();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, px(10));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(5));
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(px(8), px(4)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(px(18), px(14)));
-    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::Begin("##fefw_menu", nullptr, wf)) {
+    const ImGuiWindowFlags wf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings;   // movable: dragged by any empty spot
+    const bool shown = ImGui::Begin("##fefw_menu", nullptr, wf);
+    pos = ImGui::GetWindowPos();      // a mouse drag this frame moved it
+    if (shown) {
         ImGui::TextColored(kAccent, "%s", tr("Fire Emblem: Fortune's Weave"));
         ImGui::SameLine();
         ImGui::TextDisabled("%s", tr(" settings"));
-        const char* hint = "L / R tabs   A select   B close";
+        const char* hint = "L / R tabs   A select   B close   right stick or drag: move";
         ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(hint).x);
         ImGui::TextDisabled("%s", tr(hint));
 

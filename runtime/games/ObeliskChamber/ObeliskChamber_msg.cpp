@@ -6,8 +6,8 @@
 // ("MID_Restart_ReturnTitle_Confirm"); a label no file has shows as nothing. As the RomFS is laid out (services/mods_dll.cpp
 // add_runtime_edit), each language's Msg/<language>/System.msbt.zst (zstd; the file with the dialogs' own "MID_Sys_Yes") gets our labels
 // too: a message in TXT2, a label in LBL1 (the label hash table is laid out again), and a copy of MID_Sys_Yes's attributes (ATR1) and
-// style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. Another section (AOCM in this game) that holds one entry a
-// message gets MID_Sys_Yes's again; otherwise it is copied as it is (logged). A file with an ATR1 string area after its records, or a label
+// style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. Another section (AOCM in this game: a 16-bit count, then a byte
+// a message) that holds one entry a message gets MID_Sys_Yes's again; otherwise it is copied as it is (logged). A file with an ATR1 string area after its records, or a label
 // table with another hash, is left as it is, and our dialog then falls back to the overlay's prompt.
 #include "ObeliskChamber_game.h"
 
@@ -294,6 +294,13 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
                 d.b.insert(d.b.end(), p + s.at + 4, p + s.at + s.size);
                 for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + 4 + anchor * stride, p + s.at + 4 + (anchor + 1) * stride);
                 if (notes) *notes += std::string(" ") + s.magic + ": a count and " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+            } else if (s.size >= 2 && r.u16(s.at) == msgs && (s.size - 2) % msgs == 0 && (s.size - 2) / msgs >= 1 && (s.size - 2) / msgs <= 64) {
+                // a 16-bit count first (Fortune's Weave's AOCM: 1148 messages, one byte each)
+                const size_t stride = (s.size - 2) / msgs;
+                d.u16(static_cast<uint16_t>(msgs + add));
+                d.b.insert(d.b.end(), p + s.at + 2, p + s.at + s.size);
+                for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + 2 + anchor * stride, p + s.at + 2 + (anchor + 1) * stride);
+                if (notes) *notes += std::string(" ") + s.magic + ": a 16-bit count and " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
             } else if (s.size % msgs == 0 && s.size / msgs >= 1 && s.size / msgs <= 64) {
                 const size_t stride = s.size / msgs;
                 d.b.assign(p + s.at, p + s.at + s.size);
