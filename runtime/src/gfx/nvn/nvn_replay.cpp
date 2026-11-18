@@ -1499,10 +1499,12 @@ void prepare_textures(const ProgLayout& pl) {
     // on screen for its finished result ([nvn] pool_swap_budget, default on), bound or pool: the image already holds valid (approximate) data,
     // so a swap can wait a frame anywhere; at a load-in a thousand results land within a second or two and their copies piled into one frame.
     static const bool swap_budget = config_get_bool("nvn", "pool_swap_budget", true);
-    // [nvn] bound_upload_defer (default on): while a backlog streams in (burst), first uploads of asset textures a draw binds itself wait too;
+    // [nvn] bound_upload_defer (default off since PR #105): while a backlog streams in (burst), first uploads of asset textures a draw binds itself wait too;
     // the draw samples the dummy texture until theirs is in (descriptor resolution below). A load-in's first frame still made 583 uploads, most
     // of them bound, in 582 ms (s2-default). Outside a burst bound textures always go at once.
-    static const bool bound_defer = config_get_bool("nvn", "bound_upload_defer", true);
+    // Off by default: the dummy is black, and models showed black for a split second after every load-in on the user's PC. With it off,
+    // that load-in frame took 436 ms instead of 193 + 283 ms over two frames, under the game's fade, and nothing showed black.
+    static const bool bound_defer = config_get_bool("nvn", "bound_upload_defer", false);
     // more than pool_upload_burst_firsts first uploads needed by this frame's draws so far (the first frame after a loading screen, spread
     // over many draws) start the burst at once; s3-default's load-in frame still made 576 uploads with a per-draw count
     // [nvn] pool_upload_burst_firsts (default 256): the threshold of this count. 64 also fired while walking into a cold street (s4-default:
