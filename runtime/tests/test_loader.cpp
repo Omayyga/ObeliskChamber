@@ -163,7 +163,8 @@ NXTEST(call_through_got_runs_host_code) {
     reg(&c, 1) = 2;
     dispatch_call(&c, peek64(m->base() + kGotAdd));       // the PLT slot the lifted code would call through
     CHECK_EQ(reg(&c, 0), 42u);
-    CHECK_EQ(hle_calls(hle_address("hle_add")), 1u);
+    // an implemented function's calls are counted only with [hle] count_calls = true (dispatch.cpp: a statistic, and a shared cache line)
+    CHECK_EQ(hle_calls(hle_address("hle_add")), 0u);
     reg(&c, 0) = 99;
     dispatch_call(&c, peek64(m->base() + kGotMul));       // logging stub: returns 0 and counts
     CHECK_EQ(reg(&c, 0), 0u);

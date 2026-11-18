@@ -82,6 +82,8 @@ NXTEST(headless_screenshot_matches_the_reference) {
     if (!load_png_rgba(kRefPath, &ref, &rw, &rh)) { CHECK_MSG(false, "reference image missing: run once with NXRT_GFX_UPDATE_REF=1"); return; }
     const ImageDiff df = compare_rgba(px.data(), w, h, ref.data(), rw, rh);
     std::printf("    vs reference: mean abs %.5f, max %d, fraction over 8: %.6f\n", df.mean_abs, df.max_abs, df.fraction_over_8);
+    if (df.mean_abs > kMeanAbsTolerance && save_png_rgba("scene_headless_capture.png", px.data(), w, h))
+        std::printf("    this run's picture: scene_headless_capture.png (in the test's working folder), to compare with %s\n", kRefPath.c_str());
     CHECK(df.same_size);
     CHECK(df.mean_abs <= kMeanAbsTolerance);
     CHECK(df.max_abs <= kMaxAbsTolerance);
@@ -166,7 +168,9 @@ NXTEST(overlay_shows_through_the_key_and_changes_the_picture) {
     CHECK_EQ(r.validation.warnings, 0ull);
     const ImageDiff df = compare_rgba(plain.data(), w, h, with_overlay.data(), w, h);
     std::printf("    overlay vs plain: mean abs %.4f, pixels over 8: %.4f\n", df.mean_abs, df.fraction_over_8);
-    CHECK(df.fraction_over_8 > 0.05);   // the menu covers a good part of the 640x360 picture
+    // the overlay's first-use layout is the folded Diagnostics window at the top right (overlay.cpp build_ui): its title bar, about
+    // 420 x 22 of the 640 x 360 picture (4 percent; measured 0.0399 on an RTX 3090 Ti)
+    CHECK(df.fraction_over_8 > 0.02);
 
     // overlay created but never shown: the picture is the plain one
     d.overlay_visible_from_frame = -1;

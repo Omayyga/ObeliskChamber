@@ -241,6 +241,16 @@ Diff diff_rgb(const std::vector<uint8_t>& got, const std::vector<uint8_t>& want)
     return d;
 }
 
+// A few pixels of a picture that does not match, got against want (RGB): the corners, the centre and a row across the middle, so the
+// log shows what kind of difference it is (channel order, orientation, a colour curve).
+void print_samples(const std::vector<uint8_t>& got, const std::vector<uint8_t>& want, uint32_t w, uint32_t h) {
+    const uint32_t pts[][2] = {{0, 0}, {1, 0}, {w - 1, 0}, {0, h - 1}, {w - 1, h - 1}, {w / 2, h / 2}, {w / 4, h / 2}, {3 * w / 4, h / 2}};
+    for (const auto& p : pts) {
+        const size_t i = (static_cast<size_t>(p[1]) * w + p[0]) * 4;
+        std::printf("      (%u,%u) got %3u %3u %3u  want %3u %3u %3u\n", p[0], p[1], got[i], got[i + 1], got[i + 2], want[i], want[i + 1], want[i + 2]);
+    }
+}
+
 // Renders one case, compares it with the CPU expectation and reports the numbers.
 void check_case(Rig& r, const char* what, uint32_t dw, uint32_t dh, const int32_t* crop, bool keep_aspect, bool want_nearest, bool exact) {
     const std::vector<uint8_t> src = source_pattern();
@@ -255,6 +265,7 @@ void check_case(Rig& r, const char* what, uint32_t dw, uint32_t dh, const int32_
     REQUIRE(got.size() == want.size());
     const Diff d = diff_rgb(got, want);
     std::printf("    %s (%ux%u, %s): max abs %d, mean abs %.4f\n", what, dw, dh, nearest ? "nearest" : "linear", d.max_abs, d.mean_abs);
+    if (d.max_abs > kLinearMaxAbs) print_samples(got, want, dw, dh);
     if (exact) {
         CHECK_EQ(d.max_abs, 0);
     } else {
@@ -336,6 +347,7 @@ NXTEST(keep_aspect_letterbox_bars_are_black_and_picture_is_exact) {
     }
     const Diff d = diff_rgb(got_band, want_band);
     std::printf("    picture band (256x192, linear): max abs %d, mean abs %.4f\n", d.max_abs, d.mean_abs);
+    if (d.max_abs > kLinearMaxAbs) print_samples(got_band, want_band, 256, 192);
     CHECK(d.max_abs <= kLinearMaxAbs);
     CHECK(d.mean_abs <= kLinearMeanAbs);
     teardown(r);

@@ -9,6 +9,7 @@
 #include "nxrt/input_source.h"
 #include "play/play_engine.h"
 #include "play/play_types.h"
+#include "play_sample_game.h"
 #include "test_framework.h"
 NXTEST_GROUP(play_engine)
 
@@ -28,8 +29,9 @@ constexpr uint64_t ms(uint64_t v) { return v * 1000000ull; }
 // The [timing] defaults (play_types.h), put in front of every test settings text.
 const char* const kTiming = "[timing]\ntap_ms = 200\nhold_ms = 250\ndouble_ms = 300\npulse_ms = 80\n";
 
-// Parses kTiming plus the given body. A parse error fails the test.
+// Parses kTiming plus the given body, in the sample game's words (play_sample_game.h). A parse error fails the test.
 Settings settings_from(const std::string& body) {
+    nxtest_play::SampleGame game;
     Settings s;
     std::string err;
     const bool ok = play::parse_settings(std::string(kTiming) + body, &s, &err);
@@ -422,6 +424,7 @@ NXTEST(activations_count_edges) {
 }
 
 NXTEST(default_settings_smoke) {
+    nxtest_play::SampleGame game;   // the sample game's factory controls.ini
     Engine e(play::default_settings());
     CHECK(e.context() == Ctx::Menu);
 

@@ -210,12 +210,13 @@ NXTEST(unknown_names_follow_the_policy) {
     LogCapture cap;
     const uint64_t a = bootstrap("nvnSomethingFromANewerDriver");
     CHECK(a != 0);
-    CHECK(cap.has("UNKNOWN NVN PROC", "nvnSomethingFromANewerDriver"));
+    CHECK(!cap.has("UNKNOWN NVN PROC", "nvnSomethingFromANewerDriver"));   // the request is listed at trace level only (nvn_loader.cpp)
     ::Ctx c{};
     c.x[0] = 7;
     c.x[30] = 0x7100000504;
     call_thunk(&c, a);
     CHECK_EQ(c.x[0], 0ull);
+    CHECK(cap.has("UNKNOWN NVN PROC", "nvnSomethingFromANewerDriver"));   // a call is a warning, with the name
     CHECK(cap.has("UNKNOWN NVN PROC", "caller=0x7100000500"));
     CHECK_EQ(bootstrap("notAnNvnName"), 0ull);   // not an nvn name: null whatever the policy
     nvn::set_unknown_policy(nvn::UnknownPolicy::Stub);

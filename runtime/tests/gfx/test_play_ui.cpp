@@ -87,44 +87,60 @@ void run_frames(play::UiHost& host, int n) {
     }
 }
 
-// The tab bar of the settings page inside the Controls window, or nullptr before the first frame.
-ImGuiTabBar* settings_tab_bar() {
-    ImGuiWindow* win = ImGui::FindWindowByName("Controls");
-    return win ? ImGui::TabBarFindByID(win->GetID("settings_tabs")) : nullptr;
-}
-
-// Asks the tab bar to open the named tab at the next frame. A tab's id is its label hashed with the tab bar's id as the seed (the tab
-// bar is on the ID stack while its tabs are drawn). TabBarQueueFocus by name needs a current window, which there is not between frames.
-void open_tab(const char* name) {
-    ImGuiWindow* win = ImGui::FindWindowByName("Controls");
-    ImGuiTabBar* bar = settings_tab_bar();
-    if (win && bar) bar->NextSelectedTabId = ImHashStr(name, 0, win->GetID("settings_tabs"));
-}
-
-// Returns true when the open tab has this name. Checked through the tab bar's selected id.
-bool tab_open(const char* name) {
-    ImGuiTabBar* bar = settings_tab_bar();
-    if (!bar) return false;
-    for (int i = 0; i < bar->Tabs.Size; ++i) {
-        if (bar->Tabs[i].ID == bar->SelectedTabId) return std::strcmp(ImGui::TabBarGetTabName(bar, &bar->Tabs[i]), name) == 0;
+// The tab bar that has a tab with this label, or nullptr. The page nests its tab bars (the pages on top, the Controls page's own tabs
+// inside it), so the bars are found by their tabs rather than by an id path.
+ImGuiTabBar* bar_with_tab(const char* name, ImGuiTabItem** tab = nullptr) {
+    ImGuiContext& g = *GImGui;
+    for (int i = 0; i < g.TabBars.GetMapSize(); ++i) {
+        ImGuiTabBar* bar = g.TabBars.TryGetMapData(i);
+        if (!bar) continue;
+        for (int t = 0; t < bar->Tabs.Size; ++t) {
+            if (std::strcmp(ImGui::TabBarGetTabName(bar, &bar->Tabs[t]), name) != 0) continue;
+            if (tab) *tab = &bar->Tabs[t];
+            return bar;
+        }
     }
+    return nullptr;
+}
+
+// Asks the tab bar that has this tab to open it at the next frame.
+void open_tab(const char* name) {
+    ImGuiTabItem* tab = nullptr;
+    if (ImGuiTabBar* bar = bar_with_tab(name, &tab)) bar->NextSelectedTabId = tab->ID;
+}
+
+// Returns true when the tab with this name is the open one of its bar.
+bool tab_open(const char* name) {
+    ImGuiTabItem* tab = nullptr;
+    ImGuiTabBar* bar = bar_with_tab(name, &tab);
+    return bar && bar->SelectedTabId == tab->ID;
+}
+
+// Opens a tab with two frames and checks it is the open one. Returns false (and says which) when it did not open.
+bool open_and_draw(play::UiHost& host, const char* name) {
+    open_tab(name);
+    run_frames(host, 2);
+    if (tab_open(name)) return true;
+    std::printf("    tab did not open: %s\n", name);
     return false;
 }
 
-// Draws every tab: one frame so the tabs exist, then each tab is opened in turn with two frames, and checked to be the open one.
-// Returns false when a tab did not open.
+// Draws every page and every tab of the Controls page: one frame so the tabs exist, then each is opened in turn with two frames.
+// The Game page is there only when the registered game has looks and start-up tweaks. Returns false when a tab did not open.
 bool draw_all_tabs(play::UiHost& host) {
-    static const char* const kTabs[] = {"Mouse", "Controller", "Display", "Bindings", "Switch layout", "Status"};
+    static const char* const kPages[] = {"Display", "Graphics", "Controls", "Audio", "About"};
+    static const char* const kControls[] = {"Mouse", "Keyboard and mouse buttons", "Gamepad", "Switch layout", "Status"};
     bool ok = true;
     run_frames(host, 1);
-    for (const char* t : kTabs) {
-        open_tab(t);
-        run_frames(host, 2);
-        if (!tab_open(t)) {
-            std::printf("    tab did not open: %s\n", t);
+    for (const char* page : kPages) {
+        if (!open_and_draw(host, page)) {
             ok = false;
+            continue;
         }
+        if (std::strcmp(page, "Controls") != 0) continue;
+        for (const char* t : kControls) ok = open_and_draw(host, t) && ok;
     }
+    if (bar_with_tab("Game")) ok = open_and_draw(host, "Game") && ok;
     return ok;
 }
 
