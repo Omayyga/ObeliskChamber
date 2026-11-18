@@ -48,6 +48,21 @@ if(FEFW_RT_FLAGS)
     if(FEFW_RT_FLAGS MATCHES "profile-instr-use")
         add_compile_options(-Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-profile-instr-missing)
     endif()
+    # A new profile under the same file name leaves NX_RT_FLAGS unchanged, so ninja would rebuild only the sources that changed and keep
+    # the other objects from the old profile. Under ThinLTO lld-link then stops ("linking module flags 'ProfileSummary': IDs have
+    # conflicting values"); without it the old objects simply keep the old profile. The profile's hash as a definition puts every
+    # object on the new one, and the configure runs again when the file changes.
+    if(FEFW_RT_FLAGS MATCHES "profile-instr-use=([^ ]+)")
+        set(_fefw_rt_profile "${CMAKE_MATCH_1}")
+        string(REPLACE "\"" "" _fefw_rt_profile "${_fefw_rt_profile}")
+        if(EXISTS "${_fefw_rt_profile}")
+            file(MD5 "${_fefw_rt_profile}" _fefw_rt_profile_md5)
+            string(SUBSTRING "${_fefw_rt_profile_md5}" 0 16 _fefw_rt_profile_id)
+            add_compile_definitions(NXRT_RT_PROFILE_ID=0x${_fefw_rt_profile_id})
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_fefw_rt_profile}")
+            message(STATUS "fefw: runtime profile ${_fefw_rt_profile} (id ${_fefw_rt_profile_id})")
+        endif()
+    endif()
     message(STATUS "fefw: runtime flags ${FEFW_RT_FLAGS}")
 endif()
 add_subdirectory("${FEFW_RUNTIME_DIR}" runtime)
