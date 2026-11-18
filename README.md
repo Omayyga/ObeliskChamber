@@ -22,23 +22,24 @@ Almost all of this project is the original **[fefw-recomp](https://github.com/Go
 contributors. Goldoire wrote, when publishing the last version (0.2.0), that the repository would be deleted and that anyone is free
 to continue the work. This repository does that; it was forked from a copy of the original at release 0.1.7 and later merged 0.2.0.
 
-How much comes from where, measured on 2026-11-15 by the lines of the repository's own text files as `git blame` attributes them
-over the full history (third-party folders and lock files left out, 401,708 lines).
+How much comes from where, measured on 2026-11-17 (release 0.3.0) by the lines of the repository's own text files as `git blame`
+attributes them over the full history (third-party folders and lock files left out, 416,765 lines).
 
 | | Lines | Share |
 |---|---|---|
-| The original fefw-recomp: Goldoire | 386,730 | 96.3% |
-| The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,140 | 1.5% |
-| [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 418 | 0.1% |
-| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here (4,457 of them two lists of hot function addresses) | 9,582 | 2.3% |
-| Obelisk Chamber (this fork): its maintainer | 7,971 | 2.0% |
-| Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 377 | 0.1% |
+| The original fefw-recomp: Goldoire | 386,033 | 92.6% |
+| The original fefw-recomp: its contributors (Stellarznith, Aidan Kinzett, Paulius / Kompas9, ranbinrang-rgb, Abubakar-ux) | 6,110 | 1.5% |
+| [Kompas9's fork](https://github.com/Kompas9/fefw-recomp) (Paulius), changes brought in here | 413 | 0.1% |
+| [Stephen Jayakar's fork](https://github.com/stephenjayakar/fefw-recomp), changes brought in here (4,457 of them two lists of hot function addresses) | 9,765 | 2.3% |
+| Obelisk Chamber (this fork): its maintainer | 13,713 | 3.3% |
+| Obelisk Chamber (this fork): contributors (ranbinrang-rgb) | 731 | 0.2% |
 
-So about **95.6% of the code is the original's, 0.1% comes from Kompas9's fork, 2.3% from Stephen Jayakar's fork and about 2.0%
-was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 62 from Stephen
-Jayakar's fork, 102 from this fork's maintainer and 5 from its contributors. Lines are a rough measure of
+So about **94.1% of the code is the original's, 0.1% comes from Kompas9's fork, 2.3% from Stephen Jayakar's fork and about 3.5%
+was added here**. By commits, not counting merges, the split is 84 from the original, 17 from Kompas9's fork, 64 from Stephen
+Jayakar's fork, 152 from this fork's maintainer and 8 from its contributors. Lines are a rough measure of
 work, and the original in turn builds on the projects named under [Credits](#credits) (its first commit holds their code too, so
-their share is inside the 95.6%).
+their share is inside the 94.1%). Techniques taken from other ports and mods (written here, not copied) count as this fork's lines;
+they are credited under [Credits](#credits).
 
 The maintainer's changes in this fork were written with Claude (Anthropic's AI model), directed and tested by the maintainer.
 
@@ -59,6 +60,8 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 
 ### Added in Obelisk Chamber
 
+Release by release: [docs/releases](docs/releases) (0.3.0 onwards; earlier notes are on the [Releases](../../releases) page).
+
 **Inside the game's own menus**
 - **Recomp Options**: a screen under **+ > System**, built from the game's own Settings widgets, with Display, Graphics, Frame Rate
   and Audio tabs. Most settings apply to the running game (render scale, shadow resolution, quality, frame rate, dynamic resolution
@@ -71,6 +74,22 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 - **DLC / Mods** on the title screen: every mod listed on a RomFS tab and an ExeFS tab, switched on or off there
 
 **Picture and performance**
+- **Graphics presets** (Low / Medium / High / Ultra) in the launcher, the F1 menu and Recomp Options. Low also turns down the game's
+  own reflections, ambient occlusion, crowd and scenery detail (`[fefw] reflections`, `ambient_occlusion`, `crowd_detail`,
+  `scenery_detail`), which edit the game's graphics settings files as they load
+- **Frame-rate fixes** (`[fefw] frame_fixes`): at 60 and 120 fps, capes, hair, physics, cutscene camera shake, animation eases, map
+  markers, menu timers and dialogue typing keep their real speed instead of running 2x or 4x fast
+- **The game's own HDR picture** (`[hdr] mode = native`): the game is told the display is HDR, as on a Switch 2 with an HDR TV, and its
+  10-bit PQ frames go to the screen unchanged
+- Settings that the running game can take apply at once from the F1 menu and Recomp Options (presets, render scale, shadows,
+  quality, frame rate, dynamic resolution, upscaler)
+- **Intel GPUs** (Arc and integrated): the paths that lost the GPU at the title screen are turned off by themselves
+  (`[gfx] intel_compat`)
+- Faster loading and fewer hitches: textures stream in behind quick stand-ins, shaders are kept in memory and built ahead, the
+  render thread's Vulkan calls run on a worker, fewer GPU barriers, faster translated game code (most of it from Stephen Jayakar's
+  fork, see [Credits](#credits)), and cheaper per-draw checks
+- Defaults that follow the hardware: worker threads, spin waits and background shader threads scale with the CPU; DLSS model E on
+  RTX 20 / 30 cards; DLSS that recovers after a failure under video memory pressure
 - A DLSS model choice that applies live
 - Dynamic resolution that lowers the render size only where it gains frame rate
 - Coarser shading for chosen draws, and options to skip or spread repeated compute work
@@ -79,7 +98,11 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 - Lower runtime overhead in three hot paths, and a corrected input-delay figure in the overlay
 - Movies decoded with dav1d's own assembly and a deeper decode buffer, so the 1440p cutscenes stay in step with their sound
 - Ultrawide: framed panels, the Stats / roster frame and the World Map picture keep their 16:9 shape while dims and full-screen
-  backgrounds still cover the whole screen, and the world / quest map's location dots and routes stay on the map
+  backgrounds still cover the whole screen, and the world / quest map's location dots, routes and route outlines stay on the map.
+  Full-screen pictures (title, loading screens, illustrations) keep their shape (`[fefw] ultrawide_images`), and the output lists
+  are grouped by shape (16:9, 21:9, 32:9) with a "This monitor" entry
+- An F1 menu that no longer dims the game (so picture settings can be judged while changing them) and can be moved with the mouse
+  or the right stick
 
 **Mods**
 - Code patches (`.ips`, IPS32, `.pchtxt`) from a mod's `exefs` folder are applied when the game is built
@@ -96,7 +119,9 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 **For people who build it themselves**
 - Profile-guided optimisation and ThinLTO for the game code, a profile-guided runtime, and per-PC build tuning
   (`build_options.json`); see [docs/PGO.md](docs/PGO.md)
-- A CI build of the runtime on every change
+- A release runtime (`fefw_rt.dll`) built with a profile and ThinLTO; the game code itself stays a general build
+- Repeatable performance runs: scripted routes, an A/B runner and a report ([docs/PERF_ROUTES.md](docs/PERF_ROUTES.md))
+- A CI build of the runtime on every change, and a runtime test suite that passes in full
 
 > [!NOTE]
 > This fork was made for personal use, and its releases are play-tests: they have had one person's testing on one PC, and updates
@@ -137,7 +162,9 @@ the launcher (Desktop Mode on a Deck) before playing from Steam.
 ### Settings
 
 The launcher's **Settings** page covers resolution, frame rate, upscaling, window mode, sound and controls. Press **F1** in game for
-the overlay. Every option is described in [runtime/docs/CONFIG.md](runtime/docs/CONFIG.md).
+the overlay, or open **+ > System > Recomp Options**. [docs/SETTINGS_GUIDE.md](docs/SETTINGS_GUIDE.md) lists the settings worth
+changing, what each does and who gains from changing it (slower GPUs, small CPUs, Intel, ultrawide, HDR). Every option is described in
+[runtime/docs/CONFIG.md](runtime/docs/CONFIG.md).
 
 ### Game language
 
@@ -298,6 +325,10 @@ Extract the new zip to a new folder, copy your `save\` folder (and `mods\`, if y
 - **Setup stopped or failed**: press **Set up** again to continue where it stopped. **Open full log** on the Setup page shows what
   went wrong.
 - **The game closes or freezes**: look at `ObeliskChamber.log` in the launcher's folder, and update your GPU driver.
+- **Intel GPU, crash at or after the title screen**: the log should have a `GPU quirks: [gfx] intel_compat on` line. If you copied
+  `ObeliskChamber.ini` from a test build, remove the lines you added to its `[nvn]` and `[gfx]` sections: a key set by hand wins
+  over the Intel defaults.
+- **A short black flash, blocky clouds or slow texture pop-in after loading** in an older build: update; 0.3.0 fixes these.
 
 ## Reporting problems
 
@@ -326,7 +357,7 @@ Contributions are welcome: open a pull request against `master`, or an [issue](.
 This project stands on the work of others. Thank you.
 
 **The original**
-- **[fefw-recomp](https://github.com/Goldoire/fefw-recomp) by Goldoire**: the port itself, about 98% of what is here. See
+- **[fefw-recomp](https://github.com/Goldoire/fefw-recomp) by Goldoire**: the port itself, about 94% of what is here. See
   [Where this comes from](#where-this-comes-from).
 - Its contributors: **Stellarznith** (DualSense haptic feedback, the F1 upscaler and frame generation status, translations),
   **Aidan Kinzett** (the Linux package and starting the game through Steam's Proton or Wine, a clearer Set up error),
@@ -359,10 +390,10 @@ are brought in here with his commits, so the history shows him as the author, an
   (`[nvn] mirror_spare`).
 - A GPU untile of a first upload no longer imports a 64 MiB pool chunk on the render thread (`[nvn] untile_import`), and texture
   stand-ins encode fewer levels (`[nvn] standin_encode_px`).
-- The render thread's Vulkan calls made by a second thread (`[nvn] replay_threads = 2`, off by default), handed over in batches,
+- The render thread's Vulkan calls made by a second thread (`[nvn] replay_threads`; on here with 6 or more CPU cores), handed over in batches,
   and a small cache of pipeline layouts (`[nvn] layout_cache`). On his PC the busiest street's render-thread work went from 16.8 to
   about 14 ms a frame.
-- Fewer GPU barriers, each behind its own setting and off by default: dispatches that share nothing run side by side
+- Fewer GPU barriers, each behind its own setting (on here by default; full barriers on Intel): dispatches that share nothing run side by side
   (`[nvn] dispatch_barriers`), the game's own barriers kept only where they guard something (`[nvn] game_barriers`), runs of
   uniform-buffer updates with two barriers instead of two each (`[nvn] batch_ubo_updates`), feedback copies of only the sampled
   levels (`[nvn] feedback_levels`) and a read-only depth pass kept open (`[nvn] depth_ro_sticky`), with `[prof] gpu_stats` to
@@ -390,13 +421,29 @@ are brought in here with his commits, so the history shows him as the author, an
 - Long submissions handed to the GPU in parts at render pass boundaries, so the GPU starts on a frame while the render thread
   still records the rest (`[nvn] split_submit_ms`, off by default), with the GPU's busy time per frame in `[prof] gpu_stats`.
 
+**Techniques from other ports and mods** (the idea and its findings; our own code, written here)
+- The continued [fefw-recomp](https://github.com/metrist38/fefw-recomp) (metrist38) and its contributor **moistman7**: the Intel
+  test matrix that found the two settings losing the GPU (`[gfx] intel_compat`), spin waits on CPUs with 8 or more cores
+  (`[kernel] wait_spin`), the lifted code at `/O2`, DLSS retried after a failed frame, wide one-edge pictures kept at 16:9 on
+  ultrawide, cheaper held-result checks after a program bind (`[nvn] out_prog_dirty`, `out_memo_held`), the smooth sampler that
+  fixes blocky clouds (`[nvn] reserved_sampler`), compile pacing (`[nvn] compile_pace_ms`), the cached camera block
+  (`[nvn] camera_patch_cached`) and full-screen pictures keeping their shape on ultrawide (`[fefw] ultrawide_images`), several of
+  them through **[EmblemWeave](https://github.com/XiONDiGiTaL/EmblemWeave)** (XiØN), which also showed prompt fonts read through the
+  RomFS.
+- **Savage Wind Recomp** (Revivedx): scripted performance routes, DLSS model E on RTX 20 / 30 cards, a compiler barrier on polling
+  loops and inline multiply-adds for the compatible build.
+- **ProjectReLink**: Vulkan objects destroyed on a low-priority thread (`[nvn] reaper`). **TotK Recomp**: the profile stamp that
+  warns when a runtime profile is out of date.
+- The Intel players on issue #81, whose logs and test runs made the Intel fixes possible.
+
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every
   change on real hardware and made the releases.
 - **Claude** (Anthropic's AI model): wrote the maintainer's code changes under that direction.
 - **ranbinrang-rgb**: mods that bring their own hook sites (`exefs/*.sites`, lifted by Set up), with the checks around them: a
   mod's sites are kept while it is switched off, hooks are checked against the lifted list, the Mods menu names mods that need
-  Set up, and Set up warns about midhook sites where the condition flags are still live.
+  Set up, and Set up warns about midhook sites where the condition flags are still live; and the same checks for a launcher run
+  from a source checkout (Set up notices a mod's new sites and lifts them).
 - The [Fortune's Weave decompilation project](https://code.vexcited.com/decompile/fefw): its function and class names helped find the
   game's menu code. No code from it is used.
 
