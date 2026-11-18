@@ -202,7 +202,7 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
                 }
             }
             if (attr_offs.empty()) {   // what the log needs to see the layout
-                char b[64];
+                char b[160];
                 std::snprintf(b, sizeof b, "ATR1's string area: no record field points into it (%u records of %u bytes, area %zu bytes;",
                               count, attr_size, atr->size - recs_end);
                 *why = b;
