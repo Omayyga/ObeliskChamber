@@ -438,7 +438,7 @@ void* streamline_proc(const char* name) {
 }
 
 PFN_vkGetInstanceProcAddr streamline_preinit() {
-    const UpscaleMode m = settings().upscale.mode;
+    const UpscaleMode m = upscale_mode();   // the mode that runs (a game with its own upscaler takes none)
     if (m != UpscaleMode::Dlss && m != UpscaleMode::Dlaa && !nvn_dlss_wants_streamline()) return nullptr;
     Sl& s = sl_state();
     const std::wstring dir = sl_dir();

@@ -164,7 +164,7 @@ bool wanted() {
     static const bool w = [] {
         std::string u = config_get_str("dlss", "upscaler", "taau");
         for (char& c : u) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return u == "xess" || (u == "auto" && !find_dll().dll.empty()) || settings().upscale.mode == UpscaleMode::Xess;
+        return u == "xess" || (u == "auto" && !find_dll().dll.empty()) || upscale_mode() == UpscaleMode::Xess;
     }();
     return w;
 }

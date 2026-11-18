@@ -11,6 +11,7 @@
 #include <system_error>
 #include <vector>
 
+#include "nxrt/game.h"
 #include "nxrt/input_source.h"
 #include "play/play_types.h"
 #include "play_sample_game.h"
@@ -1125,6 +1126,22 @@ NXTEST(extras_hdr_native_round_trip) {
         REQUIRE_MSG(parse_settings(text, &r, &err), err);
         CHECK(same_settings(s, r));
     }
+}
+
+NXTEST(extras_temporal_modes_off_for_a_game_with_its_own_upscaler) {
+    // game::Info::own_upscaler (Fortune's Weave): fsr3, dlss, dlaa and xess count as off; the settings keep the word; FSR 1 and NIS run.
+    const nxrt::extras::Settings before = nxrt::extras::settings();
+    const bool own = nxrt::game::info().own_upscaler;
+    for (UpscaleMode m : {UpscaleMode::Fsr3, UpscaleMode::Dlss, UpscaleMode::Dlaa, UpscaleMode::Xess, UpscaleMode::Fsr1, UpscaleMode::Nis}) {
+        nxrt::extras::Settings s = before;
+        s.upscale.mode = m;
+        nxrt::extras::set_settings(s);
+        const bool temporal = m != UpscaleMode::Fsr1 && m != UpscaleMode::Nis;
+        CHECK(nxrt::extras::settings().upscale.mode == m);
+        CHECK(nxrt::extras::upscale_mode() == (own && temporal ? UpscaleMode::Off : m));
+        CHECK(nxrt::extras::upscale_temporal() == (temporal && !own));
+    }
+    nxrt::extras::set_settings(before);
 }
 
 NXTEST(extras_upscale_modes_round_trip) {
