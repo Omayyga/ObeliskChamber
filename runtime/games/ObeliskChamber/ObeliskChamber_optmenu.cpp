@@ -1090,7 +1090,8 @@ uint64_t find_no_first() {
     for (int i = 0; i < 400; ++i) {
         uint32_t w = 0;
         rd(fn + i * 4, &w);
-        if (w == 0xd65f03c0u) break;   // ret
+        if (w == 0xd65f03c0u && !after_prompt) break;   // ret (after the prompt helper's call an inlined destructor's ret comes first)
+        if (after_prompt && w == 0x52800180u) break;      // mov w0, #12 with no call before it
         const uint64_t t = bl_target(fn + i * 4, w);
         if (w == 0x52800180u) seen += " mov-w0-12@" + std::to_string(i);
         if (!t) continue;

@@ -6,8 +6,9 @@
 // ("MID_Restart_ReturnTitle_Confirm"); a label no file has shows as nothing. As the RomFS is laid out (services/mods_dll.cpp
 // add_runtime_edit), each language's Msg/<language>/System.msbt.zst (zstd; the file with the dialogs' own "MID_Sys_Yes") gets our labels
 // too: a message in TXT2, a label in LBL1 (the label hash table is laid out again), and a copy of MID_Sys_Yes's attributes (ATR1) and
-// style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. A file with any other section, or an ATR1 with a string area
-// after its records, is left as it is, and our dialog then falls back to the overlay's prompt.
+// style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. Another section (AOCM in this game) that holds one entry a
+// message gets MID_Sys_Yes's again; otherwise it is copied as it is (logged). A file with an ATR1 string area after its records, or a label
+// table with another hash, is left as it is, and our dialog then falls back to the overlay's prompt.
 #include "ObeliskChamber_game.h"
 
 #include <zstd.h>
@@ -111,7 +112,7 @@ uint32_t label_hash(const std::string& s, uint32_t slots) {
 struct Section { char magic[5] = {}; size_t at = 0, size = 0; };   // at: the data (after the 16-byte section header)
 
 // The file with our messages added, or empty when it is not one to change (no anchor, ours already there, or a layout not handled).
-std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::string* why) {
+std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::string* why, std::string* notes = nullptr) {
     if (n < 0x20 || std::memcmp(p, "MsgStdBn", 8) != 0) { *why = "not an MSBT file"; return {}; }
     Rd r{p, n, p[8] == 0xfe && p[9] == 0xff};
     const int enc = p[0x0c];
@@ -136,7 +137,7 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
         else if (!std::strcmp(s.magic, "TSY1")) tsy = &s;
         else if (!std::strcmp(s.magic, "TXT2")) txt = &s;
         else if (!std::strcmp(s.magic, "ATO1")) {}   // attribute offsets: indexed by attribute, not by message (copied as it is)
-        else if (other.empty()) other = s.magic;
+        else other += std::string(other.empty() ? "" : ", ") + s.magic;
     }
     if (!lbl || !txt) { *why = "no LBL1 or TXT2"; return {}; }
     // labels
@@ -165,7 +166,6 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
             if (l.name == m.label) { *why = "ours already there"; return {}; }
     }
     if (anchor < 0) return {};   // not the dialogs' file: nothing to say
-    if (!other.empty()) { *why = "section " + other + " is not handled"; return {}; }
     if (hash_other) { *why = "the label table uses another hash"; return {}; }
     if (static_cast<uint32_t>(anchor) >= msgs) { *why = "the anchor's index is out of range"; return {}; }
     uint32_t attr_size = 0;
@@ -227,6 +227,31 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
                 d.put_u32(offs_at + i * 4, static_cast<uint32_t>(d.b.size()));
                 put_text(d, enc, zh ? kMsgs[i].zh : kMsgs[i].en);
             }
+        } else if (std::strcmp(s.magic, "ATO1") != 0) {
+            // A section this does not know (Fortune's Weave's System files have AOCM): one entry a message, with or without a count first,
+            // gets MID_Sys_Yes's entry again for ours; anything else is copied as it is. What was done is logged with the first file.
+            const uint32_t first = s.size >= 4 ? r.u32(s.at) : 0;
+            if (first == msgs && (s.size - 4) % msgs == 0 && (s.size - 4) / msgs >= 1 && (s.size - 4) / msgs <= 64) {
+                const size_t stride = (s.size - 4) / msgs;
+                d.u32(msgs + add);
+                d.b.insert(d.b.end(), p + s.at + 4, p + s.at + s.size);
+                for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + 4 + anchor * stride, p + s.at + 4 + (anchor + 1) * stride);
+                if (notes) *notes += std::string(" ") + s.magic + ": a count and " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+            } else if (s.size % msgs == 0 && s.size / msgs >= 1 && s.size / msgs <= 64) {
+                const size_t stride = s.size / msgs;
+                d.b.assign(p + s.at, p + s.at + s.size);
+                for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + anchor * stride, p + s.at + (anchor + 1) * stride);
+                if (notes) *notes += std::string(" ") + s.magic + ": " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+            } else {
+                d.b.assign(p + s.at, p + s.at + s.size);
+                if (notes) {
+                    char b[160];
+                    std::snprintf(b, sizeof b, " %s: %zu bytes, not one entry a message (%u messages), copied as it is; it starts", s.magic, s.size, msgs);
+                    *notes += b;
+                    for (size_t k = 0; k < 16 && k < s.size; ++k) { std::snprintf(b, sizeof b, " %02x", p[s.at + k]); *notes += b; }
+                    *notes += ";";
+                }
+            }
         } else {
             d.b.assign(p + s.at, p + s.at + s.size);
         }
@@ -269,7 +294,8 @@ void edit_msbt(const NxModFile* f, void*) {
     }
     const uint8_t* src = zst ? plain.data() : f->data;
     const size_t src_n = zst ? plain.size() : static_cast<size_t>(f->size);
-    std::vector<uint8_t> out = add_messages(src, src_n, zh, &why);
+    std::string notes;
+    std::vector<uint8_t> out = add_messages(src, src_n, zh, &why, &notes);
     if (out.empty()) {
         if (!why.empty() && why != "not an MSBT file") {
             g_skipped.fetch_add(1);
@@ -289,8 +315,8 @@ void edit_msbt(const NxModFile* f, void*) {
     }
     f->replace(f, out.data(), out.size());
     if (g_files.fetch_add(1) == 0)
-        NXLOG_I(kTag, "%s: our messages added (%llu -> %zu bytes); the other languages' files get them too", path.c_str(),
-                static_cast<unsigned long long>(f->size), out.size());
+        NXLOG_I(kTag, "%s: our messages added (%llu -> %zu bytes; other sections:%s); the other languages' files get them too", path.c_str(),
+                static_cast<unsigned long long>(f->size), out.size(), notes.empty() ? " none" : notes.c_str());
 }
 }  // namespace
 
