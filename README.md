@@ -63,8 +63,8 @@ The maintainer's changes in this fork were written with Claude (Anthropic's AI m
 - **Recomp Options**: a screen under **+ > System**, built from the game's own Settings widgets, with Display, Graphics, Frame Rate
   and Audio tabs. Most settings apply to the running game (render scale, shadow resolution, quality, frame rate, dynamic resolution
   and more); **-** restores the defaults after a confirmation
-- **Quit Game**: the last entry under **+ > System**. It asks for a confirmation, then ends the game the same way as the F1 menu's
-  **Quit game**
+- **Quit Game**: the last entry under **+ > System**. It asks in the game's own yes / no dialog, then ends the game the same way as
+  the F1 menu's **Quit game**
 - **Save slots**: several saves side by side, chosen from the game's own Continue, New Game and Delete Save entries on the title
 - **Save and Load lists** in the + menu: one press saves or loads a slot through the game's own prompts, and each row shows the
   chapter and play time

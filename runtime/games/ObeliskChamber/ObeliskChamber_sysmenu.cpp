@@ -127,8 +127,9 @@ void system_acall(::Ctx* c) {
 void entry_text(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(kLabel); }
 void quit_text(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(kQuitLabel); }
 
-// Quit Game: the decide sound, then the overlay's quit prompt (ObeliskChamber_menu.cpp), whose Yes exits as the F1 menu's Quit game does.
-// The game's menu stays as it is under the overlay, which takes the pad while it is up.
+// Quit Game: the game's own yes / no dialog with our message (ObeliskChamber_optmenu.cpp optmenu_ask_quit). Without it (native_options off,
+// the message files not edited, another build): the decide sound and the overlay's quit prompt (ObeliskChamber_menu.cpp). Either Yes exits
+// as the F1 menu's Quit game does. The game's menu stays as it is under the overlay, which takes the pad while it is up.
 void quit_acall(::Ctx* c) {
     const uint64_t item = c->x[0];
     uint8_t ready = 0;
@@ -136,7 +137,11 @@ void quit_acall(::Ctx* c) {
         c->x[0] = 1;
         return;
     }
-    if (g_quit_asked.fetch_add(1) == 0) NXLOG_I(kTag, "Quit Game: the quit prompt is shown");
+    if (optmenu_ask_quit(c, item)) {   // the game's own yes / no dialog, as its Return to Title entry opens one
+        c->x[0] = 12;
+        return;
+    }
+    if (g_quit_asked.fetch_add(1) == 0) NXLOG_I(kTag, "Quit Game: the overlay's quit prompt is shown (the game's dialog is not available)");
     call(c, g_vt_quit[2 + kSlotDecideSe], item);
     menu_ask_quit();
     play::open_settings_menu();

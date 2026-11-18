@@ -50,6 +50,7 @@
 #include "nxrt/mod_api.h"
 #include "nxrt/platform.h"
 #include "nxrt/services_api.h"
+#include "play_selftest.h"   // play::exit_process (Quit Game)
 #include "play_types.h"
 #include "play_ui.h"
 
@@ -1039,6 +1040,72 @@ void reset_yes_clone_at(::Ctx* c) {
     if (to && mem::is_mapped(to, 16)) wr<uint64_t>(to, ptr(&g_yvt[2]));
 }
 
+// ---- Quit Game (the System menu's entry, ObeliskChamber_sysmenu.cpp) -----------------------------------------------------------------
+// The game's own yes / no dialog, opened the way its Return to Title entry opens one (SystemMenuItem_ExitTitle::ACall): the prompt helper
+// with a message id, a "yes" and a "no" function, then the dialog's own call that puts the cursor on No, and 12 for the menu. The message is
+// ours (kQuitMid, ObeliskChamber_msg.cpp); "yes" is the reset prompt's "yes" with our invoke and clones, "no" the reset prompt's "no" (it
+// does nothing: the dialog closes). The cursor call is found in the game's Return to Title ACall: the first direct call after the prompt
+// helper's, before its "mov w0, #12".
+constexpr uint64_t kVtExitTitle = 0x2129828;
+constexpr int kExitACallSlot = 25;
+uint64_t g_qvt[2 + 9] = {};              // "yes" of the quit dialog
+uint64_t g_dialog_no_first = 0;          // the dialog's call that moves its cursor to No (0: not found, Yes stays first)
+bool g_quit_ok = false;
+std::chrono::steady_clock::time_point g_quit_asked_at;
+void quit_yes(::Ctx* c) {
+    const uint64_t self = c->x[0];
+    uint64_t item = 0, item_vt = 0, item_fn = 0;
+    rd(c->x[1], &item);
+    if (item) rd(item, &item_vt), rd(item + 0x80, &item_fn);
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - g_quit_asked_at).count();
+    if (item_vt != g_base + kVtPromptChoice || item_fn != self || ms < 300) {   // as reset_yes: only the dialog's own Yes ends the game
+        NXLOG_W(kTag, "quit: \"yes\" was called %lld ms after the dialog opened, not by its Yes: the game goes on", ms);
+        c->x[0] = 0;
+        return;
+    }
+    NXLOG_I(kTag, "quit: Yes on the game's dialog after %lld ms", ms);
+    play::exit_process(0, "pass", "quit from the System menu");   // the same exit as the F1 menu's Quit game
+}
+void quit_yes_clone_new(::Ctx* c) {
+    pass(c, g_yes_new);
+    if (c->x[0] && mem::is_mapped(c->x[0], 16)) wr<uint64_t>(c->x[0], ptr(&g_qvt[2]));
+}
+void quit_yes_clone_at(::Ctx* c) {
+    const uint64_t to = c->x[1];
+    pass(c, g_yes_at);
+    if (to && mem::is_mapped(to, 16)) wr<uint64_t>(to, ptr(&g_qvt[2]));
+}
+// The Return to Title ACall's cursor call: after its BL to the prompt helper, the next BL, with a "mov w0, #12" a few instructions on.
+uint64_t find_no_first() {
+    uint64_t fn = 0;
+    if (!rd(g_base + kVtExitTitle + kExitACallSlot * 8, &fn) || !fn_lookup(fn) || !mem::is_mapped(fn, 400 * 4)) return 0;
+    auto bl_target = [](uint64_t at, uint32_t w) -> uint64_t {
+        if ((w & 0xfc000000u) != 0x94000000u) return 0;
+        int64_t imm = static_cast<int64_t>(w & 0x03ffffffu);
+        if (imm & (int64_t{1} << 25)) imm -= int64_t{1} << 26;
+        return static_cast<uint64_t>(static_cast<int64_t>(at) + imm * 4);
+    };
+    bool after_prompt = false;
+    for (int i = 0; i < 400; ++i) {
+        uint32_t w = 0;
+        rd(fn + i * 4, &w);
+        if (w == 0xd65f03c0u) break;   // ret
+        const uint64_t t = bl_target(fn + i * 4, w);
+        if (!t) continue;
+        if (!after_prompt) {
+            after_prompt = t == g_base + kPrompt;
+            continue;
+        }
+        for (int k = 1; k <= 8; ++k) {
+            uint32_t v = 0;
+            rd(fn + (i + k) * 4, &v);
+            if (v == 0x52800180u) return fn_lookup(t) ? t : 0;   // mov w0, #12
+        }
+        return 0;
+    }
+    return 0;
+}
+
 // slot 114, minus: the game's "reset the options?" prompt, whose Yes resets ours. Nothing on a pick list.
 void menu_minus(::Ctx* c) {
     const uint64_t menu = c->x[0];
@@ -1226,6 +1293,14 @@ void optmenu_frame() {
         g_yvt[2 + kFSlotInvoke] = hle_register("fefw.optmenu.reset_yes", reset_yes);
         g_yvt[2 + kFSlotCloneNew] = hle_register("fefw.optmenu.reset_yes_clone_new", reset_yes_clone_new);
         g_yvt[2 + kFSlotCloneAt] = hle_register("fefw.optmenu.reset_yes_clone_at", reset_yes_clone_at);
+        // Quit Game's dialog: the same "yes" with our own invoke
+        std::memcpy(g_qvt, g_yvt, sizeof g_qvt);
+        g_qvt[2 + kFSlotInvoke] = hle_register("fefw.optmenu.quit_yes", quit_yes);
+        g_qvt[2 + kFSlotCloneNew] = hle_register("fefw.optmenu.quit_yes_clone_new", quit_yes_clone_new);
+        g_qvt[2 + kFSlotCloneAt] = hle_register("fefw.optmenu.quit_yes_clone_at", quit_yes_clone_at);
+        g_dialog_no_first = find_no_first();
+        g_quit_ok = true;
+        if (!g_dialog_no_first) NXLOG_W(kTag, "quit: the dialog's cursor call was not found in Return to Title: the Quit Game dialog starts on Yes");
     } else NXLOG_W(kTag, "the Options screen's reset prompt is not where it was expected: minus does nothing on Recomp Options");
     // The report window's global: checked through the two places that store it (see kPromptWindow); without it the list guard works as
     // before (no wait for the window, no refusal, no close).
@@ -1252,6 +1327,30 @@ void optmenu_frame() {
     wr<uint64_t>(slot, hle_register("fefw.optmenu.build", menu_build));
     g_ready = true;
     NXLOG_I(kTag, "Options screen hooked: Recomp Options opens a native screen ([fefw] native_options)");
+}
+
+bool optmenu_ask_quit(::Ctx* c, uint64_t item) {
+    if (!g_ready || !g_quit_ok || !msg_ready()) return false;
+    uint64_t menu = 0;
+    if (!rd(item + 8, &menu) || !menu) return false;
+    static uint64_t ask, yes[6], no[6], none[6];      // static: the dialog copies the functions, the message id is a pointer it may keep
+    ask = ptr(kQuitMid);
+    std::memset(yes, 0, sizeof yes), std::memset(no, 0, sizeof no), std::memset(none, 0, sizeof none);
+    yes[0] = ptr(&g_qvt[2]), yes[1] = menu, yes[4] = ptr(yes);
+    no[0] = g_base + kVtResetNo, no[4] = ptr(no);
+    g_quit_asked_at = std::chrono::steady_clock::now();
+    const uint64_t dialog = call(c, g_base + kPrompt, {menu, ptr(&ask), ptr(yes), ptr(no), ptr(none)});
+    if (!dialog) {
+        NXLOG_W(kTag, "quit: the game made no dialog: the overlay's prompt is used");
+        return false;
+    }
+    if (g_dialog_no_first) call(c, g_dialog_no_first, {dialog});
+    static bool told = false;
+    if (!told) {
+        told = true;
+        NXLOG_I(kTag, "quit: the game's own dialog is shown (cursor on %s)", g_dialog_no_first ? "No" : "Yes");
+    }
+    return true;
 }
 
 // From the Recomp Options entry's ACall (item = the entry): opens the screen as the game's own Options entry does. False: not available.
