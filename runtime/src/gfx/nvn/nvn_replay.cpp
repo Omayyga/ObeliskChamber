@@ -156,7 +156,8 @@ struct PrepAhead {
     uint32_t n = 0;
     uint64_t used = 0;          // the present count when the entry last learned or prepared
 };
-std::unordered_map<uint64_t, PrepAhead> g_prep_ahead;
+// never destroyed: its texture references must not be released by static destructors after the device is gone
+std::unordered_map<uint64_t, PrepAhead>& g_prep_ahead = *new std::unordered_map<uint64_t, PrepAhead>;
 std::atomic<uint64_t> g_prep_ahead_done{0};     // textures moved ahead of a pass
 std::atomic<uint64_t> g_prep_ahead_learned{0};  // textures learned from a split
 }  // namespace (prep ahead state)
