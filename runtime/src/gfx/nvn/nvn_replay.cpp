@@ -860,8 +860,8 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
                 if (!t || !tex_gpu(t) || t->cpu_dirty.load(std::memory_order_relaxed)) continue;   // an upload stays with the draw
                 const VkImageLayout want = tex_sampled_layout(t);
                 if (tex_layout(t) == want) continue;
-                bool attached = shares_image(t, S.depth_tex.get());
-                for (uint32_t c = 0; c < S.ncolor && !attached; ++c) attached = shares_image(t, S.color_tex[c].get());
+                bool attached = same_image(t, S.depth_tex.get());
+                for (uint32_t c = 0; c < S.ncolor && !attached; ++c) attached = same_image(t, S.color_tex[c].get());
                 if (attached) continue;                    // this pass renders to it: it stays an attachment
                 tex_transition(t, *F, want);
                 g_prep_ahead_done.fetch_add(1, std::memory_order_relaxed);
