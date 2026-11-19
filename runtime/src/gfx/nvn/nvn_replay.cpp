@@ -5331,12 +5331,13 @@ uint64_t g_wm_mark = 0;                                    // memory_barrier_cou
 std::vector<std::pair<uint64_t, uint64_t>> g_wm_ranges;     // the open updates' [addr, end)
 
 bool wm_batch_on();
-// [nvn] batch_reports (default off for an A/B): report writes whose value the replay knows when it records them (timestamps, the statistics
+// [nvn] batch_reports (default on with batch_ubo_updates, so not under intel_compat; A/B on an RTX 3090 Ti at 4K: 248 -> 150 full
+// barriers a frame, GPU time -2.3%, screenshots unchanged): report writes whose value the replay knows when it records them (timestamps, the statistics
 // counters reported as 1, primitive counts counted on the CPU, ReportValue) go into the same runs as uniform updates. The game asks for its
 // counter set dozens of times a frame, and each report had a full barrier before and after it (~116 of ~250 full barriers a frame on the map
 // at 4K). Reports whose value a query writes on the GPU keep their own barriers.
 bool wm_reports_on() {
-    static const bool on = wm_batch_on() && nxrt::config_get_bool("nvn", "batch_reports", false);
+    static const bool on = wm_batch_on() && nxrt::config_get_bool("nvn", "batch_reports", true);
     return on;
 }
 
