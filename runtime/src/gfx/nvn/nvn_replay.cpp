@@ -5330,6 +5330,17 @@ VkCommandBuffer g_wm_cb = VK_NULL_HANDLE;
 uint64_t g_wm_mark = 0;                                    // memory_barrier_count(g_wm_cb) after the last update
 std::vector<std::pair<uint64_t, uint64_t>> g_wm_ranges;     // the open updates' [addr, end)
 
+bool wm_batch_on();
+// [nvn] batch_reports (default on with batch_ubo_updates, so not under intel_compat; A/B on an RTX 3090 Ti at 4K: 248 -> 150 full
+// barriers a frame, GPU time -2.3%, screenshots unchanged): report writes whose value the replay knows when it records them (timestamps, the statistics
+// counters reported as 1, primitive counts counted on the CPU, ReportValue) go into the same runs as uniform updates. The game asks for its
+// counter set dozens of times a frame, and each report had a full barrier before and after it (~116 of ~250 full barriers a frame on the map
+// at 4K). Reports whose value a query writes on the GPU keep their own barriers.
+bool wm_reports_on() {
+    static const bool on = wm_batch_on() && nxrt::config_get_bool("nvn", "batch_reports", true);
+    return on;
+}
+
 bool wm_batch_on() {
     static const bool on = nxrt::config_get_bool("nvn", "batch_ubo_updates", !nxrt::gfx::gpu_quirks().intel_compat);   // [gfx] intel_compat: off
     return on;
@@ -5348,6 +5359,8 @@ bool wm_keeps_open(Op op) {
         case Op::UpdateUniformBuffer: case Op::FenceSync: case Op::WaitSync: case Op::PushDebugGroup: case Op::PopDebugGroup: case Op::PushConstants:
         case Op::DiscardColor: case Op::DiscardDepthStencil:
             return true;
+        case Op::ReportCounter: case Op::ReportValue:
+            return wm_reports_on();      // a report that ends a query run closes the batch itself (do_write_memory without batch)
         default: return false;
     }
 }
@@ -5859,7 +5872,7 @@ void run_list(const CmdList& list, int depth) {
                     }
                     rep.counter = p.type == NVN_COUNTER_TYPE_PRIMITIVES_GENERATED ? g_prims_generated : g_prims_xfb;
                     note_report(p.address, rep.counter);
-                    if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                    if (p.address) do_write_memory(p.address, &rep, sizeof rep, wm_reports_on());
                     break;
                 }
                 // TIMESTAMP_TOP is a timestamp too (taken when the command reaches the top of the pipe): its counter word is 0 like TIMESTAMP's
@@ -5878,14 +5891,14 @@ void run_list(const CmdList& list, int depth) {
                 }
                 if (stamp) rep.counter = 0;
                 note_report(p.address, rep.counter);
-                if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                if (p.address) do_write_memory(p.address, &rep, sizeof rep, wm_reports_on());
                 break;
             }
             case Op::ReportValue: {
                 const auto& p = r.payload<P_ReportValue>();
                 struct { uint64_t counter, timestamp; } rep = {p.value, timestamp_ns()};
                 note_report(p.address, rep.counter);
-                if (p.address) do_write_memory(p.address, &rep, sizeof rep);
+                if (p.address) do_write_memory(p.address, &rep, sizeof rep, wm_reports_on());
                 break;
             }
             case Op::ResetCounter: {
