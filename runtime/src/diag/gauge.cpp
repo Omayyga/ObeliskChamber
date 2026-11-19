@@ -502,6 +502,16 @@ Scene& scene() {
 }
 }  // namespace
 
+namespace {
+std::atomic<SceneHookBegin> g_scene_hook_begin{nullptr};
+std::atomic<SceneHookEnd> g_scene_hook_end{nullptr};
+}  // namespace
+
+void set_scene_hook(SceneHookBegin begin, SceneHookEnd end) {
+    g_scene_hook_begin.store(begin, std::memory_order_release);
+    g_scene_hook_end.store(end, std::memory_order_release);
+}
+
 void hitch_scene(const char* label, bool begin) {
     Scene& sc = scene();
     std::lock_guard<std::mutex> lk(sc.mu);
@@ -512,6 +522,7 @@ void hitch_scene(const char* label, bool begin) {
         sc.first = n;
         for (int i = 0; i < kHpCount; i++) sc.phase0[i] = hitch_phase_total_ms(i);
         NXLOG_I("hitch", "scene '%s' begins at frame %llu", sc.label.c_str(), static_cast<unsigned long long>(n));
+        if (SceneHookBegin h = g_scene_hook_begin.load(std::memory_order_acquire)) h();
         return;
     }
     if (!sc.open) {
@@ -541,6 +552,7 @@ void hitch_scene(const char* label, bool begin) {
                      "%zu over 2x the median (%.2f ms); render thread ms/frame: replay %.2f, present %.2f (limiter %.2f), idle %.2f",
             sc.label.c_str(), st.frames, st.span_s, st.mean_fps, st.low1_fps, st.worst_ms, over25, over50, st.over2x, st.median_ms,
             per_frame(kHpRenderReplay), per_frame(kHpRenderPresent), per_frame(kHpRenderLimiter), per_frame(kHpRenderIdle));
+    if (SceneHookEnd h = g_scene_hook_end.load(std::memory_order_acquire)) h(sc.label.c_str(), frames);
 }
 
 size_t frame_times_recent(float* ms, size_t n) {

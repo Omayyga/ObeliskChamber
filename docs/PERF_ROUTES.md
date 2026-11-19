@@ -77,6 +77,10 @@ hitch: scene 'map_still': 2340 frames in 20.0 s: mean 117.0 fps, 1% low 92.3 fps
 `[nvn] replay_stats = 600` (render-thread cost per draw) and `[prof] gpu_stats = 600` (GPU time per frame) add their own lines; the
 report uses the ones that fall inside the run.
 
+Two more lines follow every scene: the full memory barriers and the render pass ends of exactly that scene, per frame and by the
+function and line that recorded them (`hitch: scene 'map_move': full barriers by caller ...`, `... pass ends by caller ...`). They
+are always there; no switch is needed.
+
 ## 3. A/B runs
 
 ```

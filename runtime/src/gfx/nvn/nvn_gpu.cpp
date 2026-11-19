@@ -1039,6 +1039,7 @@ struct Site {
     std::atomic<const char*> fn{nullptr};
     std::atomic<uint64_t> n{0};
     uint64_t seen = 0;                           // the total at the previous report (the reporting thread only)
+    std::atomic<uint64_t> scene0{0};             // the total at the open scene's begin (hitch scenes of a test route)
 };
 Site g_sites[kSiteKinds][kSites];
 std::atomic<uint64_t> g_site_other[kSiteKinds];
@@ -1067,15 +1068,17 @@ void site_count(int kind, const char* fn, int line) {
     g_site_other[kind].fetch_add(1, std::memory_order_relaxed);
 }
 
-std::string site_report(int kind, double frames, int top) {
-    if (kind < 0 || kind >= kSiteKinds || !(frames > 0)) return {};
+namespace {
+// The counts of each site from `base(site)` on, per frame, the largest first (site_report and the scene report).
+template <class Base, class Other>
+std::string site_lines(int kind, double frames, int top, Base base, Other other) {
     std::vector<std::pair<uint64_t, std::string>> by;
     uint64_t total = 0;
     for (Site& s : g_sites[kind]) {
         const uint64_t k = s.key.load(std::memory_order_acquire);
         if (!k) continue;
-        const uint64_t v = s.n.load(std::memory_order_relaxed), d = v - s.seen;
-        s.seen = v;
+        const uint64_t v = s.n.load(std::memory_order_relaxed);
+        const uint64_t d = v - base(s, v);
         if (!d) continue;
         const char* fn = s.fn.load(std::memory_order_acquire);
         char b[160];
@@ -1083,9 +1086,7 @@ std::string site_report(int kind, double frames, int top) {
         by.emplace_back(d, b);
         total += d;
     }
-    const uint64_t ov = g_site_other[kind].load(std::memory_order_relaxed), od = ov - g_site_other_seen[kind];
-    g_site_other_seen[kind] = ov;
-    if (od) { by.emplace_back(od, "other"); total += od; }
+    if (const uint64_t od = other()) { by.emplace_back(od, "other"); total += od; }
     std::sort(by.begin(), by.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     char b[64];
     std::snprintf(b, sizeof b, "%.1f/frame:", static_cast<double>(total) / frames);
@@ -1095,6 +1096,39 @@ std::string site_report(int kind, double frames, int top) {
         out += (i ? ", " : " ") + by[i].second + b;
     }
     if (by.size() > static_cast<size_t>(top)) out += ", ...";
+    return out;
+}
+std::atomic<uint64_t> g_site_other_scene0[kSiteKinds];
+
+void site_scene_begin() {
+    for (int kind = 0; kind < kSiteKinds; ++kind) {
+        for (Site& s : g_sites[kind]) s.scene0.store(s.n.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_site_other_scene0[kind].store(g_site_other[kind].load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+}
+// Sites claimed after the begin start from 0, which is right: they had no count before it.
+void site_scene_end(const char* label, double frames) {
+    if (!(frames > 0)) return;
+    const char* what[kSiteKinds] = {"full barriers", "pass ends"};
+    for (int kind = 0; kind < kSiteKinds; ++kind) {
+        const std::string r = site_lines(kind, frames, 16, [](Site& s, uint64_t) { return s.scene0.load(std::memory_order_relaxed); }, [kind] {
+            return g_site_other[kind].load(std::memory_order_relaxed) - g_site_other_scene0[kind].load(std::memory_order_relaxed);
+        });
+        NXLOG_I("hitch", "scene '%s': %s by caller %s", label ? label : "", what[kind], r.c_str());
+    }
+}
+[[maybe_unused]] const bool g_scene_hook_set = (nxrt::set_scene_hook(site_scene_begin, site_scene_end), true);
+}  // namespace
+
+std::string site_report(int kind, double frames, int top) {
+    if (kind < 0 || kind >= kSiteKinds || !(frames > 0)) return {};
+    // remembers the totals, so the next report counts from here
+    std::string out = site_lines(kind, frames, top, [](Site& s, uint64_t v) { const uint64_t b = s.seen; s.seen = v; return b; },
+                                 [kind] {
+                                     const uint64_t ov = g_site_other[kind].load(std::memory_order_relaxed), od = ov - g_site_other_seen[kind];
+                                     g_site_other_seen[kind] = ov;
+                                     return od;
+                                 });
     return out;
 }
 
