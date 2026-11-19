@@ -133,6 +133,9 @@ enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteReopen = 2, kSiteKinds 
 void site_count(int kind, const char* fn, int line);
 // The counts since the previous call, per frame over `frames`, the largest first: "fn:line 12.3, fn:line 4.0, ..." (at most `top`).
 std::string site_report(int kind, double frames, int top);
+// [nvn] prep_ahead: textures moved to their sampled layout ahead of a pass, and textures learned from a pass split (totals; nvn_replay.cpp).
+uint64_t prep_ahead_done();
+uint64_t prep_ahead_learned();
 // Full memory barriers this thread recorded into `cb` so far: a change since a point in its recording means one lies between.
 uint64_t memory_barrier_count(VkCommandBuffer cb);
 // [nvn] pass_barriers = tracked (S38): image_barrier derives its stage and access masks from the two layouts instead of all commands and
