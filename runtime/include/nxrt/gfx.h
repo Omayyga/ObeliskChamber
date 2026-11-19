@@ -127,6 +127,7 @@ struct DeviceFeatures {
     bool dynamic_rendering_unused_attachments = false;
     bool transform_feedback = false, transform_feedback_queries = false;   // VK_EXT_transform_feedback (the feedback queries: transformFeedbackQueries)
     bool index_type_uint8 = false;        // VK_EXT/KHR_index_type_uint8 (8-bit index buffers, indexTypeUint8)
+    bool device_fault = false;                // VK_EXT_device_fault: after a device loss the driver can say what faulted (vk_renderer.cpp)
     bool buffer_float32_atomic_add = false;   // VK_EXT_shader_atomic_float: shaderBufferFloat32AtomicAdd (OpAtomicFAddEXT on storage buffers)
     bool debug_labels = false;            // VK_EXT_debug_utils is enabled on the instance (command buffer labels)
     bool occlusion_query = false, occlusion_query_precise = false, pipeline_statistics_query = false;

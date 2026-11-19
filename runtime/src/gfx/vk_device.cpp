@@ -755,6 +755,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkPhysicalDeviceMemoryPriorityFeaturesEXT ampri = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT};
     VkPhysicalDevicePageableDeviceLocalMemoryFeaturesEXT apage = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PAGEABLE_DEVICE_LOCAL_MEMORY_FEATURES_EXT};
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT aaf = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT afault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
     std::vector<const char*> dev_exts;
     void* chain = nullptr;
     auto add_ext = [&](const char* name, void* feat_struct) {
@@ -768,6 +769,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     };
     const bool x_fsi = add_ext(VK_EXT_FRAGMENT_SHADER_INTERLOCK_EXTENSION_NAME, &afsi);
     const bool x_af = add_ext(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME, &aaf);   // native float adds to buffers (spirv_native_float_add)
+    // after a device loss, what the driver knows about the fault (faulting address, the vendor's fault code) for the report (#121).
+    // [gfx] device_fault = false: not enabled.
+    const bool x_fault = config_get_bool("gfx", "device_fault", true) && add_ext(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &afault);
     const bool x_dcc = add_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, &adcc);
     const bool x_dce = add_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME, &adce);
     const bool x_cbc = add_ext(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, &acbc);
@@ -826,6 +830,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     a13.dynamicRendering = VK_TRUE;
     a13.synchronization2 = VK_TRUE;
     a13.robustImageAccess = VK_FALSE;
+    afault.deviceFaultVendorBinary = VK_FALSE;   // only the fault descriptions, no vendor crash dump
     avail.features.robustBufferAccess = VK_FALSE;
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
@@ -873,6 +878,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     features_.transform_feedback = x_tfb && atfb.transformFeedback;
     features_.index_type_uint8 = x_u8 && au8.indexTypeUint8;
     features_.buffer_float32_atomic_add = x_af && aaf.shaderBufferFloat32AtomicAdd;
+    features_.device_fault = x_fault && afault.deviceFault;
     if (features_.transform_feedback) {   // transformFeedbackQueries is a property: the primitive counters of indirect draws under feedback need it
         VkPhysicalDeviceTransformFeedbackPropertiesEXT tfp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT};
         VkPhysicalDeviceProperties2 tfpp = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &tfp};

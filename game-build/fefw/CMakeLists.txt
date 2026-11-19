@@ -20,6 +20,11 @@ set(FEFW_EXEFS_DEFAULT "game/dump/exefs" CACHE PATH "default [fs] exefs")
 set(FEFW_ROMFS_DEFAULT "game/dump/romfs" CACHE PATH "default [fs] romfs")
 set(FEFW_MAIN_DEFAULT "" CACHE FILEPATH "default [fs] main: main as an uncompressed NSO (empty: <exefs>/main)")
 configure_file(src/fefw_paths.h.in "${CMAKE_CURRENT_BINARY_DIR}/fefw_paths.h" @ONLY)
+# fefw_build_id.h: the release version and `git describe`, written at every build (cmake/build_id.cmake) for the log and the reports
+add_custom_target(fefw_build_id
+    COMMAND "${CMAKE_COMMAND}" "-DROOT=${FEFW_ROOT}" "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/fefw_build_id.h" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/build_id.cmake"
+    BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/fefw_build_id.h"
+    COMMENT "Build id (version and git describe)")
 
 add_compile_options("-clang:-fmacro-prefix-map=${FEFW_ROOT}=.")
 set(FEFW_RUNTIME_DIR "${FEFW_ROOT}/runtime" CACHE PATH "runtime source tree compiled into ObeliskChamber.exe")
@@ -81,6 +86,7 @@ if(FEFW_RT_DLL)
     add_library(fefw_rt SHARED src/fefw_main.cpp src/fefw_rt.def)
     target_include_directories(fefw_rt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" src)
     target_compile_definitions(fefw_rt PRIVATE FEFW_RT_DLL=1)
+    add_dependencies(fefw_rt fefw_build_id)
     target_link_libraries(fefw_rt PRIVATE nxrt_game_ObeliskChamber nxrt_gfx nxrt user32)
     # no .pdb path in the DLL; low host allocations as for ObeliskChamber.exe (the guest ranges at 0x71_0000_0000 stay free)
     target_link_options(fefw_rt PRIVATE /HIGHENTROPYVA:NO /DEBUG:NONE /Brepro)
@@ -141,6 +147,7 @@ add_executable(fefw src/fefw_main.cpp src/fefw_hle.cpp res/fefw.rc)
 set_target_properties(fefw PROPERTIES OUTPUT_NAME "ObeliskChamber")
 set_source_files_properties(res/fefw.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.manifest;${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.ico")
 target_include_directories(fefw PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+add_dependencies(fefw fefw_build_id)
 target_link_libraries(fefw PRIVATE ${FEFW_LIBS} nxrt_game_ObeliskChamber nxrt_gfx nxrt nxrt_zstd)
 # As pkp.exe: a linker map next to the exe (host frames get names), a big main stack (lifted code nests deeply), low host allocations so
 # the guest ranges at 0x71_0000_0000 and up stay free. res/fefw.rc carries the manifest (UTF-8 code page).
