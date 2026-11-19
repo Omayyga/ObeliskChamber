@@ -179,7 +179,9 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size);
 // copy does not hold, and tracks them like the copies of mirror_begin_submit. The caller orders earlier writes to the pool before cb's copies
 // and the copies before their readers. True when every page of the range is valid in the copy afterwards; false (nothing or only part of it
 // copied) when a page is hot, banned or cannot be tracked, or the range has no copy. *bytes (optional) receives the bytes copied.
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes);
+// Why mirror_fill could not make a range current in the pool copy (`why`, when given): the compute shadow summary counts them.
+enum FillFail { kFillNone = 0, kFillOff, kFillNoMirror, kFillRange, kFillNoChunk, kFillNoSource, kFillHot, kFillBanned, kFillArm, kFillNotValid, kFillKinds };
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why = nullptr);
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use);
 void mirror_begin_submit(Frame& f, bool on);
 void mirror_destroy(PoolGpu* p);

@@ -1325,26 +1325,32 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
     }
 }
 
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes) {
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why) {
+    int dummy = 0;
+    int& w = why ? *why : dummy;
+    w = kFillNone;
     if (bytes) *bytes = 0;
-    if (!g_mirror_on || !size) return false;
+    if (!g_mirror_on || !size) { w = kFillOff; return false; }
     MemoryPool* mp = nullptr;
     PoolGpu* pg = nullptr;
     uint64_t poff = 0;
     const BufRef out = resolve_in_pool(gpu_address, size, &mp, &pg, &poff);
-    if (!out.ok || !pg || !pg->mirror) return false;
+    if (!out.ok || !pg || !pg->mirror) { w = kFillNoMirror; return false; }
     Mirror& m = *pg->mirror;
     const uint64_t first = poff / kPageBytes, last = (poff + size - 1) / kPageBytes;
     const uint64_t chunk_pages = kChunkBytes / kPageBytes;
-    if (last >= m.npages || last - first + 1 > kMaxBindPages || first / chunk_pages != last / chunk_pages) return false;
+    if (last >= m.npages || last - first + 1 > kMaxBindPages || first / chunk_pages != last / chunk_pages) { w = kFillRange; return false; }
     const VkBuffer chunk = mirror_chunk(m, first);
-    if (!chunk) return false;
+    if (!chunk) { w = kFillNoChunk; return false; }
     uint64_t src_base = 0;
     const VkBuffer src = mirror_src(m, first, &src_base);
-    if (!src) return false;
+    if (!src) { w = kFillNoSource; return false; }
     const uint32_t now = presents_now();
     for (uint64_t p = first; p <= last; ++p)      // per-frame CPU data (hot) or pages with another view (banned) stay in the pool
-        if (!page_valid(m, p) && (m.hot_until[static_cast<size_t>(p)] > now || mem::ww::page_banned(m.ww, p))) return false;
+        if (!page_valid(m, p) && (m.hot_until[static_cast<size_t>(p)] > now || mem::ww::page_banned(m.ww, p))) {
+            w = m.hot_until[static_cast<size_t>(p)] > now ? kFillHot : kFillBanned;
+            return false;
+        }
     static std::vector<VkBufferCopy> copies;
     copies.clear();
     const uint64_t base = (first / chunk_pages) * kChunkBytes;
@@ -1365,11 +1371,14 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
             if (bytes) *bytes += (q - p) * kPageBytes;
         } else {
             ok = false;
+            w = kFillArm;
         }
         p = q;
     }
     if (!copies.empty()) vkCmdCopyBuffer(cb, src, chunk, static_cast<uint32_t>(copies.size()), copies.data());
-    return ok && (range_valid(m, first, last - first + 1) || new_servable(m, first, last));
+    const bool done = ok && (range_valid(m, first, last - first + 1) || new_servable(m, first, last));
+    if (!done && w == kFillNone) w = kFillNotValid;
+    return done;
 }
 
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {

@@ -1700,6 +1700,10 @@ std::vector<ShadowUse> g_shadow_uses;                       // this dispatch
 // Results of direct bindings still only in the pool copy: nvn_gpu_pool.cpp (out_add ... out_end_submit, "compute out").
 bool g_shadowing = false;
 bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: the barrier before the copies in is recorded / some copy in is
+// Why a dispatch binding went to a shadow (copied in and out with a barrier each side) instead of the pool copy: kFill* from mirror_fill,
+// plus no device-local span for the range (kShReasonNoSpan) and [nvn] compute_direct off (kShReasonDirectOff). Summary line only.
+constexpr int kShReasonNoSpan = kFillKinds, kShReasonDirectOff = kFillKinds + 1, kShReasons = kFillKinds + 2;
+uint64_t g_sh_reason[kShReasons] = {};
 uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_pool = 0, g_sh_bytes_out = 0, g_sh_no_span = 0;   // summary line
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_merged = 0, g_sh_flushes = 0;
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
@@ -2099,10 +2103,11 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     const MirrorSpan ms = mirror_span(addr, size);    // pages holding a compute result count as current there (compute_out_lazy)
     if (ms.buf && compute_direct_on()) {
         bool ok = ms.valid;
+        int why = kFillNone;
         if (!ok) {
             sh_barrier_once();
             uint64_t filled = 0;
-            ok = mirror_fill(F->cb, addr, size, &filled);
+            ok = mirror_fill(F->cb, addr, size, &filled, &why);
             if (filled) { g_sh_copied = true; g_sh_bytes_fill += filled; }
             if (ok) ++g_sh_direct_filled;
         }
@@ -2113,7 +2118,10 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
             BufRef r = host; r.buffer = ms.buf; r.offset = ms.offset; r.avail = size;
             return r;
         }
+        ++g_sh_reason[why < kFillKinds ? why : kFillNone];
     }
+    else if (ms.buf) ++g_sh_reason[kShReasonDirectOff];
+    else ++g_sh_reason[kShReasonNoSpan];
     compute_out_guard(addr, size, kOutDispatch);      // the shadow reads the pool: held results there go back first
     const uint64_t key = addr ^ (static_cast<uint64_t>(size) << 40) ^ (static_cast<uint64_t>(size) >> 24);
     Shadow& sh = g_shadows[key];
@@ -2178,6 +2186,14 @@ void shadows_after_dispatch() {
                 (unsigned long long)(g_sh_bytes_pool >> 20), (unsigned long long)(g_sh_bytes_out >> 20), (unsigned long long)g_sh_direct,
                 (unsigned long long)g_sh_direct_filled, (unsigned long long)(g_sh_bytes_fill >> 20), (unsigned long long)(out_bytes_total() >> 20),
                 (unsigned long long)g_sh_flushes, (unsigned long long)g_sh_merged);
+        {
+            const auto R = [](int i) { return static_cast<unsigned long long>(g_sh_reason[i]); };
+            NXLOG_I("nvn.replay", "compute shadows by reason (a binding copied in and out instead of using the pool copy): hot CPU data %llu, "
+                    "page with another view %llu, arm budget %llu, range over a chunk or too long %llu, no pool copy %llu, no chunk %llu, "
+                    "no source %llu, not current after the fill %llu, mirrors off %llu, no span %llu, compute_direct off %llu, other %llu",
+                    R(kFillHot), R(kFillBanned), R(kFillArm), R(kFillRange), R(kFillNoMirror), R(kFillNoChunk), R(kFillNoSource), R(kFillNotValid),
+                    R(kFillOff), R(kShReasonNoSpan), R(kShReasonDirectOff), R(kFillNone));
+        }
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
                 gfx::Buffer old = it->second.buf;
