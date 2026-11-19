@@ -617,6 +617,14 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
     NXLOG_I("nvn.gpustats", "full barriers by caller %s", site_report(kSiteBarrier, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "pass ends by caller %s", site_report(kSitePassEnd, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "passes reopened on the same targets by caller %s", site_report(kSiteReopen, frames, 12).c_str());
+    if (nxrt::config_get_bool("nvn", "prep_ahead", false)) {
+        static uint64_t done0 = 0, learned0 = 0;
+        const uint64_t done = prep_ahead_done(), learned = prep_ahead_learned();
+        NXLOG_I("nvn.gpustats", "prep ahead: %.1f textures/frame moved to their sampled layout before their pass, %llu learned from splits",
+                static_cast<double>(done - done0) / frames, static_cast<unsigned long long>(learned - learned0));
+        done0 = done;
+        learned0 = learned;
+    }
     if (!st.gp.empty()) {
         // the pass profiler's intervals by label, the most expensive first ("pass WxH cN:fmt dfmt": one render pass; "cs <hash>": one dispatch)
         std::vector<std::pair<double, std::string>> by;

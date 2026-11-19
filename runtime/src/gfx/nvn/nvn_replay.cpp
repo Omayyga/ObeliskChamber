@@ -143,6 +143,40 @@ Pass P;
 // on the same targets" (gpustats, test-route scenes). Those are the passes split for nothing but a layout change, copy or barrier.
 struct LastEnd { bool valid = false; uint32_t ncolor = 0; Target color[8]; Target depth; const char* fn = nullptr; int line = 0; };
 LastEnd g_last_end;
+
+// [nvn] prep_ahead (default off). A draw in the middle of a pass that samples a texture still in an attachment layout splits the pass for the
+// layout change (prepare_textures, ~21 passes a frame on the map). Frames repeat their passes, so the textures that split a pass are learned
+// per target set (the pass's attachments) and moved to their sampled layout before the next pass on those targets begins. A miss changes
+// nothing: the draw still prepares what it needs and splits the pass as before. Entries not used for kPrepAheadAge presents are dropped.
+constexpr size_t kPrepAheadPerKey = 8;
+constexpr uint64_t kPrepAheadAge = 600;
+constexpr size_t kPrepAheadKeys = 512;
+struct PrepAhead {
+    Ref<Texture> tex[kPrepAheadPerKey];
+    uint32_t n = 0;
+    uint64_t used = 0;          // the present count when the entry last learned or prepared
+};
+std::unordered_map<uint64_t, PrepAhead> g_prep_ahead;
+std::atomic<uint64_t> g_prep_ahead_done{0};     // textures moved ahead of a pass
+std::atomic<uint64_t> g_prep_ahead_learned{0};  // textures learned from a split
+}  // namespace (prep ahead state)
+uint64_t prep_ahead_done() { return g_prep_ahead_done.load(std::memory_order_relaxed); }
+uint64_t prep_ahead_learned() { return g_prep_ahead_learned.load(std::memory_order_relaxed); }
+namespace {
+bool prep_ahead_on() {
+    static const bool on = config_get_bool("nvn", "prep_ahead", false);
+    return on;
+}
+uint64_t target_key(uint32_t ncolor, const Target* color, const Target& depth) {
+    uint64_t h = 0xcbf29ce484222325ull ^ ncolor;
+    auto mix = [&h](const Target& t) {
+        const uint64_t v[4] = {reinterpret_cast<uintptr_t>(t.tex), t.level, (static_cast<uint64_t>(t.layer) << 32) | t.layers, static_cast<uint64_t>(t.view_format)};
+        for (uint64_t x : v) { h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2); }
+    };
+    for (uint32_t i = 0; i < ncolor && i < 8; ++i) mix(color[i]);
+    mix(depth);
+    return h;
+}
 // [nvn] pass_barriers = tracked (S38). A pass whose draws can only have written its attachments (no storage buffers or images, no stream-out)
 // does not end with a barrier: its written attachments are remembered here, and the next command that could depend on them gets one. A
 // layout change of such an image is that barrier for the image (narrow masks, set_narrow_barriers); a later pass that renders to it again in
@@ -812,6 +846,34 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
         }
     }
     maybe_split();
+    if (prep_ahead_on() && !g_prep_ahead.empty()) {
+        Target col[8];
+        for (uint32_t i = 0; i < S.ncolor && i < 8; ++i) col[i] = make_target(S.color_tex[i].get(), S.color_view[i], S.color_has_view[i]);
+        const auto it = g_prep_ahead.find(target_key(S.ncolor, col, make_target(S.depth_tex.get(), S.depth_view, S.depth_has_view)));
+        if (it != g_prep_ahead.end()) {
+            PrepAhead& e = it->second;
+            const uint64_t now_p = counters().presents.load(std::memory_order_relaxed);
+            e.used = now_p;
+            for (uint32_t i = 0; i < e.n; ++i) {
+                Texture* t = e.tex[i].get();
+                if (!t || !tex_gpu(t) || t->cpu_dirty.load(std::memory_order_relaxed)) continue;   // an upload stays with the draw
+                const VkImageLayout want = tex_sampled_layout(t);
+                if (tex_layout(t) == want) continue;
+                bool attached = shares_image(t, S.depth_tex.get());
+                for (uint32_t c = 0; c < S.ncolor && !attached; ++c) attached = shares_image(t, S.color_tex[c].get());
+                if (attached) continue;                    // this pass renders to it: it stays an attachment
+                tex_transition(t, *F, want);
+                g_prep_ahead_done.fetch_add(1, std::memory_order_relaxed);
+            }
+            // drop entries unused for a while (their textures may be gone from the game)
+            static uint64_t swept = 0;
+            if (now_p - swept > kPrepAheadAge) {
+                swept = now_p;
+                for (auto i2 = g_prep_ahead.begin(); i2 != g_prep_ahead.end();)
+                    i2 = now_p - i2->second.used > kPrepAheadAge ? g_prep_ahead.erase(i2) : std::next(i2);
+            }
+        }
+    }
     if (gpass_on()) gpass_stamp(*F, "gap", 0);      // copies, dispatches, barriers and layout changes since the previous pass
     g_pass_draws = 0;
     g_pass_verts = 0;
@@ -1588,6 +1650,21 @@ void prepare_textures(const ProgLayout& pl) {
     // layout change (a render target sampled after it was drawn into).
     bool upload = false;
     for (Texture* t : need) upload = upload || !t->gpu || t->cpu_dirty.load(std::memory_order_relaxed);
+    if (!upload && need_storage.empty() && P.open && prep_ahead_on()) {
+        // the pass is split only for these layout changes: remember them for the next pass on the same targets
+        const uint64_t key = target_key(P.ncolor, P.color, P.depth);
+        if (g_prep_ahead.size() < kPrepAheadKeys || g_prep_ahead.count(key)) {
+            PrepAhead& e = g_prep_ahead[key];
+            e.used = counters().presents.load(std::memory_order_relaxed);
+            for (Texture* t : need) {
+                bool known = false;
+                for (uint32_t i = 0; i < e.n && !known; ++i) known = e.tex[i].get() == t;
+                if (known || e.n >= kPrepAheadPerKey) continue;
+                e.tex[e.n++] = Ref<Texture>::share(t);
+                g_prep_ahead_learned.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     if (upload) end_pass(true);             // reason: upload
     else if (!need_storage.empty()) end_pass(true);   // reason: storage image
     else end_pass(true);                    // reason: layout change only
