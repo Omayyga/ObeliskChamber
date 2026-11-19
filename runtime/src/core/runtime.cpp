@@ -45,7 +45,9 @@ bool init(const InitOptions& opt) {
     LogOptions lo;
     lo.path = opt.log_path;
     log_init(lo);
-    NXLOG_I("runtime", "nxrt starting (ABI %s)", abi_source());
+    set_app_build(opt.app_build);
+    if (*app_build()) NXLOG_I("runtime", "%s starting (ABI %s)", app_build(), abi_source());
+    else NXLOG_I("runtime", "nxrt starting (ABI %s)", abi_source());
     cpu_limit_apply();          // [sched] cpu_limit (potato mode): before any thread pool sizes itself
     if (opt.load_symbols) {
         size_t n = symbols_load_map();
