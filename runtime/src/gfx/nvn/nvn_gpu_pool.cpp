@@ -970,13 +970,13 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
 // The CPU wrote these pages since their copy: they wait for the next draw that wants them. A copy the CPU overwrote before any draw read it
 // was wasted (data the game writes for one frame, a ring buffer): after kHotHits of those in a row the page is hot and stays in the pool for
 // a hold that doubles every time it comes back.
-// [nvn] mirror_lean (default off for an A/B): less bookkeeping on the render thread at each submission start (code review RT1, RT3, RT6):
+// [nvn] mirror_lean (default on; A/B at 720p / 240 fps on an i7-13700K: render thread 7.03 -> 5.98 ms a frame, fps +6.8%): less bookkeeping on the render thread at each submission start (code review RT1, RT3, RT6):
 // a pool copy whose pages no CPU write touched skips the scan of its written bitmap; pages that have not been hot for kSigAge presents
 // leave the hot-copy list (it only grew before: every page ever read from host memory while hot stayed in it); a GPU write marks its
 // diagnostics bits a word at a time; the summary line counts valid pages by popcount.
 constexpr uint32_t kSigAge = 600;
 bool mirror_lean_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "mirror_lean", false);
+    static const bool on = nxrt::config_get_bool("nvn", "mirror_lean", true);
     return on;
 }
 
