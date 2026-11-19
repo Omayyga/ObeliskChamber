@@ -1566,7 +1566,14 @@ void prepare_textures(const ProgLayout& pl) {
     if (need.empty() && need_storage.empty()) return;
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
-    end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
+    // layout changes and uploads follow: each carries the dependency for its own image. The pass is ended on one of three lines, so the
+    // "pass ends by caller" counts (gpustats, test-route scenes) tell the reasons apart: an upload of CPU data, a storage image, or only a
+    // layout change (a render target sampled after it was drawn into).
+    bool upload = false;
+    for (Texture* t : need) upload = upload || !t->gpu || t->cpu_dirty.load(std::memory_order_relaxed);
+    if (upload) end_pass(true);             // reason: upload
+    else if (!need_storage.empty()) end_pass(true);   // reason: storage image
+    else end_pass(true);                    // reason: layout change only
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
     for (size_t i = 0; i < need.size(); ++i) {
         Texture* t = need[i];
