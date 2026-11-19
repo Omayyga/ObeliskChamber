@@ -154,6 +154,9 @@ $harness = Join-Path $Out 'harness'
 # Always rebuild: reusing Out/harness can silently ship an older translator after
 # the launcher invalidates the player's shader cache for a new translator version.
 Need "$root\tools\shaders\third_party\ryubing" 'staged Ryujinx sources (tools\shaders\scripts\setup_ryujinx.ps1)'
+# MSBuild reads environment variables as properties: a VERSION variable from the calling window (a release bat's "set VERSION=0.3.1t")
+# becomes the projects' $(Version), and a version NuGet cannot parse makes the restore fail with no message (MSB4181, 2026-11-19).
+foreach ($v in 'VERSION', 'VersionPrefix', 'VersionSuffix', 'PackageVersion') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 dotnet publish "$root\tools\shaders\harness\SpirvHarness.csproj" -c Release -r win-x64 --self-contained true -o $harness `
     -p:DebugType=none -p:DebugSymbols=false -p:Deterministic=true "-p:PathMap=$root=."
 if ($LASTEXITCODE) { throw 'dotnet publish failed' }
