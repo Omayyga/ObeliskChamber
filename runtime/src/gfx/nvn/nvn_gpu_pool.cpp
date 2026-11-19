@@ -1325,6 +1325,22 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size) {
     }
 }
 
+bool mirror_range_hot(uint64_t gpu_address, uint64_t size) {
+    if (!g_mirror_on || !size) return false;
+    MemoryPool* mp = nullptr;
+    PoolGpu* pg = nullptr;
+    uint64_t poff = 0;
+    const BufRef out = resolve_in_pool(gpu_address, size, &mp, &pg, &poff);
+    if (!out.ok || !pg || !pg->mirror) return false;
+    Mirror& m = *pg->mirror;
+    const uint64_t first = poff / kPageBytes, last = (poff + size - 1) / kPageBytes;
+    if (last >= m.npages) return false;
+    const uint32_t now = presents_now();
+    for (uint64_t p = first; p <= last; ++p)
+        if (!page_valid(m, p) && m.hot_until[static_cast<size_t>(p)] > now) return true;
+    return false;
+}
+
 bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why) {
     int dummy = 0;
     int& w = why ? *why : dummy;

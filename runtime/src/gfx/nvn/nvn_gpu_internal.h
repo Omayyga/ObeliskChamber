@@ -185,6 +185,9 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size);
 // Why mirror_fill could not make a range current in the pool copy (`why`, when given): the compute shadow summary counts them.
 enum FillFail { kFillNone = 0, kFillOff, kFillNoMirror, kFillRange, kFillNoChunk, kFillNoSource, kFillHot, kFillBanned, kFillArm, kFillNotValid, kFillKinds };
 bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why = nullptr);
+// True when a page of [gpu_address, gpu_address + size) that is not current in the pool copy is hot (per-frame CPU data): mirror_fill would
+// refuse it with kFillHot. Records nothing.
+bool mirror_range_hot(uint64_t gpu_address, uint64_t size);
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use);
 void mirror_begin_submit(Frame& f, bool on);
 void mirror_destroy(PoolGpu* p);
