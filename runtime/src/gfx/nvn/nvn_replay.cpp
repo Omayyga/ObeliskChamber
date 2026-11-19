@@ -1704,13 +1704,16 @@ bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: th
 // plus no device-local span for the range (kShReasonNoSpan) and [nvn] compute_direct off (kShReasonDirectOff). Summary line only.
 constexpr int kShReasonNoSpan = kFillKinds, kShReasonDirectOff = kFillKinds + 1, kShReasons = kFillKinds + 2;
 uint64_t g_sh_reason[kShReasons] = {};
-// [nvn] compute_hot_host (bytes, default 0 = off): a dispatch binding of at most this many bytes whose pages are hot (per-frame CPU data, so
+// [nvn] compute_hot_host (bytes; default 4096 on NVIDIA, 0 = off elsewhere): a dispatch binding of at most this many bytes whose pages are hot (per-frame CPU data, so
 // the pool copy is never current) is bound in the pool itself, over PCIe, instead of a shadow copied in and out with a full barrier each side.
 // Not for dispatches whose shader uses atomics (the exposure histogram's atomics over PCIe were the reason for shadows).
 uint64_t g_sh_hot_host = 0;
 bool g_cs_atomics = false;      // the dispatch being set up: its shader has atomic instructions
 uint64_t compute_hot_host_max() {
-    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "compute_hot_host", 0)));
+    // auto: 4096 on NVIDIA (A/B on an RTX 3090 Ti at 4K: GPU time -5.2%, 121 fewer full barriers a frame, screenshots unchanged), 0 elsewhere
+    // until AMD and Intel are measured (PCIe reads may cost more there)
+    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "compute_hot_host",
+                                                                                               device().properties().vendorID == 0x10de ? 4096 : 0)));
     return n;
 }
 bool spv_has_atomics(const ShaderInfo* sh) {
