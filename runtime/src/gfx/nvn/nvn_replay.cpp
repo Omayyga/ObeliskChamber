@@ -1704,6 +1704,30 @@ bool g_sh_barrier = false, g_sh_copied = false;             // this dispatch: th
 // plus no device-local span for the range (kShReasonNoSpan) and [nvn] compute_direct off (kShReasonDirectOff). Summary line only.
 constexpr int kShReasonNoSpan = kFillKinds, kShReasonDirectOff = kFillKinds + 1, kShReasons = kFillKinds + 2;
 uint64_t g_sh_reason[kShReasons] = {};
+// [nvn] compute_hot_host (bytes, default 0 = off): a dispatch binding of at most this many bytes whose pages are hot (per-frame CPU data, so
+// the pool copy is never current) is bound in the pool itself, over PCIe, instead of a shadow copied in and out with a full barrier each side.
+// Not for dispatches whose shader uses atomics (the exposure histogram's atomics over PCIe were the reason for shadows).
+uint64_t g_sh_hot_host = 0;
+bool g_cs_atomics = false;      // the dispatch being set up: its shader has atomic instructions
+uint64_t compute_hot_host_max() {
+    static const uint64_t n = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "compute_hot_host", 0)));
+    return n;
+}
+bool spv_has_atomics(const ShaderInfo* sh) {
+    static std::unordered_map<const ShaderInfo*, bool> cache;
+    const auto it = cache.find(sh);
+    if (it != cache.end()) return it->second;
+    bool any = false;
+    const std::vector<uint32_t>& w = sh->spirv;
+    for (size_t i = 5; i < w.size() && !any;) {
+        const uint32_t n = w[i] >> 16, op = w[i] & 0xffffu;
+        if (n == 0) break;
+        any = (op >= 227 && op <= 242) || op == 4396 || op == 5005 || op == 5006 || op == 6035;   // OpAtomic*, Fadd/Fmin/Fmax EXT, AtomicFlag
+        i += n;
+    }
+    cache.emplace(sh, any);
+    return any;
+}
 uint64_t g_sh_uses = 0, g_sh_from_mirror = 0, g_sh_bytes_mirror = 0, g_sh_bytes_pool = 0, g_sh_bytes_out = 0, g_sh_no_span = 0;   // summary line
 uint64_t g_sh_direct = 0, g_sh_direct_filled = 0, g_sh_bytes_fill = 0, g_sh_merged = 0, g_sh_flushes = 0;
 constexpr VkDeviceSize kShadowMax = 16ull << 20;
@@ -2100,6 +2124,11 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     }
     if (!out_lazy()) compute_out_guard(addr, size, kOutDispatch);
     if (size > kShadowMax) { compute_out_guard(addr, size, kOutDispatch); return host; }
+    if (const uint64_t hot_max = compute_hot_host_max(); hot_max && size <= hot_max && !g_cs_atomics && mirror_range_hot(addr, size)) {
+        compute_out_guard(addr, size, kOutDispatch);   // the dispatch reads the pool: held results there go back first
+        ++g_sh_hot_host;
+        return host;
+    }
     const MirrorSpan ms = mirror_span(addr, size);    // pages holding a compute result count as current there (compute_out_lazy)
     if (ms.buf && compute_direct_on()) {
         bool ok = ms.valid;
@@ -2193,6 +2222,9 @@ void shadows_after_dispatch() {
                     "no source %llu, not current after the fill %llu, mirrors off %llu, no span %llu, compute_direct off %llu, other %llu",
                     R(kFillHot), R(kFillBanned), R(kFillArm), R(kFillRange), R(kFillNoMirror), R(kFillNoChunk), R(kFillNoSource), R(kFillNotValid),
                     R(kFillOff), R(kShReasonNoSpan), R(kShReasonDirectOff), R(kFillNone));
+            if (compute_hot_host_max())
+                NXLOG_I("nvn.replay", "compute shadows: %llu small hot bindings bound in the pool instead ([nvn] compute_hot_host = %llu bytes)",
+                        static_cast<unsigned long long>(g_sh_hot_host), static_cast<unsigned long long>(compute_hot_host_max()));
         }
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
@@ -4774,6 +4806,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
     const ProgLayout* pl = layout_cached(stages);
+    g_cs_atomics = compute_hot_host_max() && spv_has_atomics(cs);
     if (!pl) return;
     bool memo_quiet = false;
     if (cmemo::check(*cs, *pl, x, y, z, indirect, &memo_quiet)) {
