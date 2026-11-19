@@ -48,6 +48,7 @@ struct Region {
     std::atomic<Region*>* slot = nullptr;
     SRWLOCK lock = SRWLOCK_INIT;
     std::unique_ptr<std::atomic<uint16_t>[]> releasing;   // per page: releasers that saw it armed and have not finished its VirtualProtect (release_page)
+    std::atomic<bool> any_written{false};                 // a written bit was set since take_written_if_any last scanned
 };
 
 // Protection belongs to the physical page, not a Region. Arming must exclude
@@ -239,6 +240,7 @@ bool release_page(Region* r, uint64_t page) {
     const uint64_t old = r->prot[w].fetch_and(~b, std::memory_order_acq_rel);
     r->valid[w].fetch_and(~b, std::memory_order_acq_rel);
     r->written[w].fetch_or(b, std::memory_order_acq_rel);
+    r->any_written.store(true, std::memory_order_release);
     const uint64_t addr = r->base + page * kPage;
     if (old & b) {
         bool ok = true;
@@ -736,6 +738,18 @@ bool all_valid_or_armed(const Region* r, uint64_t first, uint64_t count, const s
 }
 
 uint64_t guard_faults() { return g_guard_faults.load(std::memory_order_relaxed); }
+
+void take_written_if_any(Region* r, std::vector<uint64_t>& out) {
+    if (!r || !r->any_written.exchange(false, std::memory_order_acq_rel)) return;
+    take_written(r, out);
+}
+
+uint64_t count_valid(const Region* r) {
+    if (!r) return 0;
+    uint64_t n = 0;
+    for (uint64_t w = 0; w < r->nwords; ++w) n += static_cast<uint64_t>(__builtin_popcountll(r->valid[w].load(std::memory_order_relaxed)));
+    return n;
+}
 
 void take_written(Region* r, std::vector<uint64_t>& out) {
     if (!r) return;

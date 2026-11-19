@@ -970,9 +970,20 @@ Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
 // The CPU wrote these pages since their copy: they wait for the next draw that wants them. A copy the CPU overwrote before any draw read it
 // was wasted (data the game writes for one frame, a ring buffer): after kHotHits of those in a row the page is hot and stays in the pool for
 // a hold that doubles every time it comes back.
+// [nvn] mirror_lean (default on; A/B at 720p / 240 fps on an i7-13700K: render thread 7.03 -> 5.98 ms a frame, fps +6.8%): less bookkeeping on the render thread at each submission start (code review RT1, RT3, RT6):
+// a pool copy whose pages no CPU write touched skips the scan of its written bitmap; pages that have not been hot for kSigAge presents
+// leave the hot-copy list (it only grew before: every page ever read from host memory while hot stayed in it); a GPU write marks its
+// diagnostics bits a word at a time; the summary line counts valid pages by popcount.
+constexpr uint32_t kSigAge = 600;
+bool mirror_lean_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "mirror_lean", true);
+    return on;
+}
+
 void absorb_writes(Mirror& m, uint32_t now) {
     g_written_tmp.clear();
-    mem::ww::take_written(m.ww, g_written_tmp);
+    if (mirror_lean_on()) mem::ww::take_written_if_any(m.ww, g_written_tmp);
+    else mem::ww::take_written(m.ww, g_written_tmp);
     m.st_written += static_cast<int64_t>(g_written_tmp.size());
     for (uint64_t p : g_written_tmp) {
         const size_t i = static_cast<size_t>(p);
@@ -1004,11 +1015,17 @@ void log_summary(uint32_t now) {
     if (now - last < 1200) return;
     last = now;
     uint64_t valid = 0, hot = 0;
-    for (const Mirror* m : g_mirrors)
+    for (const Mirror* m : g_mirrors) {
+        if (mirror_lean_on()) {     // valid by popcount; hot pages only among those on the hot-copy list
+            valid += mem::ww::count_valid(m->ww);
+            for (uint32_t p : m->sig_pages) hot += m->hot_until[p] > now ? 1 : 0;
+            continue;
+        }
         for (uint64_t p = 0; p < m->npages; ++p) {
             valid += page_valid(*m, p) ? 1 : 0;
             hot += m->hot_until[static_cast<size_t>(p)] > now ? 1 : 0;
         }
+    }
     NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu",
             g_mirrors.size(), static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(valid * kPageBytes >> 20),
             static_cast<unsigned long long>(hot * kPageBytes >> 10), static_cast<long long>(g_st_dev_binds.load()), static_cast<long long>(g_st_host_binds.load()),
@@ -1411,10 +1428,12 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
     // word by word (page by page this was ~3.5 % of the render thread: draws note their storage buffers, MiBs each; notes/rt.md)
     const bool stale = mem::ww::any_valid(m.ww, first, last - first + 1);
     mem::ww::invalidate(m.ww, first, last - first + 1);
-    for (uint64_t p = first; p <= last; ++p) bit_put(m.gpu_inv, p, true);
+    const bool lean = mirror_lean_on();
+    if (!lean) for (uint64_t p = first; p <= last; ++p) bit_put(m.gpu_inv, p, true);
     for (uint64_t p = first; p <= last;) {
         const uint64_t lo = p & 63, hi = std::min<uint64_t>(64, lo + (last + 1 - p));
         const uint64_t mask = (hi - lo == 64) ? ~uint64_t{0} : (((uint64_t{1} << (hi - lo)) - 1) << lo);
+        if (lean) m.gpu_inv[static_cast<size_t>(p >> 6)] |= mask;
         m.want[static_cast<size_t>(p >> 6)] &= ~mask;
         m.tv[static_cast<size_t>(p >> 6)] &= ~mask;
         p += hi - lo;
@@ -1434,15 +1453,21 @@ void mirror_begin_submit(Frame& f, bool on) {
     log_summary(now);
     ++g_want_fate[6];
     if (now != g_sub_last_present) { g_sub_last_present = now; g_sub_idx = 0; } else if (g_sub_idx < 255) ++g_sub_idx;
-    for (Mirror* mp0 : g_mirrors) {
-        for (uint32_t p : mp0->tv_list) bit_put(mp0->tv, p, false);
-        mp0->tv_list.clear();
-    }
+    const bool lean = mirror_lean_on();
+    if (!lean)
+        for (Mirror* mp0 : g_mirrors) {
+            for (uint32_t p : mp0->tv_list) bit_put(mp0->tv, p, false);
+            mp0->tv_list.clear();
+        }
     uint64_t budget = kCopyBudget;
     bool barrier_done = false;
     g_arm_spent_ns = 0;          // the arming budget is per submission (mirror_fill and mirror_span_written during recording count too)
     for (Mirror* mp : g_mirrors) {
         Mirror& m = *mp;
+        if (lean && !m.tv_list.empty()) {     // one pass over the mirrors instead of two: a mirror's tv bits are its own
+            for (uint32_t p : m.tv_list) bit_put(m.tv, p, false);
+            m.tv_list.clear();
+        }
         absorb_writes(m, now);
         if (hot_copy_on() && !m.sig_pages.empty()) {
             // hot pages that earlier submissions at this position of the frame read from host memory: a snapshot copy for this submission
@@ -1452,6 +1477,7 @@ void mirror_begin_submit(Frame& f, bool on) {
             size_t keep = 0;
             for (uint32_t p : m.sig_pages) {
                 if (!m.sig[p]) continue;
+                if (lean && m.hot_until[p] <= now && now - m.hot_until[p] > kSigAge) { m.sig[p] = 0; continue; }   // not hot for a while: off the list
                 m.sig_pages[keep++] = p;
                 if (!(m.sig[p] & sb) || page_valid(m, p) || new_get(m, p) || m.hot_until[p] <= now || mem::ww::page_banned(m.ww, p)) continue;
                 cand.push_back(p);
