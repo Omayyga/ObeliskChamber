@@ -128,7 +128,8 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
 void memory_barrier(VkCommandBuffer cb, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE());
 // Call-site counts for gpustats ([prof] gpu_stats): full memory barriers (kSiteBarrier) and render passes ended (kSitePassEnd, counted by
 // nvn_replay.cpp's end_pass with its own caller's site). A fixed table per kind; a site past its room is counted as "other".
-enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteKinds = 2 };
+// kSiteReopen: a pass begun on the same targets as the pass just ended, counted under the site that ended it.
+enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteReopen = 2, kSiteKinds = 3 };
 void site_count(int kind, const char* fn, int line);
 // The counts since the previous call, per frame over `frames`, the largest first: "fn:line 12.3, fn:line 4.0, ..." (at most `top`).
 std::string site_report(int kind, double frames, int top);

@@ -139,6 +139,10 @@ struct Pass {
 };
 
 Pass P;
+// The targets of the pass that ended last and the site that ended it: a new pass on the same targets counts that site under "passes reopened
+// on the same targets" (gpustats, test-route scenes). Those are the passes split for nothing but a layout change, copy or barrier.
+struct LastEnd { bool valid = false; uint32_t ncolor = 0; Target color[8]; Target depth; const char* fn = nullptr; int line = 0; };
+LastEnd g_last_end;
 // [nvn] pass_barriers = tracked (S38). A pass whose draws can only have written its attachments (no storage buffers or images, no stream-out)
 // does not end with a barrier: its written attachments are remembered here, and the next command that could depend on them gets one. A
 // layout change of such an image is that barrier for the image (narrow masks, set_narrow_barriers); a later pass that renders to it again in
@@ -623,6 +627,12 @@ void end_pass(bool to_pass = false, const char* site_fn = __builtin_FUNCTION(), 
         return;
     }
     site_count(kSitePassEnd, site_fn, site_line);
+    g_last_end.valid = true;
+    g_last_end.ncolor = P.ncolor;
+    for (uint32_t i = 0; i < P.ncolor && i < 8; ++i) g_last_end.color[i] = P.color[i];
+    g_last_end.depth = P.depth;
+    g_last_end.fn = site_fn;
+    g_last_end.line = site_line;
     xfb_end_in_pass();
     vkCmdEndRendering(F->cb);
     P.open = false;
@@ -784,6 +794,13 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
     const VkExtent2D bare = writes && !S.ncolor && !S.depth_tex ? viewport_extent() : VkExtent2D{0, 0};
     if (P.open && targets_match() && P.depth_ro == depth_ro && bare.width <= P.extent.width && bare.height <= P.extent.height) return true;
     end_pass(true);
+    if (g_last_end.valid) {
+        bool same = g_last_end.ncolor == S.ncolor;
+        for (uint32_t i = 0; i < S.ncolor && same; ++i) same = g_last_end.color[i] == make_target(S.color_tex[i].get(), S.color_view[i], S.color_has_view[i]);
+        if (same) same = g_last_end.depth == make_target(S.depth_tex.get(), S.depth_view, S.depth_has_view);
+        if (same && (S.ncolor || S.depth_tex)) site_count(kSiteReopen, g_last_end.fn, g_last_end.line);
+        g_last_end.valid = false;
+    }
     if (!g_pending.empty()) {
         bool conflict = false;
         for (uint32_t i = 0; i < S.ncolor && !conflict; ++i) conflict = pending_conflict(S.color_tex[i].get(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);

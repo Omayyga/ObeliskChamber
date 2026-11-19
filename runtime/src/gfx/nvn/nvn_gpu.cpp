@@ -616,6 +616,7 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
     // M2 (Road to 0.4.0): where the full barriers and the pass ends come from, by the calling function and line, the most frequent first
     NXLOG_I("nvn.gpustats", "full barriers by caller %s", site_report(kSiteBarrier, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "pass ends by caller %s", site_report(kSitePassEnd, frames, 12).c_str());
+    NXLOG_I("nvn.gpustats", "passes reopened on the same targets by caller %s", site_report(kSiteReopen, frames, 12).c_str());
     if (!st.gp.empty()) {
         // the pass profiler's intervals by label, the most expensive first ("pass WxH cN:fmt dfmt": one render pass; "cs <hash>": one dispatch)
         std::vector<std::pair<double, std::string>> by;
@@ -1109,7 +1110,7 @@ void site_scene_begin() {
 // Sites claimed after the begin start from 0, which is right: they had no count before it.
 void site_scene_end(const char* label, double frames) {
     if (!(frames > 0)) return;
-    const char* what[kSiteKinds] = {"full barriers", "pass ends"};
+    const char* what[kSiteKinds] = {"full barriers", "pass ends", "passes reopened on the same targets"};
     for (int kind = 0; kind < kSiteKinds; ++kind) {
         const std::string r = site_lines(kind, frames, 16, [](Site& s, uint64_t) { return s.scene0.load(std::memory_order_relaxed); }, [kind] {
             return g_site_other[kind].load(std::memory_order_relaxed) - g_site_other_scene0[kind].load(std::memory_order_relaxed);
