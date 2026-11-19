@@ -8,7 +8,8 @@
 // or by the measured time when a frame took more than that plus 0.1 (0x180eea0). Title and menus store target 60 (0x652960, 0x66af3c),
 // gameplay stores 30 (0x7bf1c0, the 30 loaded at 0x7bf1ac). The runtime holds the game to 60 / interval (game::Info::present_interval_hz,
 // gfx/nvn/nvn_present.cpp). [fefw] fps60 = 1 makes the gameplay store 60 (inline site 0x7bf1c0 sets w9), so gameplay runs at 60 fps and
-// at the right speed, as the IPS patch of `mov w9, #30` does on the console.
+// at the right speed, as the IPS patch of `mov w9, #30` does on the console. [fefw] fps120 and fps240 (testing) also raise the display rate
+// to the target, so menus (target 60) keep 60 fps. 240 is the highest rate the frame-rate fixes follow: their scale stops at 1/8 of a 30 fps step.
 //
 // Game clock. [fefw] clock_log = N (seconds, default 10, 0 = off) logs how fast the game's clock ran against the host's over the last N
 // seconds: the time manager's game time (its first step channel, +0x48, ticks) against its own real time (+0x18, ticks; both from
@@ -80,7 +81,7 @@ constexpr uint64_t kMovieFrames = 0xff8;           // s64 in the player: the fra
 
 struct State {
     uint64_t base = 0x7100000000ull;
-    std::atomic<int> rate{30};      // the gameplay frame rate target: 30 (the game's own), 60 or 120. The menu changes it (play_set_rate)
+    std::atomic<int> rate{30};      // the gameplay frame rate target: 30 (the game's own), 60, 120 or 240 (testing). The menu changes it (play_set_rate)
     std::atomic<bool> rate_thread{false};
     uint32_t hook = 0, movie_select = 0, movie_count = 0, step_hook = 0, cursor_x = 0, cursor_y = 0;
     std::atomic<uint64_t> cursor_fixes{0};
@@ -107,14 +108,14 @@ template <class T> bool rd(uint64_t a, T* out) {
     return true;
 }
 
-// fps120: the display rate becomes 120 with the target, so menus (target 60) keep interval 2 = 60 fps and the game's step is 60 / 120.
-void raise_display_rate(uint64_t gfx) {
+// fps120 / fps240: the display rate becomes the target, so menus (target 60) keep interval 2 or 4 = 60 fps and the game's step is 60 / target.
+void raise_display_rate(uint64_t gfx, int32_t r) {
     int32_t rate = 0, longest = 0;
-    if (!rd(gfx + kDisplayRate, &rate) || !rd(gfx + kMaxInterval, &longest) || rate <= 0 || rate == 120) return;
-    const int32_t r = 120, l = longest * 120 / rate;
+    if (!rd(gfx + kDisplayRate, &rate) || !rd(gfx + kMaxInterval, &longest) || rate <= 0 || rate == r) return;
+    const int32_t l = longest * r / rate;
     std::memcpy(reinterpret_cast<void*>(gfx + kMaxInterval), &l, 4);
     std::memcpy(reinterpret_cast<void*>(gfx + kDisplayRate), &r, 4);
-    NXLOG_I(kTag, "display rate %d -> 120, longest present interval %d -> %d (fps120)", rate, longest, l);
+    NXLOG_I(kTag, "display rate %d -> %d, longest present interval %d -> %d (fps%d)", rate, r, longest, l, r);
 }
 
 // The site is hooked whatever the setting, so the menu can change the rate while the game runs: at 30 the game's own store goes through.
@@ -125,9 +126,9 @@ void hook_gameplay_target(::Ctx* c, uint64_t, void*) {
     static std::atomic<int> logged{0};
     if (logged.exchange(rate) != rate) NXLOG_I(kTag, "gameplay frame rate target: %d", rate);
     if (rate == 30) return;
-    if (rate == 120) {
-        raise_display_rate(c->x[8]);
-        set_present_interval_hz(120);
+    if (rate >= 120) {
+        raise_display_rate(c->x[8], rate);
+        set_present_interval_hz(rate);
     }
     c->x[9] = static_cast<uint64_t>(rate);
 }
@@ -281,7 +282,7 @@ void clock_thread() {
     }
 }
 
-// fps120: the runtime's rate follows the game's display rate should the game ever store it again.
+// fps120 / fps240: the runtime's rate follows the game's display rate should the game ever store it again.
 void rate_thread() {
     State& s = st();
     while (s.clock_run.load(std::memory_order_relaxed)) {
@@ -291,7 +292,7 @@ void rate_thread() {
         if (!rd(s.base + kGraphics, &gfx) || !rd(gfx + kDisplayRate, &display) || display <= 0) continue;
         const double hz = present_interval_hz_override();
         if (hz > 0 && hz != display) {
-            NXLOG_W(kTag, "the game's display rate is now %d: the runtime follows (fps120)", display);
+            NXLOG_W(kTag, "the game's display rate is now %d: the runtime follows (fps120 / fps240)", display);
             set_present_interval_hz(display);
         }
     }
@@ -313,19 +314,20 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     msg_install();      // the same: our messages in the dialogs' message files (the System menu's Quit Game)
     twprobe_start(base);
     const bool fps60 = config_get_bool("fefw", "fps60", false), fps120 = config_get_bool("fefw", "fps120", false);
-    s.rate.store(fps120 ? 120 : fps60 ? 60 : 30);
+    const bool fps240 = config_get_bool("fefw", "fps240", false);   // testing: gameplay that does not stop at 120 before the CPU does
+    const int rate = fps240 ? 240 : fps120 ? 120 : fps60 ? 60 : 30;
+    s.rate.store(rate);
     s.hook = hook_add_inline(base + kGameplayTargetStore, &hook_gameplay_target);
     // The game only runs at its target when the frame limit lets that many frames through: the shipped [display] fps_limit = 60 held fps120 at
     // 60 without a word in the log. The floor raises a numeric limit below the target (play mode logs it); "auto" and vsync keep the display's say
     // and get a warning there.
-    if (fps120) set_frame_cap_floor(120);
-    else if (fps60) set_frame_cap_floor(60);
-    // smooth_step defaults on with fps60 and fps120 (issue 24: the game's own rule runs 0.2-1.5 % fast at 60 when frames are uneven)
+    if (rate != 30) set_frame_cap_floor(rate);
+    // smooth_step defaults on above 30 (issue 24: the game's own rule runs 0.2-1.5 % fast at 60 when frames are uneven)
     {
         std::string m = config_get_str("fefw", "smooth_step", "auto");
-        s.smooth_mode = m.empty() || m == "auto" || m == "Auto" ? -1 : config_get_bool("fefw", "smooth_step", fps120 || fps60) ? 1 : 0;
+        s.smooth_mode = m.empty() || m == "auto" || m == "Auto" ? -1 : config_get_bool("fefw", "smooth_step", rate != 30) ? 1 : 0;
     }
-    const bool smooth = s.smooth_mode < 0 ? fps120 || fps60 : s.smooth_mode == 1;
+    const bool smooth = s.smooth_mode < 0 ? rate != 30 : s.smooth_mode == 1;
     s.smooth.store(smooth);
     const std::string step_csv = config_get_str("fefw", "step_csv", "");
     if (!step_csv.empty()) s.step_csv = std::fopen(step_csv.c_str(), "w");
@@ -351,21 +353,21 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     g_clock_period.store(static_cast<int>(std::clamp<int64_t>(period, 0, 3600)));
     const bool threads = !s.clock_run.exchange(true);   // the clock thread always samples (the F1 menu shows it); it logs when period > 0
     if (threads) std::thread(clock_thread).detach();
-    if (threads && fps120 && !s.rate_thread.exchange(true)) std::thread(rate_thread).detach();
-    NXLOG_I(kTag, "gameplay at %s fps ([fefw] fps60 = %d, fps120 = %d, smooth_step = %d), game clock log every %lld s",
-            fps120 ? "120" : fps60 ? "60" : "30 (the game's own)", fps60 ? 1 : 0, fps120 ? 1 : 0, smooth ? 1 : 0,
-            static_cast<long long>(period));
+    if (threads && rate >= 120 && !s.rate_thread.exchange(true)) std::thread(rate_thread).detach();
+    NXLOG_I(kTag, "gameplay at %s fps ([fefw] fps60 = %d, fps120 = %d, fps240 = %d, smooth_step = %d), game clock log every %lld s",
+            rate == 240 ? "240 (testing)" : rate == 120 ? "120" : rate == 60 ? "60" : "30 (the game's own)", fps60 ? 1 : 0, fps120 ? 1 : 0,
+            fps240 ? 1 : 0, smooth ? 1 : 0, static_cast<long long>(period));
 }
 
 // The menu changed the gameplay frame rate (main thread). The game stores its target when a gameplay scene starts (the hook above), so
 // the new rate holds from the next one; in a gameplay scene it is also written at once.
 void play_set_rate(int fps) {
     State& s = st();
-    fps = fps >= 120 ? 120 : fps >= 60 ? 60 : 30;
+    fps = fps >= 240 ? 240 : fps >= 120 ? 120 : fps >= 60 ? 60 : 30;
     const int old = s.rate.exchange(fps);
     if (s.smooth_mode < 0) s.smooth.store(fps != 30);
     set_frame_cap_floor(fps == 30 ? 0 : fps);
-    if (fps == 120 && s.clock_run.load() && !s.rate_thread.exchange(true)) std::thread(rate_thread).detach();
+    if (fps >= 120 && s.clock_run.load() && !s.rate_thread.exchange(true)) std::thread(rate_thread).detach();
     if (old == fps) return;
     uint64_t gfx = 0;
     int32_t target = 0;
@@ -374,9 +376,9 @@ void play_set_rate(int fps) {
     // force is gameplay's whatever its value (60 is also what menus store, so the value cannot tell; the first version waited then and
     // the rate stayed at 60 after one change to it).
     if (rd(s.base + kGraphics, &gfx) && rd(gfx + kTargetFps, &target) && target > 0 && (s.stores.load() > 0 || target == old)) {
-        if (fps == 120) {
-            raise_display_rate(gfx);
-            set_present_interval_hz(120);
+        if (fps >= 120) {
+            raise_display_rate(gfx, fps);
+            set_present_interval_hz(fps);
         }
         const int32_t v = fps;
         std::memcpy(reinterpret_cast<void*>(gfx + kTargetFps), &v, 4);
@@ -405,6 +407,7 @@ ClockInfo clock_info() {
     c.period_s = g_clock_period.load(std::memory_order_relaxed);
     c.fps60 = s.rate.load() == 60;
     c.fps120 = s.rate.load() == 120;
+    c.fps240 = s.rate.load() == 240;
     c.smooth = s.smooth.load();
     return c;
 }

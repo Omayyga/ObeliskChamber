@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -457,7 +458,7 @@ void init_once() {
         s.early_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_early_kb", 64))) << 10;
         s.stage_bytes = static_cast<uint64_t>(std::max<int64_t>(0, config_get_int("nvn", "tex_prep_stage_kb", 1024))) << 10;
         s.verify = config_get_bool("nvn", "tex_prep_verify", false);
-        const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned hw = std::max(1u, nxrt::host_threads());
         int n = static_cast<int>(config_get_int("nvn", "tex_prep_threads", 0));
         if (n <= 0) n = static_cast<int>(std::clamp<unsigned>(hw / 3, 2, 8));
         for (int i = 0; i < n; ++i) std::thread(worker_main).detach();

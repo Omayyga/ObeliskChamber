@@ -139,6 +139,10 @@ struct Pass {
 };
 
 Pass P;
+// The targets of the pass that ended last and the site that ended it: a new pass on the same targets counts that site under "passes reopened
+// on the same targets" (gpustats, test-route scenes). Those are the passes split for nothing but a layout change, copy or barrier.
+struct LastEnd { bool valid = false; uint32_t ncolor = 0; Target color[8]; Target depth; const char* fn = nullptr; int line = 0; };
+LastEnd g_last_end;
 // [nvn] pass_barriers = tracked (S38). A pass whose draws can only have written its attachments (no storage buffers or images, no stream-out)
 // does not end with a barrier: its written attachments are remembered here, and the next command that could depend on them gets one. A
 // layout change of such an image is that barrier for the image (narrow masks, set_narrow_barriers); a later pass that renders to it again in
@@ -613,14 +617,22 @@ bool same_image(Texture* a, Texture* b) { return a == b || (a && b && a->gpu && 
 // to_pass: the caller only starts another pass or changes image layouts next (ensure_pass, prepare_textures); with tracked barriers the pass
 // then ends without a barrier when it only wrote its attachments. Any other caller gets a full barrier, also for passes ended earlier
 // without one.
-void end_pass(bool to_pass = false) {
+// The caller's function and line count the pass end (and any barrier it records) for gpustats ([prof] gpu_stats).
+void end_pass(bool to_pass = false, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE()) {
     if (!P.open) {
         if (!to_pass && !g_pending.empty()) {
-            memory_barrier(F->cb);
+            memory_barrier(F->cb, site_fn, site_line);
             g_pending.clear();
         }
         return;
     }
+    site_count(kSitePassEnd, site_fn, site_line);
+    g_last_end.valid = true;
+    g_last_end.ncolor = P.ncolor;
+    for (uint32_t i = 0; i < P.ncolor && i < 8; ++i) g_last_end.color[i] = P.color[i];
+    g_last_end.depth = P.depth;
+    g_last_end.fn = site_fn;
+    g_last_end.line = site_line;
     xfb_end_in_pass();
     vkCmdEndRendering(F->cb);
     P.open = false;
@@ -643,7 +655,7 @@ void end_pass(bool to_pass = false) {
         for (uint32_t i = 0; i < P.ncolor; ++i) remember(P.color[i].tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         if (!P.depth_ro) remember(P.depth.tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     } else {
-        memory_barrier(F->cb);
+        memory_barrier(F->cb, site_fn, site_line);
         g_pending.clear();
     }
     g_pass_unsafe = false;
@@ -782,6 +794,13 @@ bool ensure_pass(bool depth_ro = false, bool writes = false) {
     const VkExtent2D bare = writes && !S.ncolor && !S.depth_tex ? viewport_extent() : VkExtent2D{0, 0};
     if (P.open && targets_match() && P.depth_ro == depth_ro && bare.width <= P.extent.width && bare.height <= P.extent.height) return true;
     end_pass(true);
+    if (g_last_end.valid) {
+        bool same = g_last_end.ncolor == S.ncolor;
+        for (uint32_t i = 0; i < S.ncolor && same; ++i) same = g_last_end.color[i] == make_target(S.color_tex[i].get(), S.color_view[i], S.color_has_view[i]);
+        if (same) same = g_last_end.depth == make_target(S.depth_tex.get(), S.depth_view, S.depth_has_view);
+        if (same && (S.ncolor || S.depth_tex)) site_count(kSiteReopen, g_last_end.fn, g_last_end.line);
+        g_last_end.valid = false;
+    }
     if (!g_pending.empty()) {
         bool conflict = false;
         for (uint32_t i = 0; i < S.ncolor && !conflict; ++i) conflict = pending_conflict(S.color_tex[i].get(), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1564,7 +1583,14 @@ void prepare_textures(const ProgLayout& pl) {
     if (need.empty() && need_storage.empty()) return;
     for (Texture* t : need) out_texture_read(t);           // an upload reads game memory: compute results held there go back first
     for (Texture* t : need_storage) out_texture_read(t);
-    end_pass(true);     // layout changes and uploads follow: each carries the dependency for its own image
+    // layout changes and uploads follow: each carries the dependency for its own image. The pass is ended on one of three lines, so the
+    // "pass ends by caller" counts (gpustats, test-route scenes) tell the reasons apart: an upload of CPU data, a storage image, or only a
+    // layout change (a render target sampled after it was drawn into).
+    bool upload = false;
+    for (Texture* t : need) upload = upload || !t->gpu || t->cpu_dirty.load(std::memory_order_relaxed);
+    if (upload) end_pass(true);             // reason: upload
+    else if (!need_storage.empty()) end_pass(true);   // reason: storage image
+    else end_pass(true);                    // reason: layout change only
     counters().pass_breaks.fetch_add(1, std::memory_order_relaxed);
     for (size_t i = 0; i < need.size(); ++i) {
         Texture* t = need[i];

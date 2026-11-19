@@ -45,7 +45,7 @@ struct ClockInfo {
     int target = 0, display = 0;
     float step = 0;           // the last step, frames of 1/59.94 s
     int period_s = 0;         // [fefw] clock_log in force (0 = no log lines)
-    bool fps60 = false, fps120 = false, smooth = false;
+    bool fps60 = false, fps120 = false, fps240 = false, smooth = false;
 };
 ClockInfo clock_info();
 void set_clock_log(int period_s);   // live
@@ -79,7 +79,7 @@ void res_install(uint64_t base);
 void res_live_apply(bool force);     // [fefw] render_ratio, shadow_size, quality were written; force: rebuild though the size is the same
 void res_frame();                    // once per frame: the second half of a forced rebuild
 bool res_dynres_live(bool on);       // [nvn] dynres; false: it cannot run (no [fefw] output)
-void play_set_rate(int fps);         // 30, 60 or 120
+void play_set_rate(int fps);         // 30, 60, 120 or 240 (testing)
 void play_set_smooth(int mode);      // -1 auto, 0 off, 1 on
 // The render-target pool's allocator was given room past the pool ([fefw] rt_pool_overflow_mb): renders above half of a 2160p output fit.
 bool res_rt_pool_extended();

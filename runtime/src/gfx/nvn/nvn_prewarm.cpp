@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -328,7 +329,7 @@ void prewarm_init() {
             }
         }
         g_stats.queued = boot ? g_recs.size() : 0;
-        const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned hw = std::max(1u, nxrt::host_threads());
         const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 4, 1, 6));   // was hw / 6, 1 to 4 (2 on 16 threads)
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);

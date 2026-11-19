@@ -6,6 +6,7 @@
 
 #include "nxrt/audio_sink.h"
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
 #include "nxrt/eh.h"
@@ -45,6 +46,7 @@ bool init(const InitOptions& opt) {
     lo.path = opt.log_path;
     log_init(lo);
     NXLOG_I("runtime", "nxrt starting (ABI %s)", abi_source());
+    cpu_limit_apply();          // [sched] cpu_limit (potato mode): before any thread pool sizes itself
     if (opt.load_symbols) {
         size_t n = symbols_load_map();
         NXLOG_I("runtime", "host symbols: %zu from the linker map%s%s", n, n ? " " : " (no map next to the exe or in its PDB's folder: host frames show module+offset only)", n ? symbols_map_path().c_str() : "");

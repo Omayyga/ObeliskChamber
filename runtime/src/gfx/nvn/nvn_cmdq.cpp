@@ -21,6 +21,7 @@
 #include <tuple>
 
 #include "nxrt/config.h"
+#include "nxrt/cpu_limit.h"
 #include "nxrt/diag.h"
 #include "nxrt/log.h"
 
@@ -680,20 +681,7 @@ bool enabled() { return g_q != nullptr && g_running; }
 
 namespace {
 // Physical cores of the PC (SMT siblings counted once); 0 when Windows cannot say.
-int physical_cores() {
-    DWORD len = 0;
-    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
-    if (!len) return 0;
-    std::string buf(len, '\0');
-    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &len)) return 0;
-    int n = 0;
-    for (DWORD off = 0; off < len;) {
-        auto* e = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
-        if (e->Relationship == RelationProcessorCore) ++n;
-        off += e->Size;
-    }
-    return n;
-}
+int physical_cores() { return nxrt::host_cores(); }   // [sched] cpu_limit (potato mode) counts here
 // [nvn] replay_threads: `auto` (default) is 2 on a CPU with 6 or more physical cores and 1 below that. The worker is a busy thread (6-16 % of a
 // core in a 4K battle, plus up to ~100 us of spinning each time it runs dry): with 6+ cores it takes the render thread's driver time off the
 // frame; on 4 cores it would compete with the game's own threads. `1` or `2` choose it outright.

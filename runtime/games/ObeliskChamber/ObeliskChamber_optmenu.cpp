@@ -348,6 +348,7 @@ constexpr const char* kLatencyNames[] = {"Off", "Auto", "On", "Boost"};
 bool ini_on(const char* key) { return norm(ini("fefw", key, "0")) == "1"; }
 int rate_get() { return ini_on("fps120") ? 2 : ini_on("fps60") ? 1 : 0; }
 void rate_set(int i) {
+    if (ini_on("fps240")) ini_write("fefw", "fps240", "0");   // the F1 menu's 240 (testing) gives way to a choice made here
     if (i == 2) {
         ini_write("fefw", "fps120", "1");
     } else {
