@@ -41,6 +41,7 @@ $ExeB = (Resolve-Path $ExeB).Path
 $exes = @($Exe, $ExeB)
 $Ini = (Resolve-Path $Ini).Path
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path   # the game runs in the run folder: a relative path would land there
 $runDir = Split-Path -Parent $Ini
 
 function Parse-Vars([string]$spec) {
