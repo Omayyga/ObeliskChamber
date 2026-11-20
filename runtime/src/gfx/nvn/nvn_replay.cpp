@@ -3976,6 +3976,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
     const PrimConversion conv = prim_conversion(static_cast<int>(p.mode));
     if (conv == PrimConversion::None) {
         TRACE("    vertices %u instances %u first %u", p.count, p.instance_count, p.first);
+        ckpt_args("draw", p.count, p.instance_count, p.first, 0, p.base_instance);
         vkCmdDraw(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), p.first, p.base_instance);
     } else {
         // QUADS / QUAD_STRIP / POLYGON / LINE_LOOP: generate an index buffer
@@ -3984,6 +3985,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty()) return;
         if (!bind_u32_indices(idx)) return;
+        ckpt_args("draw-conv", static_cast<uint32_t>(idx.size()), p.instance_count, p.first, 0, p.base_instance);
         vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, 0, p.base_instance);
     }
     rs_mark(kRsCall);
@@ -4073,10 +4075,12 @@ void do_draw_elements(const P_DrawElements& p) {
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty()) return;
         if (!bind_u32_indices(idx)) return;
+        ckpt_args("idx-conv", static_cast<uint32_t>(idx.size()), p.instance_count, static_cast<uint32_t>(p.type), static_cast<uint32_t>(p.base_vertex), p.base_instance);
         vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
     } else {
         BufRef br = resolve_read(p.index_address, static_cast<uint64_t>(p.count) * isz, kReadIndex);
         vkCmdBindIndexBuffer(F->cb, br.buffer, br.offset, vk_index_type(static_cast<int>(p.type)));
+        ckpt_args("indexed", p.count, p.instance_count, static_cast<uint32_t>(p.type), static_cast<uint32_t>(p.base_vertex), p.base_instance, p.index_address);
         vkCmdDrawIndexed(F->cb, p.count, std::max<uint32_t>(1, p.instance_count), 0, p.base_vertex, p.base_instance);
     }
     rs_mark(kRsCall);
@@ -4152,6 +4156,7 @@ void draw_indirect_cpu(const P_DrawIndirect& p, PrimConversion conv, uint32_t is
         count_primitives(p.mode, count, instances);
         const std::vector<uint32_t> idx = convert_prim_indices(conv, in);
         if (idx.empty() || !bind_u32_indices(idx)) continue;
+        ckpt_args("ind-cpu", static_cast<uint32_t>(idx.size()), instances, 0, static_cast<uint32_t>(base_vertex), base_instance);
         vkCmdDrawIndexed(F->cb, static_cast<uint32_t>(idx.size()), instances, 0, base_vertex, base_instance);
         drew = true;
     }
@@ -4190,11 +4195,14 @@ void do_draw_indirect(const P_DrawIndirect& p) {
     if (p.multi && p.count_address) {
         BufRef cb = held_or_pool(p.count_address, 4, kOutIndirect, false);
         const uint32_t stride = static_cast<uint32_t>(p.stride ? p.stride : cmd_size);
+        ckpt_args(indexed ? "idx-ind-count" : "ind-count", p.max_count, stride, static_cast<uint32_t>(p.type), 0, 0, p.indirect_address, host_ptr(p.count_address), 1);
         if (indexed) vkCmdDrawIndexedIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride);
         else vkCmdDrawIndirectCount(F->cb, ib.buffer, ib.offset, cb.buffer, cb.offset, p.max_count, stride);
     } else if (indexed) {
+        ckpt_args("idx-indirect", 1, 20, static_cast<uint32_t>(p.type), 0, 0, p.indirect_address, host_ptr(p.indirect_address), 5);
         vkCmdDrawIndexedIndirect(F->cb, ib.buffer, ib.offset, 1, 20);
     } else {
+        ckpt_args("indirect", 1, 16, 0, 0, 0, p.indirect_address, host_ptr(p.indirect_address), 4);
         vkCmdDrawIndirect(F->cb, ib.buffer, ib.offset, 1, 16);
     }
     rs_mark(kRsCall);
@@ -4227,6 +4235,7 @@ void do_draw_xfb(const P_DrawXfb& p) {
     uint32_t stride = g_key_attr_count ? S.stream[g_key_binding[0]].stride : 0;
     for (uint32_t b = 0; !stride && b < 16; ++b) stride = S.stream[b].stride;
     if (!stride) { note_unsupported("DrawTransformFeedback with no vertex stream stride"); counters().draws_skipped.fetch_add(1); return; }
+    ckpt_args("xfb", stride, slot, 0, 0, 0);   // [gfx] gpu_checkpoints: the vertex count comes from the section's GPU byte counter
     vkCmdDrawIndirectByteCountEXT(F->cb, 1, 0, g_xfb_counter.buffer, static_cast<VkDeviceSize>(slot) * kXfbSlotBytes, 0, stride);
     rs_mark(kRsCall);
     counters().draws.fetch_add(1, std::memory_order_relaxed);
