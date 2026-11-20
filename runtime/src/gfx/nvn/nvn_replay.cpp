@@ -34,6 +34,7 @@
 #include "nxrt/log.h"
 #include "api_dlss.h"
 #include "nvn_astc_gpu.h"
+#include "nvn_checkpoints.h"
 #include "nvn_decoded.h"
 #include "nvn_enums.h"
 #include "nvn_framegen.h"
@@ -3787,6 +3788,10 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     }
     g_dirty = g_mirror_stale ? (kVb | kDesc) : 0;     // a storage buffer of this draw made copied pages stale: the next draw binds again
     g_mirror_stale = false;
+    {
+        auto h = [&](int st) { return S.stage[st] ? S.stage[st]->hash.c_str() : nullptr; };
+        ckpt_draw(F->cb, h(kVertex), h(kFragment), h(kGeometry));     // [gfx] gpu_checkpoints (no-op when off)
+    }
     *topo_out = topo;
     rs_mark(kRsVb);
     ++g_rs.draws;
@@ -4988,6 +4993,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         gstamp("shadow in");
     }
     cs_before_dispatch(*pl, indirect);
+    ckpt_dispatch(F->cb, cs->hash.c_str());     // [gfx] gpu_checkpoints (no-op when off)
     if (indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
     } else {

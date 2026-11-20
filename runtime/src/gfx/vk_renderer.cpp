@@ -69,6 +69,8 @@ std::string gpu_timeout_hint() {
     return b;
 }
 
+std::atomic<std::string (*)()> g_lost_extra{nullptr};   // set_device_lost_extra
+
 const char* fault_type_name(VkDeviceFaultAddressTypeEXT t) {
     switch (t) {
         case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "none";
@@ -157,6 +159,7 @@ const char* window_mode_name() {
     }
     text += gpu_timeout_hint();
     text += device_fault_report();
+    if (auto* extra = g_lost_extra.load()) text += extra();
     text += frames == 0
                 ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
                   "(windowed, say), use another (F1 > Display) and tell us which works; [gfx] gpu in ObeliskChamber.ini picks another GPU.\n"
@@ -1227,5 +1230,7 @@ bool Renderer::capture_pending() const { return impl_->cap_pending.load(std::mem
 
 RendererStats Renderer::stats() const { return impl_->st; }
 void Renderer::wait_idle() { impl_->dev->wait_idle(); }
+
+void set_device_lost_extra(std::string (*fn)()) { g_lost_extra.store(fn); }
 
 }  // namespace nxrt::gfx
