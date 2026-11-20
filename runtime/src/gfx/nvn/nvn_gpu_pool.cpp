@@ -5,6 +5,7 @@
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -89,6 +90,7 @@ constexpr uint64_t kMirrorChunkBytes = 64ull << 20;   // the mirror's chunk (kCh
 VkBuffer g_dummy = VK_NULL_HANDLE;
 gfx::Buffer g_dummy_buf;
 std::once_flag g_dummy_once;
+std::atomic<VkBuffer> g_dummy_ready{VK_NULL_HANDLE};   // g_dummy once made (dummy_buffer's fast path)
 std::mutex g_log_mu;
 std::unordered_set<uint64_t> g_logged;
 std::mutex g_live_mu;
@@ -533,7 +535,11 @@ void prefetch_pool(MemoryPool* p) {
 }
 
 VkBuffer dummy_buffer() {
+    // Every draw without vertex buffers asks for it. MSVC's call_once is a call into ntdll (InitOnceBeginInitialize) each time: 0.2% of
+    // the render thread in the 2026-11-19 profile. The atomic is the fast path; call_once still makes the buffer exactly once.
+    if (const VkBuffer b = g_dummy_ready.load(std::memory_order_acquire)) return b;
     std::call_once(g_dummy_once, make_dummy);
+    g_dummy_ready.store(g_dummy, std::memory_order_release);
     return g_dummy;
 }
 
@@ -728,6 +734,7 @@ void pool_shutdown() {
     if (g_dummy_buf.buffer) buffer_views_forget(g_dummy_buf.buffer);
     if (g_dummy_buf.buffer) device().destroy_buffer(g_dummy_buf);
     g_dummy = VK_NULL_HANDLE;
+    g_dummy_ready.store(VK_NULL_HANDLE, std::memory_order_release);
     g_dummy_buf = gfx::Buffer();
     new (&g_dummy_once) std::once_flag();
 }
