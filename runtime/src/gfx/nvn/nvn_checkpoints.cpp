@@ -33,6 +33,11 @@ struct Rec {
     uint64_t present = 0;              // presents at the time it was recorded
     char kind = 0;                     // 'd' draw, 'c' dispatch
     char a[20] = {}, b[20] = {}, c[20] = {};   // vertex, fragment, geometry (draws) or compute (dispatches) shader hashes
+    char what[16] = {};                // ckpt_args: the Vulkan draw call ("draw", "indexed", "indirect", ...)
+    uint32_t v[5] = {};                // its counts (see ckpt_args)
+    uint64_t addr = 0;                 // indirect: the argument buffer's address
+    uint32_t host[5] = {};             // indirect: the arguments as the CPU's copy of that memory held them when recorded
+    uint8_t nhost = 0;
 };
 
 Rec* g_ring = nullptr;
@@ -54,7 +59,7 @@ const char* stage_name(VkPipelineStageFlagBits s) {
 }
 
 std::string describe(uint64_t seq) {
-    char b[200];
+    char b[240];
     const Rec& r = g_ring[seq % kRing];
     if (!seq || r.seq.load(std::memory_order_acquire) != seq) {
         std::snprintf(b, sizeof b, "marker %llu (no longer recorded)", static_cast<unsigned long long>(seq));
@@ -66,7 +71,21 @@ std::string describe(uint64_t seq) {
     else
         std::snprintf(b, sizeof b, "marker %llu: draw, vs %s fs %s%s%s (present %llu)", static_cast<unsigned long long>(seq), r.a, r.b,
                       r.c[0] && r.c[0] != '-' ? " gs " : "", r.c[0] && r.c[0] != '-' ? r.c : "", static_cast<unsigned long long>(r.present));
-    return b;
+    std::string out = b;
+    if (r.what[0]) {
+        char c[240];
+        std::snprintf(c, sizeof c, "; %s %u %u %u %u %u", r.what, r.v[0], r.v[1], r.v[2], r.v[3], r.v[4]);
+        out += c;
+        if (r.addr) {
+            std::snprintf(c, sizeof c, " at 0x%llx", static_cast<unsigned long long>(r.addr));
+            out += c;
+            if (r.nhost) {
+                out += ", CPU copy:";
+                for (uint8_t i = 0; i < r.nhost; ++i) { std::snprintf(c, sizeof c, " %u", r.host[i]); out += c; }
+            }
+        }
+    }
+    return out;
 }
 
 // The device-lost report's section: called once, on the thread that saw the loss.
@@ -125,6 +144,9 @@ void mark(VkCommandBuffer cb, char kind, const char* a, const char* b, const cha
     copy_hash(r.a, a);
     copy_hash(r.b, b);
     copy_hash(r.c, c);
+    r.what[0] = 0;
+    r.addr = 0;
+    r.nhost = 0;
     r.seq.store(seq, std::memory_order_release);
     vkCmdSetCheckpointNV(cb, reinterpret_cast<const void*>(static_cast<uintptr_t>(seq)));
 }
@@ -137,6 +159,25 @@ void ckpt_draw(VkCommandBuffer cb, const char* vs, const char* fs, const char* g
 
 void ckpt_dispatch(VkCommandBuffer cb, const char* cs) {
     if (on()) mark(cb, 'c', cs, nullptr, nullptr);
+}
+
+void ckpt_args(const char* what, uint32_t v0, uint32_t v1, uint32_t v2, uint32_t v3, uint32_t v4, uint64_t addr, const void* host, uint32_t nhost) {
+    if (g_state != 1 || !g_seq) return;
+    Rec& r = g_ring[g_seq % kRing];
+    const uint64_t seq = r.seq.load(std::memory_order_relaxed);
+    if (seq != g_seq) return;
+    r.seq.store(0, std::memory_order_relaxed);
+    std::strncpy(r.what, what, sizeof r.what - 1);
+    r.what[sizeof r.what - 1] = 0;
+    const uint32_t vv[5] = {v0, v1, v2, v3, v4};
+    std::memcpy(r.v, vv, sizeof vv);
+    r.addr = addr;
+    r.nhost = 0;
+    if (host && nhost) {
+        r.nhost = static_cast<uint8_t>(std::min<uint32_t>(nhost, 5));
+        std::memcpy(r.host, host, r.nhost * sizeof(uint32_t));
+    }
+    r.seq.store(seq, std::memory_order_release);
 }
 
 }  // namespace nxrt::nvn::be::gpu
