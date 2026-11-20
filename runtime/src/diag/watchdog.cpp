@@ -5,6 +5,7 @@
 // "dump_threads" request file next to the exe.
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -264,6 +265,7 @@ struct Control {
     std::thread th;
     // Parameters, written by watchdog_start before the thread is created.
     double threshold_s = 0;
+    double boot_threshold_s = 0;   // until the first frame tick ([diag] watchdog_boot_seconds)
     uint32_t poll_ms = 250;
     std::string report_path;   // "" = no file
     std::string request_path;  // <exe dir>\dump_threads
@@ -314,7 +316,11 @@ void run_loop(Control* c) {
             }
         }
         const double idle_s = std::chrono::duration<double>(now - last_change).count();
-        if (!fired && idle_s >= c->threshold_s) {
+        // Before the first frame the start-up itself (the RomFS scan, the code mods' edits, the first shader and texture loads) can take
+        // longer than the threshold without anything being stuck: a Steam Deck and a GTX 970 PC each wrote a FREEZE report at 10 s with
+        // frame count 0, and both went on to play. Until the first tick the longer start-up threshold applies.
+        const double limit = frames == 0 ? c->boot_threshold_s : c->threshold_s;
+        if (!fired && idle_s >= limit) {
             fired = true;
             std::string header;
             appendf(header, "FREEZE: no frame tick for %.1f s (frame count %llu)", idle_s,
@@ -347,6 +353,9 @@ void watchdog_start(const WatchdogOptions& opt) {
     if (!(secs > 0)) return;      // disabled (also for a NaN value)
     const std::string exe = exe_path();
     c.threshold_s = secs;
+    // [diag] watchdog_boot_seconds (default 60): the threshold until the first frame; never below watchdog_seconds
+    c.boot_threshold_s = std::max(secs, config_get_double("diag", "watchdog_boot_seconds", 60.0));
+    if (!(c.boot_threshold_s > 0)) c.boot_threshold_s = secs;
     c.poll_ms = opt.poll_ms ? opt.poll_ms : 1;
     c.report_path = opt.report_path ? std::string(opt.report_path) : default_report_path(exe);
     c.request_path = exe_dir(exe) + "\\dump_threads";
@@ -358,7 +367,7 @@ void watchdog_start(const WatchdogOptions& opt) {
     }
     c.th = std::thread(run_loop, &c);
     g_running.store(true);
-    NXLOG_I("watchdog", "started: threshold %.1f s, poll %u ms, report file %s", secs, c.poll_ms,
+    NXLOG_I("watchdog", "started: threshold %.1f s (%.1f s before the first frame), poll %u ms, report file %s", secs, c.boot_threshold_s, c.poll_ms,
             c.report_path.empty() ? "(none)" : c.report_path.c_str());
 }
 

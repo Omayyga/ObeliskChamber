@@ -118,6 +118,15 @@ struct State {
     int cache = 2;                    // [gfx] astc_gpu_cache: 0 off, 1 on, 2 auto (only while the GPU is slower than kCacheRate)
     int read = 2;                     // [gfx] astc_gpu_cache_read: 0 off, 1 on, 2 auto (only while the GPU is slower than kCacheRate)
     std::atomic<int> speed{0};        // 0 not measured yet, 1 faster than kCacheRate, 2 slower (rate_now after 6 samples; read by any thread)
+    // [gfx] astc_gpu_handoff_ms (auto only): a GPU whose best measured rate is slower than this many ms per M texel hands ASTC back to the
+    // CPU path for the rest of the session (#126: a GTX 970 ran at ~43 ms per M texel, single passes up to 214 ms, and the Dagsion load
+    // held the GPU for 2 s: Windows' GPU timeout, VK_ERROR_DEVICE_LOST). Desktop GPUs of the last years run at 1 to 2.5.
+    bool is_auto = false;
+    double handoff_ms = 10.0;
+    std::atomic<bool> handoff{false};
+    // [gfx] astc_gpu_cap_ms: estimated GPU time of transcodes in one present at most, the cheap ones included (0: no cap). Before, textures
+    // cheaper than their stand-in ran past the budget without a limit: 188 in one frame on the GTX 970.
+    double cap_ms = 250.0;
     bool upgrade = false;
     double budget_ms = 8.0;
     double load_ms = 8.0;             // [gfx] astc_gpu_load_ms: the least budget a present gets for a while after a load frame (0: none)
@@ -854,6 +863,9 @@ void init_locked() {
     s.load_ms = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_load_ms", 8.0), 0.0, 1000.0);
     s.load_s = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_load_s", 3.0), 0.0, 60.0);
     s.slow = std::clamp(nxrt::config_get_double("nvn", "astc_gpu_slow", 1.0), 1.0, 1000.0);
+    s.is_auto = m == "auto";
+    s.handoff_ms = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_handoff_ms", 10.0), 0.0, 1000.0);
+    s.cap_ms = std::clamp(nxrt::config_get_double("gfx", "astc_gpu_cap_ms", 250.0), 0.0, 10000.0);
     const auto t0 = std::chrono::steady_clock::now();
     std::string why;
     bool ok = create_objects(why);
@@ -873,6 +885,12 @@ void init_locked() {
     NXLOG_I(kTag, "BC7/BC1 entries of [nvn] bc7_cache are %s ([gfx] astc_gpu_cache_read = %s)",
             s.read == 1 ? "read" : s.read == 0 ? "not read: the GPU transcodes again" : (s.cache == 1 || s.upgrade) ? "read" : "not read while this GPU is fast",
             s.read == 1 ? "on" : s.read == 0 ? "off" : "auto");
+    if (s.is_auto && s.handoff_ms > 0.0)
+        NXLOG_I(kTag, "slow GPUs: ASTC goes back to the CPU when the best pass is slower than %.1f ms per M texel ([gfx] astc_gpu_handoff_ms); "
+                      "at most %.0f ms of estimated GPU time per present ([gfx] astc_gpu_cap_ms, 0: no cap)", s.handoff_ms, s.cap_ms);
+    else
+        NXLOG_I(kTag, "slow GPUs: kept on the GPU (%s); at most %.0f ms of estimated GPU time per present ([gfx] astc_gpu_cap_ms, 0: no cap)",
+                s.is_auto ? "[gfx] astc_gpu_handoff_ms = 0" : "[gfx] astc_gpu = on", s.cap_ms);
     const std::string probe = nxrt::config_get_str("nvn", "astc_gpu_probe", "");
     if (!probe.empty()) run_probe(probe);
     s.st.store(1);
@@ -1004,9 +1022,16 @@ double budget_now() {
 double rate_now() { return S().rate / S().slow; }
 double cost_ms(uint64_t texels) { return static_cast<double>(texels) / rate_now(); }
 
+// [gfx] astc_gpu_cap_ms: true when this much more would take the present past the cap
+bool over_cap(double ms) {
+    const State& s = S();
+    return s.cap_ms > 0.0 && s.spent_ms + ms > s.cap_ms;
+}
+
 bool affordable(uint64_t texels) {
     State& s = S();
-    return s.spent_ms + cost_ms(texels) <= budget_now();
+    const double c = cost_ms(texels);
+    return s.spent_ms + c <= budget_now() && !over_cap(c);
 }
 
 // ---- one texture --------------------------------------------------------------------------------------------------------------
@@ -1106,7 +1131,7 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
     j.srgb = w.j.srgb;
     uint64_t texels = 0, src_bytes = 0;
     size_t end = w.next;
-    const double room = budget_now() - s.spent_ms;
+    const double room = (s.cap_ms > 0.0 ? std::min(budget_now(), s.cap_ms) : budget_now()) - s.spent_ms;
     for (; end < w.j.rg.size(); ++end) {
         const Region& r = w.j.rg[end];
         const uint64_t n = static_cast<uint64_t>(r.w) * r.h * r.slices;
@@ -1245,6 +1270,13 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
                             ++s2.rate_samples;
                             s2.peak = std::max(s2.peak, static_cast<double>(texels) / ms);
                             if (s2.rate_samples >= 6) s2.speed.store(s2.peak / s2.slow < kCacheRate ? 2 : 1, std::memory_order_relaxed);
+                            const double best_ms = s2.peak > 0.0 ? 1e6 / (s2.peak / s2.slow) : 0.0;   // ms per M texel at the best pass
+                            if (s2.is_auto && s2.handoff_ms > 0.0 && s2.rate_samples >= 6 && best_ms > s2.handoff_ms && !s2.handoff.load()) {
+                                s2.handoff.store(true, std::memory_order_release);
+                                NXLOG_W(kTag, "this GPU transcodes ASTC at %.1f ms per M texel at best (slower than %.1f, [gfx] astc_gpu_handoff_ms): ASTC "
+                                              "textures are transcoded on the CPU from now on, as with [gfx] astc_gpu = off (on keeps the GPU)",
+                                        best_ms, s2.handoff_ms);
+                            }
                         }
                     }
                 }
@@ -1261,6 +1293,7 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
 
 bool astc_gpu_enabled(bool wait) {
     State& s = S();
+    if (s.handoff.load(std::memory_order_acquire)) return false;   // a slow GPU handed ASTC back to the CPU path
     int v = s.st.load(std::memory_order_acquire);
     if (v == 0 && counters_ready()) {
         if (wait) {
@@ -1291,7 +1324,7 @@ bool astc_gpu_upgrade() { return S().upgrade; }
 
 bool astc_gpu_skip_entries() {
     State& s = S();
-    if (s.st.load(std::memory_order_acquire) != 1) return false;
+    if (s.st.load(std::memory_order_acquire) != 1 || s.handoff.load(std::memory_order_acquire)) return false;
     if (s.read != 2) return s.read == 0;
     // auto: a fast GPU transcodes again (also before its rate is measured: the first area's load is where reading entries costs most); a slow
     // one, one that stores its results, or one with the CPU re-encode on reads them
@@ -1302,7 +1335,7 @@ bool astc_gpu_work() { return S().work.load(std::memory_order_relaxed) != 0; }
 
 AstcGpu astc_gpu_upload(Texture* t, Frame& f, PreparedTexture& prep, gfx::Buffer& staged) {
     State& s = S();
-    if (!t || !prep.gpu_astc || s.st.load(std::memory_order_acquire) != 1) return AstcGpu::Failed;
+    if (!t || !prep.gpu_astc || s.st.load(std::memory_order_acquire) != 1 || s.handoff.load(std::memory_order_acquire)) return AstcGpu::Failed;
     const CpuTimer timer;
     Work w;
     if (!build_work(t, prep, staged, w)) return AstcGpu::Failed;   // prep and staged are still the caller's
@@ -1310,7 +1343,7 @@ AstcGpu astc_gpu_upload(Texture* t, Frame& f, PreparedTexture& prep, gfx::Buffer
     // Over this present's budget, or textures are waiting already (they keep their order): queued. Not an RGBA8 image (no stand-in exists for
     // it, and a decode alone is short), and not a texture the GPU is done with sooner than the render thread would be with its stand-in: queueing
     // that one costs the frame more than transcoding it (an area's textures all arrive in one frame: 2,200 stand-ins were 3.3 s of it).
-    const bool cheap = cost_ms(w.texels) <= kStandinMs;
+    const bool cheap = cost_ms(w.texels) <= kStandinMs && !over_cap(cost_ms(w.texels));
     if (w.j.kind != Kind::Rgba && !cheap && (!s.q.empty() || !affordable(w.texels))) {
         w.queued_present = presents_now();
         s.q.push_back(std::move(w));
@@ -1345,7 +1378,8 @@ void astc_gpu_pump(Frame& f) {
             ++s.n_stale;
             continue;
         }
-        const Pass p = run_work(w, f, true);
+        // handed back to the CPU: what is still queued goes the CPU way too (as a failed pass)
+        const Pass p = s.handoff.load(std::memory_order_acquire) ? Pass::Failed : run_work(w, f, true);
         if (p == Pass::More) break;        // the budget is used up
         if (p == Pass::Finished) {
             // how long its stand-in was on screen: from the first present that began after it was queued (the frame it was queued in showed it first)

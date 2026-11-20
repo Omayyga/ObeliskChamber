@@ -48,6 +48,26 @@ constexpr uint32_t kStallRecreate = 3;
 std::mutex g_lost_ctx_mu;
 std::string g_lost_ctx;
 std::atomic<const Device*> g_lost_dev{nullptr};   // the renderer's device, for the fault query in the report
+// When a frame's fence was last seen signalled (steady clock, ns; 0: none yet). The device-lost report says how long before the loss that
+// was: Windows resets a GPU that does not finish its work within 2 s (TDR), and #126 (GTX 970) lost the device after frames of 1.0 and 2.0 s.
+std::atomic<int64_t> g_last_frame_done_ns{0};
+int64_t steady_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+std::string gpu_timeout_hint() {
+    const int64_t done = g_last_frame_done_ns.load(std::memory_order_relaxed);
+    if (!done) return "";
+    const double s = static_cast<double>(steady_ns() - done) * 1e-9;
+    char b[640];
+    if (s >= 1.5)
+        std::snprintf(b, sizeof b,
+                      "  The GPU last finished a frame %.1f s before this. Windows resets a GPU that has not finished its work within 2 s (TDR): the GPU\n"
+                      "  was most likely still busy rather than faulted. On an older or slower GPU, a lower render resolution and [gfx] astc_gpu = off in\n"
+                      "  ObeliskChamber.ini take work off it.\n",
+                      s);
+    else
+        std::snprintf(b, sizeof b, "  The GPU last finished a frame %.1f s before this.\n", s);
+    return b;
+}
 
 const char* fault_type_name(VkDeviceFaultAddressTypeEXT t) {
     switch (t) {
@@ -135,6 +155,7 @@ const char* window_mode_name() {
         std::lock_guard<std::mutex> lk(g_lost_ctx_mu);
         if (!g_lost_ctx.empty()) text += g_lost_ctx;
     }
+    text += gpu_timeout_hint();
     text += device_fault_report();
     text += frames == 0
                 ? "  What to try: the first frame never finished on the GPU. Update the graphics driver; if it happens in one window mode only "
@@ -880,6 +901,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
         }
         if (fr == VK_ERROR_DEVICE_LOST) device_lost("vkWaitForFences (frame slot)", fr, s.st.frames);
         if (fr != VK_SUCCESS) NXLOG_E(kTag, "vkWaitForFences failed (%d)", static_cast<int>(fr));
+        else g_last_frame_done_ns.store(steady_ns(), std::memory_order_relaxed);
     }
     s.read_timestamps(slot);
 
