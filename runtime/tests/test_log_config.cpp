@@ -489,7 +489,19 @@ NXTEST(config_log_unread_lines) {
     SinkGuard sg(&cap);
     CHECK(config_log_unread(20.0) == 2);
     CHECK(count_containing(cap.lines, "[unread_a] probe_moved = 1 is not a setting in [unread_a]: the game reads probe_moved in [unread_b]") == 1);
-    CHECK(count_containing(cap.lines, "[unread_a] probe_typo = 2 was not read in the first 20 s") == 1);
+    CHECK(count_containing(cap.lines, "[unread_a] probe_typo = 2 is not a known setting and was not read in the first 20 s") == 1);
     CHECK(count_containing(cap.lines, "probe_read") == 0);
+    config_clear();
+}
+
+NXTEST(config_log_unread_known_and_wrong_section) {
+    quiet_init(LogLevel::Info);
+    // [nvn] dynres_gain is a known key (read only with [dynres] on): quiet when unread. gpl under [gfx] belongs in [nvn].
+    config_load_string("[nvn]\ndynres_gain = 3\n[gfx]\ngpl = false\n");
+    Capture cap;
+    SinkGuard sg(&cap);
+    CHECK(config_log_unread(20.0) == 1);
+    CHECK(count_containing(cap.lines, "dynres_gain") == 0);
+    CHECK(count_containing(cap.lines, "[gfx] gpl = false is not a setting in [gfx]: the game reads gpl in [nvn]") == 1);
     config_clear();
 }
