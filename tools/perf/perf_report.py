@@ -26,6 +26,7 @@ SCENE = re.compile(r"hitch: scene '([^']*)': (\d+) frames in ([0-9.]+) s: mean (
                    r"present ([0-9.]+) \(limiter ([0-9.]+)\), idle ([0-9.]+)")
 WINDOW = re.compile(r"hitch: (\d+) frames in ([0-9.]+) s: mean ([0-9.]+) fps, 1% low ([0-9.]+) fps, worst ([0-9.]+) ms, (\d+) over 2x the median")
 RSTATS = re.compile(r"nvn\.rstats: (\d+) frames: replay ([0-9.]+) ms/frame = draw setup ([0-9.]+) .*?\| (\d+) draws/frame.*?per draw us:.*? sets ([0-9.]+)")
+RSOWN = re.compile(r"nvn\.rstats: stats' own cost: .*? = ([0-9.]+) ms/frame")   # RT7: the stats' own TSC reads (newer builds only)
 GPU = re.compile(r"nvn\.gpustats: \d+ frames: GPU ms/frame avg ([0-9.]+) p50 ([0-9.]+) p90 ([0-9.]+) p99 ([0-9.]+)")
 
 SETUP = [
@@ -74,6 +75,11 @@ def parse(path):
                 r['rstats'].append({'t': t, 'replay_ms': float(m.group(2)), 'setup_ms': float(m.group(3)), 'draws': int(m.group(4)),
                                     'sets_us': float(m.group(5))})
                 continue
+            m = RSOWN.search(line)
+            if m:
+                if r['rstats']:
+                    r['rstats'][-1]['own_ms'] = float(m.group(1))
+                continue
             m = GPU.search(line)
             if m:
                 r['gpu'].append({'t': t, 'avg': float(m.group(1)), 'p50': float(m.group(2)), 'p99': float(m.group(4))})
@@ -113,6 +119,9 @@ def steady(r):
         out['draws'] = statistics.mean(s['draws'] for s in rs)
         out['replay_per_1k'] = statistics.mean(1000.0 * s['replay_ms'] / s['draws'] for s in rs if s['draws'])
         out['sets_us'] = statistics.mean(s['sets_us'] for s in rs)
+        own = [s['own_ms'] for s in rs if 'own_ms' in s]
+        if own:
+            out['own_ms'] = statistics.mean(own)
     gp = [g for g in r['gpu'] if inside(g['t'])]
     if gp:
         out['gpu_ms'] = statistics.mean(g['avg'] for g in gp)
@@ -128,6 +137,7 @@ METRICS = [   # key, label, better (+1 higher, -1 lower), format
     ('over50', 'frames over 50 ms', -1, '{:.0f}'),
     ('median_ms', 'median frame ms', -1, '{:.2f}'),
     ('replay_ms', 'render thread replay ms/frame', -1, '{:.2f}'),
+    ('own_ms', "stats' own TSC reads ms/frame", 0, '{:.2f}'),
     ('replay_per_1k', 'replay ms per 1000 draws', -1, '{:.2f}'),
     ('sets_us', 'descriptor sets us/draw', -1, '{:.2f}'),
     ('draws', 'draws/frame', 0, '{:.0f}'),
