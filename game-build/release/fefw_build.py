@@ -338,7 +338,8 @@ def check(game, variant):
     try:
         load_tune(game, quiet=True)
         bid = json.load(open(os.path.join(HERE, 'dump_hashes.json'), encoding='utf-8'))['main_build_id']
-        patch_stamp = exefs_patch_stamp(collect_exefs_patches(game, bid))
+        found, left_out, _ = collect_exefs_patches(game, bid)
+        patch_stamp = exefs_patch_stamp(found, left_out)
         sites_stamp = mod_sites_stamp(collect_mod_sites(game, bid))
     except Fail as e:
         return False, str(e)
@@ -540,14 +541,18 @@ def parse_pchtxt(text, where, build_id):
             continue
         if low.startswith('@flag'):
             parts = line.split()
-            if len(parts) >= 3 and parts[1].lower() == 'offset_shift':
-                shift = int(parts[2], 0)
+            if len(parts) >= 2 and parts[1].lower() == 'offset_shift':
+                try:
+                    shift = int(parts[2], 0)
+                except (IndexError, ValueError):
+                    raise Fail('%s:%d: @flag offset_shift needs a number (such as 0x100), not "%s"'
+                               % (where, ln, ' '.join(parts[2:])))
             continue
         if low.startswith('@'):
             continue                     # other @ lines (e.g. @flag print_values) change nothing here
-        m = re.match(r'^([0-9A-Fa-f]{1,8})\s+(.+)$', line)
+        m = re.match(r'^([0-9A-Fa-f]{8})\s+(.+)$', line)
         if not m:
-            continue                     # a title line between blocks
+            continue                     # a title line between blocks ("Add 60 FPS"): patch lines have an 8-digit offset, as in IPSwitch
         if not enabled:
             continue
         addr = int(m.group(1), 16)
@@ -587,48 +592,67 @@ def mod_exefs_on(d):
 
 
 def collect_exefs_patches(game, build_id):
-    """The exefs patches of the installed mods for main: [(mod name, file, [(memory offset, bytes)])], in the order they apply.
-    IPS files count when their name is main's build ID; pchtxt files when their @nsobid is."""
-    found = []
+    """The exefs patches of the installed mods for main: ([(mod name, file, [(memory offset, bytes)])] in the order they apply,
+    {mod name: why it is left out}, [mod names with patch files but none for this main]). IPS files count when their name is main's
+    build ID; pchtxt files when their @nsobid is. A mod with a patch file that cannot be read is left out whole (the others still
+    apply): half of a mod's patches could leave the game in a state its author never tried."""
+    found, left_out, unused = [], {}, []
     for name, d in find_mod_dirs(os.path.join(game, 'mods')):
         ex = os.path.join(d, 'exefs')
         if not os.path.isdir(ex) or not mod_exefs_on(d):
             continue
-        for f in sorted(os.listdir(ex), key=str.lower):
-            p = os.path.join(ex, f)
-            stem, ext = os.path.splitext(f)
-            ext = ext.lower()
-            where = '%s/exefs/%s' % (name, f)
-            if ext == '.ips':
-                if not bid_matches(stem, build_id):
-                    continue             # another module or another version
-                recs = parse_ips(open(p, 'rb').read(), where)
-            elif ext == '.pchtxt':
-                recs = parse_pchtxt(open(p, encoding='utf-8-sig', errors='replace').read(), where, build_id)
-                if recs is None:
+        mine, any_file = [], False
+        try:
+            for f in sorted(os.listdir(ex), key=str.lower):
+                p = os.path.join(ex, f)
+                stem, ext = os.path.splitext(f)
+                ext = ext.lower()
+                where = '%s/exefs/%s' % (name, f)
+                if ext == '.ips':
+                    any_file = True
+                    if not bid_matches(stem, build_id):
+                        continue         # another module or another version
+                    recs = parse_ips(open(p, 'rb').read(), where)
+                elif ext == '.pchtxt':
+                    any_file = True
+                    recs = parse_pchtxt(open(p, encoding='utf-8-sig', errors='replace').read(), where, build_id)
+                    if recs is None:
+                        continue
+                else:
                     continue
-            else:
-                continue
-            mem = []
-            for off, b in recs:
-                if off < NSO_HEADER:
-                    raise Fail('%s: offset 0x%x is inside the NSO header (patches start at 0x100)' % (where, off))
-                if b:
-                    mem.append((off - NSO_HEADER, b))
-            if mem:
-                found.append((name, where, mem))
-    return found
+                mem = []
+                for off, b in recs:
+                    if off < NSO_HEADER:
+                        raise Fail('%s: offset 0x%x is inside the NSO header (patches start at 0x100)' % (where, off))
+                    if b:
+                        mem.append((off - NSO_HEADER, b))
+                if mem:
+                    mine.append((name, where, mem))
+        except Fail as e:
+            left_out[name] = str(e)
+            continue
+        except OSError as e:
+            left_out[name] = 'cannot read %s/exefs: %s' % (name, e)
+            continue
+        if mine:
+            found += mine
+        elif any_file:
+            unused.append(name)
+    return found, left_out, unused
 
 
-def exefs_patch_stamp(patches):
-    """One hash over what the patches write, in order (a changed disabled block or comment does not build again)."""
-    if not patches:
+def exefs_patch_stamp(patches, left_out=None):
+    """One hash over what the patches write, in order (a changed disabled block or comment does not build again), and the mods
+    left out with the reason, so fixing or removing one builds again."""
+    if not patches and not left_out:
         return None
     h = hashlib.sha256()
     for name, where, mem in patches:
         h.update(('%s\0' % where).encode())
         for off, b in mem:
             h.update(off.to_bytes(8, 'little') + len(b).to_bytes(4, 'little') + b)
+    for name in sorted(left_out or {}):
+        h.update(('left out %s\0%s\0' % (name, left_out[name])).encode())
     return h.hexdigest()
 
 
@@ -646,50 +670,179 @@ def site_addresses():
     return out
 
 
+PAGE = 0x1000
+
+
+def nso_segments(data):
+    """[(file offset, memory offset, size)] of text, rodata and data from an NSO header."""
+    return [tuple(int.from_bytes(data[0x10 + 0x10 * i + k:0x14 + 0x10 * i + k], 'little') for k in (0, 4, 8)) for i in range(3)]
+
+
+def segment_limit(segs, i):
+    """Where segment i may be patched up to. Text and rodata: their end-of-page padding too, up to the next page boundary and never
+    into the next segment (a "code cave": that padding is mapped with the segment on the console and in emulators). Data: its end,
+    since what follows it is the zeroed .bss."""
+    _, mo, sz = segs[i]
+    if i >= 2:
+        return mo + sz
+    return min((mo + sz + PAGE - 1) & ~(PAGE - 1), segs[i + 1][1])
+
+
+def sext(v, bits):
+    return v - (1 << bits) if v & (1 << (bits - 1)) else v
+
+
+def branch_target(word, pc):
+    """(kind, target) of a direct branch at pc: 'b' / 'bl' for B and BL, 'cond' for B.cond, CBZ / CBNZ and TBZ / TBNZ; else None."""
+    if word & 0x7C000000 == 0x14000000:
+        return ('bl' if word & 0x80000000 else 'b'), pc + sext(word & 0x3FFFFFF, 26) * 4
+    if word & 0xFF000010 == 0x54000000 or word & 0x7E000000 == 0x34000000:
+        return 'cond', pc + sext((word >> 5) & 0x7FFFF, 19) * 4
+    if word & 0x7E000000 == 0x36000000:
+        return 'cond', pc + sext((word >> 5) & 0x3FFF, 14) * 4
+    return None
+
+
 def apply_exefs_patches(main_path, patches, mod_sites=()):
-    """Write the patches into the plain main NSO (uncompressed segments) and fix the segment hashes in its header. A patch may not
-    touch a site of main.sites or one a mod adds (collect_mod_sites)."""
+    """Write the patches into the plain main NSO (uncompressed segments) and fix its header. Mod by mod: a mod with a patch that
+    cannot be applied (outside main, on a main.sites site or one a mod adds, or in padding another mod already wrote) is left out whole
+    with a note, and the rest apply. A patch in the padding after text or rodata (a code cave, segment_limit) grows that segment: the
+    bytes go in after it, the later segments move up in the file, and the sizes and hashes in the header follow, so the lifter lifts
+    the cave's code. -> ([mod names applied], {mod name: why it was left out})."""
     if not patches:
-        return
-    data = bytearray(open(main_path, 'rb').read())
+        return [], {}
+    with open(main_path, 'rb') as f:
+        data = bytearray(f.read())
     flags = int.from_bytes(data[12:16], 'little')
     if flags & 7:
         raise Fail('exefs/main has LZ4-compressed segments; exefs patches need the plain main Set up writes')
-    segs = []
-    for i in range(3):
-        foff, moff, size = (int.from_bytes(data[0x10 + 0x10 * i + k:0x14 + 0x10 * i + k], 'little') for k in (0, 4, 8))
-        segs.append((foff, moff, size))
+    segs = nso_segments(data)
+    body = [bytearray(data[fo:fo + sz]) for fo, _, sz in segs]
     sites = site_addresses()
     for where, kind, addr in mod_sites:
         sites.setdefault(addr - MODULES[0][2], '%s (%s)' % (kind, where))
-    touched = set()
-    owner = {}
+    owner = {}                           # memory offset -> file, for bytes patched so far
+    cave_owner = {}                      # the same for bytes in a segment's padding: two mods there is an error, not "the later wins"
+    caves = {}                           # mod name -> [lo, hi) it wrote in the padding after text
+    by_mod = []
     for name, where, mem in patches:
-        for off, b in mem:
-            seg = next((i for i, (fo, mo, sz) in enumerate(segs) if mo <= off and off + len(b) <= mo + sz), None)
-            if seg is None:
-                raise Fail('%s: 0x%x..0x%x is outside main\'s text, rodata and data' % (where, off, off + len(b)))
-            for a in range(off & ~3, off + len(b), 4):
-                if a in sites:
-                    raise Fail('%s patches 0x%x, where this release has a main.sites %s site: the two cannot be combined. '
+        if not by_mod or by_mod[-1][0] != name:
+            by_mod.append((name, []))
+        by_mod[-1][1].append((where, mem))
+    applied, left_out, records = [], {}, 0
+    for name, files in by_mod:
+        plan, problem, mine = [], None, {}
+        for where, mem in files:
+            for off, b in mem:
+                end = off + len(b)
+                seg = next((i for i, (_, mo, _) in enumerate(segs) if mo <= off and end <= segment_limit(segs, i)), None)
+                if seg is None:
+                    problem = ("%s: 0x%x..0x%x is outside main's text, rodata and data (and the padding after text or rodata, up to "
+                               "the next page)" % (where, off, end))
+                    break
+                a = next((a for a in range(off & ~3, end, 4) if a in sites), None)
+                if a is not None:
+                    problem = ('%s patches 0x%x, where this release has a main.sites %s site: the two cannot be combined. '
                                'Remove the patch or ask for the site to be moved.' % (where, a, sites[a]))
+                    break
+                seg_end = segs[seg][1] + segs[seg][2]
+                other = next((cave_owner[a] for a in range(max(off, seg_end), end) if cave_owner.get(a, where) != where), None)
+                if other:
+                    problem = '%s and %s both write the padding after main\'s %s at 0x%x' % (other, where, ('text', 'rodata')[seg], max(off, seg_end))
+                    break
+                for a in range(max(off, seg_end), end):
+                    mine[a] = where
+                plan.append((seg, off, b, where))
+            if problem:
+                break
+        if problem:
+            left_out[name] = problem
+            progress('verify', 0, 1, 'Note: %s left out: %s' % (name, problem))
+            continue
+        for seg, off, b, where in plan:
             clash = next((owner[a] for a in range(off, off + len(b)) if owner.get(a, where) != where), None)
             if clash:
                 progress('verify', 0, 1, 'Note: %s overwrites bytes %s patched at 0x%x (the later mod wins)' % (where, clash, off))
             for a in range(off, off + len(b)):
                 owner[a] = where
-            fo, mo, _ = segs[seg]
-            data[fo + off - mo:fo + off - mo + len(b)] = b
-            touched.add(seg)
-    for i in touched:
-        fo, _, sz = segs[i]
-        data[0xA0 + 0x20 * i:0xC0 + 0x20 * i] = hashlib.sha256(data[fo:fo + sz]).digest()
+            mo = segs[seg][1]
+            if off + len(b) - mo > len(body[seg]):
+                body[seg].extend(bytes(off + len(b) - mo - len(body[seg])))
+            body[seg][off - mo:off - mo + len(b)] = b
+            if seg == 0 and off + len(b) > segs[0][1] + segs[0][2]:
+                lo, hi = caves.get(name, (off + len(b), 0))
+                caves[name] = (min(lo, max(off, segs[0][1] + segs[0][2])), max(hi, off + len(b)))
+            records += 1
+        cave_owner.update(mine)
+        applied.append(name)
+    if not applied:
+        return applied, left_out
+    order = sorted(range(3), key=lambda i: segs[i][0])
+    out = bytearray(data[:segs[order[0]][0]])
+    prev = None
+    for i in order:
+        if prev is not None:
+            out += data[prev:segs[i][0]]
+        fo = len(out)
+        out += body[i]
+        prev = segs[i][0] + segs[i][2]
+        out[0x10 + 0x10 * i:0x14 + 0x10 * i] = fo.to_bytes(4, 'little')
+        out[0x18 + 0x10 * i:0x1C + 0x10 * i] = len(body[i]).to_bytes(4, 'little')
+        out[0x60 + 4 * i:0x64 + 4 * i] = len(body[i]).to_bytes(4, 'little')
+        out[0xA0 + 0x20 * i:0xC0 + 0x20 * i] = hashlib.sha256(body[i]).digest()
+    out += data[prev:]
+    for i, name in ((0, 'text'), (1, 'rodata')):
+        if len(body[i]) > segs[i][2]:
+            progress('verify', 0, 1, "Main's %s grows by %d bytes for a code cave (0x%x..0x%x)"
+                     % (name, len(body[i]) - segs[i][2], segs[i][1] + segs[i][2], segs[i][1] + len(body[i])))
+    # the lifter finds code by the B / BL that reach it (recomp/nxrecomp/funcs.py); a cave entered another way (a pointer in data, a
+    # conditional branch) may not run as the mod meant. Only the mods' own bytes can branch into a cave, so only those are read.
+    ts = segs[0][1]
+    for name, (lo, hi) in caves.items():
+        kinds = set()
+        for _, where, mem in patches:
+            if where.split('/exefs/')[0] not in applied:
+                continue
+            for off, b in mem:
+                for a in range((off + 3) & ~3, off + len(b) - 3, 4):
+                    if lo <= a < hi or not ts <= a < ts + len(body[0]):
+                        continue
+                    k = branch_target(int.from_bytes(body[0][a - ts:a - ts + 4], 'little'), a)
+                    if k and lo <= k[1] < hi:
+                        kinds.add(k[0])
+        if not kinds & {'b', 'bl'}:
+            progress('verify', 0, 1, 'Note: %s has code after main\'s code (0x%x..0x%x) that no B or BL of its patches reaches: if the '
+                     'game gets there another way, that path may crash. Tell the mod\'s author.' % (name, lo, hi))
+        elif 'cond' in kinds:
+            progress('verify', 0, 1, 'Note: %s branches into its code after main\'s code with a conditional branch as well; only B and BL '
+                     'are sure to be lifted as entries.' % name)
     tmp = main_path + '.tmp'
     with open(tmp, 'wb') as f:
-        f.write(data)
+        f.write(out)
     os.replace(tmp, main_path)
-    n = sum(len(m) for _, _, m in patches)
-    progress('verify', 1, 1, 'Applied %d exefs patch record(s) from %s' % (n, ', '.join(sorted({w for _, w, _ in patches}))))
+    progress('verify', 1, 1, 'Applied %d exefs patch record(s) from %s' % (records, ', '.join(applied)))
+    return applied, left_out
+
+
+EXEFS_RECORD = 'exefs_mods.txt'
+
+
+def write_exefs_record(exefs, applied, left_out, unused):
+    """<game>/exefs/exefs_mods.txt: what the last Set up did with each mod's exefs patches, for the runtime's start-up log
+    (runtime/src/services/fs.cpp). Lines: applied<TAB>mod, left out<TAB>mod<TAB>why, not used<TAB>mod (none for this main)."""
+    dst = os.path.join(exefs, EXEFS_RECORD)
+    rows = [('applied', n, '') for n in applied] + [('left out', n, left_out[n]) for n in sorted(left_out)] + \
+           [('not used', n, '') for n in unused]
+    if not rows:
+        if os.path.isfile(dst):
+            os.remove(dst)
+        return
+    tmp = dst + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write('# The exefs patches of mods as the last Set up used them (written by Set up)\n')
+        for st, n, why in rows:
+            f.write('%s\t%s%s\n' % (st, n, '\t' + why.replace('\t', ' ').replace('\n', ' ') if why else ''))
+    os.replace(tmp, dst)
 
 
 # ---- hook sites of mods (mods/<name>/exefs/*.sites) --------------------------------------------------------------------------------
@@ -1208,14 +1361,19 @@ def main():
             progress('verify', 0, 1, 'Building the compatible version of the game (for processors without FMA3)')
         load_tune(game)
         want = verify(a.exefs)
-        plain = os.path.join(game, 'exefs')
+        # the NSOs are written, patched and lifted in build/exefs and move to <game>/exefs only once ObeliskChamber.exe is linked: a
+        # cancelled or failed build leaves the old ObeliskChamber.exe with the main it was built from (upstream 5cf14f7)
+        plain = os.path.join(build, 'exefs')
         write_exefs(a.exefs, plain)
-        patches = collect_exefs_patches(game, want['main_build_id'])
+        patches, left_out, unused = collect_exefs_patches(game, want['main_build_id'])
+        for name in sorted(left_out):
+            progress('verify', 0, 1, 'Note: %s left out: %s' % (name, left_out[name]))
         mod_sites = collect_mod_sites(game, want['main_build_id'])
-        apply_exefs_patches(os.path.join(plain, 'main'), patches, mod_sites)
+        applied, refused = apply_exefs_patches(os.path.join(plain, 'main'), patches, mod_sites)
+        left_out_all = dict(left_out, **refused)
         sites = write_sites(os.path.join(plain, 'main'), mod_sites, build)
         stamp = {'format': FORMAT, 'main_build_id': want['main_build_id'], 'sha256': want['sha256'],
-                 'tools': tool_stamp(variant, exefs_patch_stamp(patches), mod_sites_stamp(mod_sites))}
+                 'tools': tool_stamp(variant, exefs_patch_stamp(patches, left_out), mod_sites_stamp(mod_sites))}
         state_p = os.path.join(build, 'state.json')
         # another dump or another release (or no readable state): start over. Removing lift/ drops the modules' .lifted
         # markers too, so a changed lifter or main.sites lifts everything again, not only recompiles
@@ -1237,6 +1395,12 @@ def main():
         times['compile'] = round(time.time() - t, 1)
         t = time.time()
         exe = link(runner, obj, game, env, variant)
+        live = os.path.join(game, 'exefs')
+        os.makedirs(live, exist_ok=True)
+        for n in EXEFS_FILES:
+            if os.path.isfile(os.path.join(plain, n)):
+                replace_retry(os.path.join(plain, n), os.path.join(live, n))
+        write_exefs_record(live, applied, left_out_all, unused)
         write_lifted_sites(game, sites, want['main_build_id'])
         times['link'] = round(time.time() - t, 1)
         if not a.keep:
