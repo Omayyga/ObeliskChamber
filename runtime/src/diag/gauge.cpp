@@ -305,6 +305,13 @@ void monitor_run(double summary_s) {
             } else if (seen_frames) {
                 NXLOG_W("hitch", "no frame presented in the last %.1f s", summary_s);
             }
+            // #121: ini lines nothing read (a typo, a key in the wrong section), once, 20 s or more into presenting frames
+            static double unread_s = 0;
+            static bool unread_done = false;
+            if (seen_frames && !unread_done && (unread_s += summary_s) >= 20.0) {
+                unread_done = true;
+                config_log_unread(unread_s);
+            }
         }
     }
 }
