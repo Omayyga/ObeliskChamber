@@ -764,13 +764,14 @@ void resolution_group(Menu& m) {
         ini_combo_row(m, *ini_key("fefw", "scenery_detail"), "Scenery detail",
                       "Reduced: scenery switches to its simpler versions at 60% of the distance (50 m becomes 30 m).", kDetailNames, kDetailVals, 2);
         // [fefw] npc_distance (ObeliskChamber_crowd.cpp): the hub crowd's model limit, display distance and draw budget
-        constexpr const char* kNpcNames[] = {"Console (the game's own)", "1.5x", "2x", "3x", "4x"};
-        constexpr const char* kNpcVals[] = {"1", "1.5", "2", "3", "4"};
+        constexpr const char* kNpcNames[] = {"0.5x (fewer, faster)", "0.75x (fewer)", "Console (the game's own)", "1.5x", "2x", "3x", "4x"};
+        constexpr const char* kNpcVals[] = {"0.5", "0.75", "1", "1.5", "2", "3", "4"};
         ini_combo_row(m, *ini_key("fefw", "npc_distance"), "NPC limit",
                       "How many townspeople a town shows. The game keeps at most 70 different NPC models loaded, shows them within 80 m and under a "
-                      "draw budget; past those limits townspeople are hidden, even close by, and pop in as you walk. This multiplies all three. More "
-                      "memory and CPU work. Console = exactly the game's behaviour.",
-                      kNpcNames, kNpcVals, 5);
+                      "draw budget; past those limits townspeople are hidden, even close by, and pop in as you walk. This multiplies all three: above "
+                      "Console fewer pop in, for more memory and CPU work; below it fewer are shown, for less CPU and GPU time. Console = exactly "
+                      "the game's behaviour.",
+                      kNpcNames, kNpcVals, 7);
         end_rows();
     }
     // what the chosen sizes mean

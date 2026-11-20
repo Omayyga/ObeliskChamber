@@ -236,8 +236,8 @@ constexpr const char* kOnOffAoNames[] = {"On", "Off"};
 constexpr const char* kOnOffAoVals[] = {"1", "0"};
 constexpr const char* kDetailNames[] = {"Full", "Reduced"};
 constexpr const char* kDetailVals[] = {"full", "reduced"};
-constexpr const char* kNpcNames[] = {"Console", "1.5x", "2x", "3x", "4x"};   // [fefw] npc_distance (ObeliskChamber_crowd.cpp)
-constexpr const char* kNpcVals[] = {"1", "1.5", "2", "3", "4"};
+constexpr const char* kNpcNames[] = {"0.5x (fewer)", "0.75x (fewer)", "Console", "1.5x", "2x", "3x", "4x"};   // [fefw] npc_distance (ObeliskChamber_crowd.cpp)
+constexpr const char* kNpcVals[] = {"0.5", "0.75", "1", "1.5", "2", "3", "4"};
 constexpr const char* kOffOnNames[] = {"Off", "On"};
 constexpr const char* kOffOnVals[] = {"0", "1"};
 constexpr const char* kTargetNames[] = {"Paused", "60 fps", "72 fps", "80 fps", "90 fps", "100 fps", "110 fps", "120 fps", "144 fps"};
@@ -455,7 +455,7 @@ const Row kRows[] = {
             "crowd_detail", "full", kDetailNames, kDetailVals, nullptr),
     INI_ROW(kPageGraphics, "Scenery Detail", "Reduced: scenery switches to simpler versions at 60% of the distance. Applies on restart.", "fefw",
             "scenery_detail", "full", kDetailNames, kDetailVals, nullptr),
-    INI_ROW(kPageGraphics, "NPC Limit", "How many townspeople a town shows before they pop in. Console is the game's own. More CPU and memory. Applies on restart.",
+    INI_ROW(kPageGraphics, "NPC Limit", "Townspeople a town shows. Fewer saves CPU and GPU time; more stops pop-in but costs both. Console is the game's own. Applies on restart.",
             "fefw", "npc_distance", "1", kNpcNames, kNpcVals, nullptr),
     INI_ROW(kPageGraphics, "Upscaler", "Applies at once. DLSS and XeSS only when the game started with them; otherwise TAAU until the next start.", "dlss",
             "upscaler", "taau", kUpscalerNames, kUpscalerVals, upscaler_after),

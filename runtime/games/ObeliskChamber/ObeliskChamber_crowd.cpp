@@ -10,9 +10,11 @@
 //   - the display distance: "hub character display distance" (80 m), the radius the crowd shows townspeople within.
 //   - the draw budget: townspeople are shown nearest first while max(cost / 600000, count / 80) stays under 1.0; once it is reached,
 //     every further townsperson that frame is hidden.
-// A limit whose factor is 1 gets no hook: at k = 1 nothing is installed and the game runs as it is.
+// A limit whose factor is 1 gets no hook: at k = 1 nothing is installed and the game runs as it is. Below 1 (0.5, 0.75) the same three limits
+// shrink, so busy hubs show fewer townspeople for less CPU and GPU time (more pop-in); upstream tested only factors above 1.
 #include "ObeliskChamber_game.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -67,7 +69,7 @@ constexpr uint64_t kModelLimit = 0x1041b18;    // inline before `str w8, [x19, #
 
 void hook_model_limit(::Ctx* c, uint64_t, void*) {
     const int64_t game = static_cast<int32_t>(c->x[8]);
-    const int64_t ours = game > 0 ? static_cast<int64_t>(std::ceil(static_cast<double>(game) * g_npc_model)) : game;
+    const int64_t ours = game > 0 ? std::max<int64_t>(1, static_cast<int64_t>(std::ceil(static_cast<double>(game) * g_npc_model))) : game;
     c->x[8] = static_cast<uint32_t>(ours);
     static std::atomic<int64_t> last{-1};
     if (last.exchange(game) != game)
@@ -84,19 +86,21 @@ void add_inline(uint64_t addr, InlineHookFn fn) {
 
 void crowd_install(uint64_t base) {
     const double npc = config_get_double("fefw", "npc_distance", 1.0);
-    g_npc = npc > 1.0 ? std::fmin(npc, 4.0) : 1.0;
+    // 0.5 to 4: below 1 the hubs show fewer townspeople (fewer models loaded, a shorter radius, a smaller budget) for CPU and GPU time
+    g_npc = npc > 0.0 ? std::fmin(std::fmax(npc, 0.5), 4.0) : 1.0;
+    if (std::fabs(g_npc - 1.0) < 1e-6) g_npc = 1.0;
     // Testing / modding: each of the three limits can be set on its own in the ini (a factor, 1 = the game's own); not on the F1 page.
     auto own = [](const char* key) {
         const double v = config_get_double("fefw", key, 0.0);
-        return v > 0.0 ? (v > 1.0 ? std::fmin(v, 8.0) : 1.0) : -1.0;
+        return v > 0.0 ? std::fmin(std::fmax(v, 0.25), 8.0) : -1.0;
     };
     const double m = own("npc_model_limit"), r = own("npc_radius"), b = own("npc_budget");
     g_npc_model = m > 0 ? m : g_npc;
     g_npc_radius = r > 0 ? r : g_npc;
     g_npc_budget = b > 0 ? b : g_npc;
-    if (g_npc_radius > 1.0) add_inline(base + kHubRadius, &hook_hub_radius);
-    if (g_npc_model > 1.0) add_inline(base + kModelLimit, &hook_model_limit);
-    if (g_npc_budget > 1.0)
+    if (g_npc_radius != 1.0) add_inline(base + kHubRadius, &hook_hub_radius);
+    if (g_npc_model != 1.0) add_inline(base + kModelLimit, &hook_model_limit);
+    if (g_npc_budget != 1.0)
         for (uint64_t off : kCrowdBudget) add_inline(base + off, &hook_crowd_budget);
     if (!g_hooks.empty())
         NXLOG_I(kTag, "hub NPCs x%.2f ([fefw] npc_distance; 1 = the game's own): model limit x%.2f%s, display distance x%.2f%s, budget x%.2f%s",
