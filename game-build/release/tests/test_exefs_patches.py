@@ -195,5 +195,27 @@ class Collect(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.game, fb.EXEFS_RECORD)))
 
 
+class LiftedSites(unittest.TestCase):
+    def setUp(self):
+        self.game = tempfile.mkdtemp()
+        with open(os.path.join(self.game, 'ObeliskChamber.sites'), 'w', encoding='utf-8') as f:
+            f.write('# written by Set up\n@nsobid %s\npatch 0x7100001000\ninline 0x7100002000   # a/exefs/a.sites:3 (é)\n'
+                    'midhook 0x7100003000   # b/exefs/b.sites:2\n' % BID)
+
+    def tearDown(self):
+        shutil.rmtree(self.game, ignore_errors=True)
+
+    def test_subset_is_current(self):
+        self.assertTrue(fb.mod_sites_lifted(self.game, [('a:3', 'inline', 0x7100002000)], BID))
+        self.assertTrue(fb.mod_sites_lifted(self.game, [], BID))
+
+    def test_new_site_or_other_build_is_not(self):
+        self.assertFalse(fb.mod_sites_lifted(self.game, [('c:1', 'inline', 0x7100004000)], BID))
+        self.assertFalse(fb.mod_sites_lifted(self.game, [('b:2', 'inline', 0x7100003000)], BID))   # same address, other kind
+        self.assertFalse(fb.mod_sites_lifted(self.game, [], 'cd' * 20))
+        os.remove(os.path.join(self.game, 'ObeliskChamber.sites'))
+        self.assertFalse(fb.mod_sites_lifted(self.game, [], BID))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=1)

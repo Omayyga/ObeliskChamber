@@ -345,6 +345,8 @@ def check(game, variant):
         return False, str(e)
     want = tool_stamp(variant, patch_stamp, sites_stamp)
     changed = [k for k in sorted(set(want) | set(done['tools'])) if done['tools'].get(k) != want.get(k)]
+    if changed == ['mod_sites'] and mod_sites_lifted(game, collect_mod_sites(game, bid), bid):
+        changed = []                     # mods only took sites away: the build still has every site the installed mods need
     if changed == ['exefs_patches']:
         return False, 'the exefs patches in mods changed (Set up applies them)'
     if changed and set(changed) <= {'exefs_patches', 'mod_sites'}:
@@ -660,7 +662,7 @@ def site_addresses():
     """main.sites: {module offset: kind} of every site but noinline (patch, inline, midhook, entryhook, dynimm, jtable)."""
     out = {}
     try:
-        lines = open(os.path.join(RECOMP, *SITES.split('/'))).read().splitlines()
+        lines = open(os.path.join(RECOMP, *SITES.split('/')), encoding='utf-8').read().splitlines()
     except OSError:
         return out
     for line in lines:
@@ -988,7 +990,7 @@ def write_sites(main_path, mod_sites, build):
         data = f.read()
     text_file, text_off, text_size = (int.from_bytes(data[o:o + 4], 'little') for o in (0x10, 0x14, 0x18))
     word_at = lambda off: int.from_bytes(data[text_file + off - text_off:text_file + off - text_off + 4], 'little')
-    own = open(base).read()
+    own = open(base, encoding='utf-8').read()
     have = set()
     for line in own.splitlines():
         t = line.split('#', 1)[0].split()
@@ -1013,6 +1015,30 @@ def write_sites(main_path, mod_sites, build):
         f.write(own.rstrip('\n') + '\n\n# ---- added by mods (exefs/*.sites)\n' + ''.join(l + '\n' for l in lines))
     progress('verify', 1, 1, 'Hook sites from mods: %d (%s)' % (len(lines), ', '.join(sorted({w.rsplit(':', 1)[0] for w, _, _ in mod_sites}))))
     return out
+
+
+def mod_sites_lifted(game, mod_sites, build_id):
+    """Whether ObeliskChamber.sites (the list main was lifted with, write_lifted_sites) is for this main and has every site the
+    installed mods add. Mod sites only add a call into the runtime at an instruction lifted as before, and a site no hook is
+    attached to passes through, so a build with more sites than the mods need is current: removing or switching off a mod with
+    .sites does not lift again (ranbinrang-rgb, fefw-recomp #88)."""
+    try:
+        text = open(os.path.join(game, 'ObeliskChamber.sites'), encoding='utf-8').read()
+    except OSError:
+        return False
+    have, bid = set(), None
+    for line in text.splitlines():
+        t = line.split('#', 1)[0].split()
+        if len(t) == 2 and t[0].lower() == '@nsobid':
+            bid = t[1]
+        elif len(t) >= 2:
+            try:
+                have.add((t[0], int(t[1], 16)))
+            except ValueError:
+                pass
+    if bid is None or not bid_matches(bid, build_id):
+        return False
+    return all((kind, addr) in have for _, kind, addr in mod_sites)
 
 
 def write_lifted_sites(game, sites, build_id):

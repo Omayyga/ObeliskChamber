@@ -302,6 +302,7 @@ cannot be applied (a patch on an instruction this port hooks, outside main, or a
 naming it, and the other mods are still applied; the game's log says at each start which mods' patches are in the build and which
 were left out. Patch lines in a `.pchtxt` need an 8-digit offset, as in IPSwitch. A patch may also add code in the padding right
 after main's code or rodata (a "code cave", up to the next 4 KiB page): Set up then grows that segment so the code is built in.
+Removing or switching off a mod that only adds hook sites (`.sites`) does not build the game again: the build already has its sites.
 
 Code mods made for this port can also be DLLs in the mod's `exefs\` folder (`mods\<mod name>\exefs\<mod>.dll`), so one mod folder can
 carry an emulator's patches and this port's DLL side by side. They load when the game starts and can hook the game at the sites it was
