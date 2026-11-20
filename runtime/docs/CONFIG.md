@@ -8,6 +8,7 @@ Rules:
 - Ini syntax: `[section]` lines, then `key = value`. A `;` or `#` that follows whitespace starts a comment. A quoted value is taken verbatim.
 - The environment variable for a key is `NXRT_` plus the upper-case section, an underscore, and the upper-case key, with every non-alphanumeric character replaced by `_`. Example: `[diag] watchdog_seconds` is `NXRT_DIAG_WATCHDOG_SECONDS`.
 - Integers accept decimal and `0x` hex. Booleans accept `1`/`0`, `true`/`false`, `yes`/`no`, `on`/`off`. Doubles must parse completely. Text that does not parse keeps the default.
+- About 20 s after the first frame, the log gets a warning (`config:`) for every ini line nothing has read: a misspelt or unknown key, or a key in the wrong section (then the warning names the section where the game reads it). A key for something that has not run yet (a mode, a test) can show up there too.
 
 ## Keys
 

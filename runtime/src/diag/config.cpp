@@ -3,6 +3,7 @@
 
 #include "nxrt/log.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -368,6 +369,45 @@ void config_log_effective() {
             logf(LogLevel::Info, "config", "[%s] %s = %s (%s)", s.section.c_str(), s.key.c_str(), s.value.c_str(),
                  s.source.c_str());
     }
+}
+
+// #121: a player's ini edits ([nvn] gpl, [gfx] astc_gpu) were not read in two runs, and nothing in the log said so; a key in the wrong
+// section or a typo looks the same as a setting the game ignores. Called once, some seconds into play (gauge.cpp): every ini key nothing
+// has read by then is logged, with the section it belongs in when the same key name was read in another one.
+int config_log_unread(double seconds) {
+    struct Unread { std::string section, key, value, hint; };
+    std::vector<Unread> out;
+    std::string file;
+    {
+        std::lock_guard<std::mutex> g(g_mu);
+        file = g_file;
+        std::map<std::string, std::vector<std::string>> by_key;   // key name -> sections it was read in
+        for (const auto& kv : g_seen) by_key[lower(kv.second.key)].push_back(lower(kv.second.section));
+        for (const auto& kv : g_ini) {
+            if (g_seen.count(kv.first)) continue;
+            const size_t sep = kv.first.find('\x1f');
+            Unread u{kv.first.substr(0, sep), sep == std::string::npos ? std::string() : kv.first.substr(sep + 1), kv.second, {}};
+            auto it = by_key.find(u.key);
+            if (it != by_key.end())
+                for (const std::string& sec : it->second) u.hint += (u.hint.empty() ? "" : " or ") + (sec.empty() ? std::string("no section") : "[" + sec + "]");
+            out.push_back(std::move(u));
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const Unread& a, const Unread& b) { return a.section != b.section ? a.section < b.section : a.key < b.key; });
+    for (const Unread& u : out) {
+        const std::string where = u.section.empty() ? std::string("before any [section]") : "in [" + u.section + "]";
+        const std::string line = (u.section.empty() ? std::string() : "[" + u.section + "] ") + u.key + " = " + u.value;
+        if (!u.hint.empty())
+            logf(LogLevel::Warn, "config", "%s: %s is not a setting %s: the game reads %s in %s. Move the line there (it has no effect now)",
+                 file.c_str(), line.c_str(), where.c_str(), u.key.c_str(), u.hint.c_str());
+        else
+            logf(LogLevel::Warn, "config", "%s: %s was not read in the first %.0f s: a misspelt or unknown key, or a setting for "
+                 "something that has not run yet (a mode, a test). See docs/CONFIG.md for the keys",
+                 file.c_str(), line.c_str(), seconds);
+    }
+    if (!out.empty())
+        logf(LogLevel::Info, "config", "%zu ini line(s) not read so far (listed above); every other line of %s was read", out.size(), file.c_str());
+    return static_cast<int>(out.size());
 }
 
 std::string config_env_name(const char* section, const char* key) {
