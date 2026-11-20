@@ -45,6 +45,10 @@ constexpr uint32_t kTimeSlots = 64;
 // M texel). Measured on an RTX 4070 Super (about 1 ms per M texel): the hub's load frame took 2.6 s transcoding its 2,200 textures and
 // 5.5 s reading the same textures back from the cache (1 byte a texel from disk and through staging, against a quarter of that as ASTC).
 constexpr double kCacheRate = 400e3;
+// Timed passes before [gfx] astc_gpu_handoff_ms may decide. The first passes of a session can time far slower than the GPU is: on a
+// 3090 Ti, the six passes of the first load (DLSS's first evaluation, 600 pipelines and 70 MB of uploads in the same frames) timed at
+// best 10.6 ms per M texel, against 0.6 to 0.8 once loaded. Six was enough to hand a fast GPU off; the best of sixteen is not fooled.
+constexpr int kHandoffSamples = 16;
 constexpr double kStandinMs = 1.5;                   // what a quick CPU stand-in costs the render thread (preset 0 on the small levels: 1.4 ms measured)
 
 struct DecodePush { uint32_t in_base, out_base, width, height, bw, bh, bx, bslice, srgb; };
@@ -119,7 +123,7 @@ struct State {
     int read = 2;                     // [gfx] astc_gpu_cache_read: 0 off, 1 on, 2 auto (only while the GPU is slower than kCacheRate)
     std::atomic<int> speed{0};        // 0 not measured yet, 1 faster than kCacheRate, 2 slower (rate_now after 6 samples; read by any thread)
     // [gfx] astc_gpu_handoff_ms (auto only): a GPU whose best measured rate is slower than this many ms per M texel hands ASTC back to the
-    // CPU path for the rest of the session (#126: a GTX 970 ran at ~43 ms per M texel, single passes up to 214 ms, and the Dagsion load
+    // CPU path for the rest of the session, after kHandoffSamples timed passes (#126: a GTX 970 ran at ~43 ms per M texel, single passes up to 214 ms, and the Dagsion load
     // held the GPU for 2 s: Windows' GPU timeout, VK_ERROR_DEVICE_LOST). Desktop GPUs of the last years run at 1 to 2.5.
     bool is_auto = false;
     double handoff_ms = 10.0;
@@ -1271,7 +1275,7 @@ Pass run_work(Work& w, Frame& f, bool budgeted) {
                             s2.peak = std::max(s2.peak, static_cast<double>(texels) / ms);
                             if (s2.rate_samples >= 6) s2.speed.store(s2.peak / s2.slow < kCacheRate ? 2 : 1, std::memory_order_relaxed);
                             const double best_ms = s2.peak > 0.0 ? 1e6 / (s2.peak / s2.slow) : 0.0;   // ms per M texel at the best pass
-                            if (s2.is_auto && s2.handoff_ms > 0.0 && s2.rate_samples >= 6 && best_ms > s2.handoff_ms && !s2.handoff.load()) {
+                            if (s2.is_auto && s2.handoff_ms > 0.0 && s2.rate_samples >= kHandoffSamples && best_ms > s2.handoff_ms && !s2.handoff.load()) {
                                 s2.handoff.store(true, std::memory_order_release);
                                 NXLOG_W(kTag, "this GPU transcodes ASTC at %.1f ms per M texel at best (slower than %.1f, [gfx] astc_gpu_handoff_ms): ASTC "
                                               "textures are transcoded on the CPU from now on, as with [gfx] astc_gpu = off (on keeps the GPU)",
