@@ -459,6 +459,7 @@ struct RStats {
     uint64_t binds = 0, binds_same = 0, layouts = 0, keys = 0, dispatches = 0;
     uint64_t miss_first = 0, miss_uboofs = 0, miss_ubo = 0, miss_tex = 0, miss_other = 0;   // set cache misses by what differs from the last set of that layout
     uint64_t out_fast = 0, out_full_all = 0, out_full_gen = 0, out_full_unmemo = 0, out_prog = 0, out_prog_marked = 0;   // out_draw_bindings passes
+    uint64_t reads = 0;   // TSC reads made by the stats themselves (rs_start, rs_mark, RsScope): their cost is reported and taken off the totals
 };
 RStats g_rs;
 int g_out_prog = -1;   // [nvn] out_prog_dirty, read once; [nvn] out_prog_ab flips it every stats window
@@ -481,18 +482,35 @@ int64_t rs_every() {
     return n;
 }
 inline bool rs_on() { return rs_every() > 0; }
-inline void rs_start() { if (rs_on()) g_rs_t = __rdtsc(); }
+inline void rs_start() { if (rs_on()) { g_rs_t = __rdtsc(); ++g_rs.reads; } }
 inline void rs_mark(int zone) {
     if (!rs_on()) return;
     const uint64_t t = __rdtsc();
     g_rs.cyc[zone] += t - g_rs_t;
     g_rs_t = t;
+    ++g_rs.reads;
 }
 struct RsScope {
     int zone; uint64_t t0;
     explicit RsScope(int z) : zone(z), t0(rs_on() ? __rdtsc() : 0) {}
-    ~RsScope() { if (t0) g_rs.cyc[zone] += __rdtsc() - t0; }
+    ~RsScope() { if (t0) { g_rs.cyc[zone] += __rdtsc() - t0; g_rs.reads += 2; } }
 };
+// RT7 (Code_Review_Perf_2026-11-18): the stats read the TSC about 40 times a draw (every op's out scope, ten phase marks a draw), and those
+// reads are counted inside the zones they time. One read's cost, measured once on this CPU: back to back, plus the counter and the add.
+double rs_read_cycles() {
+    static const double c = [] {
+        double best = 1e9;
+        for (int round = 0; round < 8; ++round) {
+            volatile uint64_t sink = 0;
+            const uint64_t t0 = __rdtsc();
+            for (int i = 0; i < 1024; ++i) sink += __rdtsc();
+            const uint64_t t1 = __rdtsc();
+            best = std::min(best, static_cast<double>(t1 - t0) / 1024.0);
+        }
+        return best;
+    }();
+    return c;
+}
 void rs_report() {
     using clk = std::chrono::steady_clock;
     static uint64_t last_p = 0, last_tsc = 0;
@@ -516,6 +534,7 @@ void rs_report() {
     double setup = 0;
     for (int z = kRsHead; z <= kRsVb; ++z) setup += fms(z);
     const double pf = 1.0 / frames;
+    const double own_ms = static_cast<double>(s.reads) * rs_read_cycles() * us_per_cyc / 1000.0 / frames;   // the stats' own TSC reads, ms per frame
     NXLOG_I("nvn.rstats", "%.0f frames: replay %.2f ms/frame = draw setup %.2f + call %.2f + out %.2f + dispatch %.2f + rest %.2f | %.0f draws/frame "
             "(%.0f desc, %.0f pipe, %.0f layouts, %.0f keys), %.0f dispatches | per draw us: head %.2f prep %.2f fb %.2f pass %.2f pipe %.2f dyn %.2f "
             "sets %.2f (alloc+update %.2f) vb %.2f call %.2f out %.2f | sets/frame %.0f (%.1f%% cached, %.0f writes) | resolves/frame tex %.0f img %.0f (memo %.0f) | "
@@ -533,6 +552,11 @@ void rs_report() {
             static_cast<double>(g_lean_push_full) * pf, static_cast<double>(g_lean_push_delta) * pf, static_cast<double>(g_lean_push_none) * pf,
             static_cast<double>(g_lean_push_writes) * pf);
     g_lean_push_full = g_lean_push_delta = g_lean_push_none = g_lean_push_writes = 0;
+    NXLOG_I("nvn.rstats", "stats' own cost: %.0f TSC reads/frame (%.1f a draw) at %.1f cycles each = %.2f ms/frame, inside the replay total above: "
+            "the replay without them is about %.2f ms/frame. A lower bound: reads in flight also hold up the work around them, so time a run with "
+            "replay_stats off too (the session line) before comparing these totals with a frame budget",
+            s.reads * pf, s.draws ? static_cast<double>(s.reads) / static_cast<double>(s.draws) : 0.0, rs_read_cycles(), own_ms,
+            std::max(0.0, fms(kRsAll) - own_ms));
     NXLOG_I("nvn.rstats", "out_prog_dirty %d: out passes/frame: short %.0f, full %.0f (program bind or reset %.0f, generation %.0f, unmemoised %.0f) | "
             "program binds/frame %.0f, slots marked by them %.0f",
             g_out_prog, s.out_fast * pf, static_cast<double>(s.out_full_all + s.out_full_gen + s.out_full_unmemo) * pf, s.out_full_all * pf,
