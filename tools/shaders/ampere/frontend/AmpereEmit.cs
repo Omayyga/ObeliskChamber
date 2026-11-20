@@ -187,7 +187,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
         // bit-exact for every input (INT_MIN wraps as abs does). Technique from Mario Kart World Recomp (adriadam10/mkw-recomp
         // 0f7038e, their #22); no code taken. AmpereTranslator.NativeIAbs (--native-iabs) brings SAbs back for comparison.
         static IrOperand IAbs(EmitterContext ctx, IrOperand v) =>
-            Translation.AmpereTranslator.NativeIAbs ? ctx.IAbsolute(v) : ctx.IMultiply(v, ctx.BitwiseOr(ctx.ShiftRightS32(v, Const(31)), Const(1)));
+            AmpereTranslator.NativeIAbs ? ctx.IAbsolute(v) : ctx.IMultiply(v, ctx.BitwiseOr(ctx.ShiftRightS32(v, Const(31)), Const(1)));
 
         static bool HasSuffix(Op o, string s) => (o.Suffixes != null && o.Suffixes.Contains(s)) || (o.Kind == OperandKind.Mem && o.Text != null && System.Text.RegularExpressions.Regex.IsMatch(o.Text, @"R(\d+|Z)" + System.Text.RegularExpressions.Regex.Escape(s) + @"(?![0-9A-Z])"));
 
