@@ -253,8 +253,14 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words_in, const
                 return v;
             }();
             static std::atomic<int> noted{0};
-            if (hashes.count(what) && noted.fetch_add(1, std::memory_order_relaxed) < 16)
-                NXLOG_W(kTag, "%s: this module has %zu words and the folder has no %s ([nvn] shader_replace_dir)", what, words_in.size(), f.filename().string().c_str());
+            if (hashes.count(what) && noted.fetch_add(1, std::memory_order_relaxed) < 16) {
+                // The module as it is made is written beside the file as <hash>_<words>.orig.spv, to build the replacement from.
+                std::filesystem::path o = f;
+                o.replace_extension(".orig.spv");
+                if (!std::filesystem::exists(o, ec)) std::ofstream(o, std::ios::binary).write(reinterpret_cast<const char*>(words_in.data()), static_cast<std::streamsize>(words_in.size() * 4));
+                NXLOG_W(kTag, "%s: this module has %zu words and the folder has no %s; written as %s ([nvn] shader_replace_dir)", what, words_in.size(),
+                        f.filename().string().c_str(), o.filename().string().c_str());
+            }
         }
     }
     const std::vector<uint32_t>& words = replaced.empty() ? words_in : replaced;
