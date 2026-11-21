@@ -35,23 +35,23 @@ std::vector<KThread*> g_mutex_waiters;   // waiting for a guest mutex word to be
 std::vector<KThread*> g_cv_waiters;      // waiting on a process-wide key
 std::vector<KThread*> g_addr_waiters;    // WaitForAddress
 
-// [kernel] wake_after_unlock (K2, default true; env NXRT_KERNEL_WAKE_AFTER_UNLOCK): a thread woken while g_k is still held runs straight
+// [kernel] wake_after_unlock (K2, default false: no gain measured on a 13700K, 2026-11-20; env NXRT_KERNEL_WAKE_AFTER_UNLOCK): a thread woken while g_k is still held runs straight
 // into the held lock and sleeps again until the waker leaves (Orchid's finding). The wakes a Guard's section asks for are collected and made
 // after g_k is released. The woken thread's KThread is kept alive by a reference until then (it may time out and exit meanwhile). Wakes are
 // still made at once when the section is about to sleep with g_k released (block_on_wake, sleep_locked): a deferred wake must not wait for
 // the waker's own wait to end. Host stand-in threads (no shared owner) are woken at once.
 bool wake_after_unlock() {
-    static const bool on = config_get_bool("kernel", "wake_after_unlock", true);
+    static const bool on = config_get_bool("kernel", "wake_after_unlock", false);
     return on;
 }
 thread_local std::vector<std::shared_ptr<KThread>> t_pending_wakes;
 thread_local int t_guard_depth = 0;
 std::atomic<uint64_t> g_wakes_deferred{0};
-// [kernel] per_object_wakes (K1, default true; env NXRT_KERNEL_PER_OBJECT_WAKES): an event signal wakes only the WaitSynchronization
+// [kernel] per_object_wakes (K1, default false: no gain measured on a 13700K, 2026-11-20; env NXRT_KERNEL_PER_OBJECT_WAKES): an event signal wakes only the WaitSynchronization
 // waiters that wait on that event (by its wait_key), not every waiter, which each woke, found nothing ready and slept again. Counted in
 // the gauges kernel.sync_wakes / kernel.sync_wakes_skipped. false: every signal wakes every waiter (as before).
 bool per_object_wakes() {
-    static const bool on = config_get_bool("kernel", "per_object_wakes", true);
+    static const bool on = config_get_bool("kernel", "per_object_wakes", false);
     return on;
 }
 std::atomic<uint64_t> g_sync_wakes{0}, g_sync_wakes_skipped{0};
