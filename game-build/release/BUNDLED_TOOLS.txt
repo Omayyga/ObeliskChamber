@@ -6,5 +6,8 @@ Tools bundled for the first-run build. None of them contains game code or data.
   zbic (GPLv2, https://github.com/kinnay/zbic); their licences are in the *.dist-info folders.
 - nxrecomp lifter (tools/build/recomp): GPL-3.0-or-later (tools/build/recomp/LICENSE).
 - spirv_harness (tools/spirv_harness): built on Ryujinx's shader translator (MIT, LICENSE.Ryujinx.MIT.txt) and the .NET runtime (MIT).
+- spirv-cross and glslang (tools/shaders/bin), from the Vulkan SDK: SPIRV-Cross is Apache-2.0 (LICENSE.SPIRV-Cross.Apache-2.0.txt);
+  glslang is under BSD, MIT, Apache-2.0 and, for its generated parser, GPL-3.0 with the Bison exception (LICENSE.glslang.txt). They
+  are run only by Set up's optional "decompiled lighting shader" step, on the player's own translated shader.
 - DejaVu Sans (fonts/): Bitstream Vera / DejaVu licence.
 No NVIDIA or AMD binaries are included. FSR 3 DLLs can be added by the player (Settings).

@@ -55,6 +55,9 @@ pub struct Paths {
     pub game_dir: PathBuf,
     /// the release package's tools/ folder (tools/build/fefw_build.py next to the launcher); None in a checkout
     pub package: Option<PathBuf>,
+    /// Set up's "Experimental: decompiled lighting shader" box (the launcher's own config): after the shaders are translated,
+    /// tools/shaders/lighting_edit.py makes an edited copy of the lighting shader that the runtime uses ([nvn] edited_shaders)
+    pub lighting_edit: bool,
 }
 
 impl Paths {
@@ -97,6 +100,18 @@ impl Paths {
             Some(t) => t.join("shaders").join("extract_corpus.py"),
             None => self.repo.join("tools").join("shaders").join("ampere").join("extract_corpus.py"),
         }
+    }
+    /// tools/shaders/lighting_edit.py (the package has it next to the extractor, with spirv-cross and glslang in shaders/bin)
+    pub fn lighting_tool(&self) -> PathBuf {
+        match &self.package {
+            Some(t) => t.join("shaders").join("lighting_edit.py"),
+            None => self.repo.join("tools").join("shaders").join("lighting_edit.py"),
+        }
+    }
+    /// The edited modules, beside the translated ones: the runtime reads <shader cache>/../edited
+    pub fn edited(&self) -> PathBuf {
+        let spirv = self.spirv();
+        spirv.parent().map(|d| d.join("edited")).unwrap_or_else(|| spirv.join("edited"))
     }
     pub fn corpus(&self) -> PathBuf {
         match &self.package {
@@ -491,6 +506,63 @@ fn shaders_ok(p: &Paths) -> bool {
         && v["intel_shaders"].as_bool().unwrap_or(false) == intel_shaders(p)
 }
 
+/// What the edited lighting shader was made from: the tool and the translated shaders. A stamp that differs (a new launcher, shaders
+/// translated again) makes the next Set up run the tool again.
+fn lighting_marker(p: &Paths) -> serde_json::Value {
+    serde_json::json!({ "tool": file_stamp(&p.lighting_tool()), "shaders": file_stamp(&p.spirv().join("results.tsv")) })
+}
+
+fn lighting_stamp(p: &Paths) -> PathBuf {
+    p.edited().join("setup.json")
+}
+
+/// The box is ticked and the tool ran on these shaders, or the box is clear and no edited module is left.
+fn lighting_ok(p: &Paths) -> bool {
+    if p.lighting_edit {
+        let have: serde_json::Value = serde_json::from_str(&fs::read_to_string(lighting_stamp(p)).unwrap_or_default()).unwrap_or_default();
+        have == lighting_marker(p)
+    } else {
+        !edited_modules(p).iter().any(|f| f.is_file())
+    }
+}
+
+fn edited_modules(p: &Paths) -> Vec<PathBuf> {
+    fs::read_dir(p.edited())
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).filter(|f| f.extension().and_then(|x| x.to_str()) == Some("spv")).collect())
+        .unwrap_or_default()
+}
+
+/// Set up's optional step (experimental, off unless the box on the Set up page is ticked). It never stops Set up: when the tool
+/// cannot run or leaves the shader alone, the log says so and the game uses the translated shader.
+fn lighting_step(r: &Runner, p: &Paths, cwd: &Path) -> Result<bool, String> {
+    if lighting_ok(p) {
+        return Ok(true);
+    }
+    if !p.lighting_edit {
+        for f in edited_modules(p) {
+            let _ = fs::remove_file(f);
+        }
+        let _ = fs::remove_file(lighting_stamp(p));
+        let _ = fs::remove_file(p.edited().join("edit.json"));
+        r.log(vec!["Decompiled lighting shader: the box is not ticked, so the edited shader was removed. The game uses the translated shader.".to_string()]);
+        return Ok(true);
+    }
+    if !p.lighting_tool().is_file() {
+        r.log(vec![format!("Decompiled lighting shader: {} is missing, nothing was changed.", crate::dump::fwd(&p.lighting_tool()))]);
+    } else {
+        let mut c = Command::new(p.python());
+        c.arg("-I").arg(p.lighting_tool()).arg("--spirv").arg(p.spirv()).arg("--out").arg(p.edited());
+        match r.run("shaders", "Editing the lighting shader (experimental)", c, cwd) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(e) => r.log(vec![format!("Decompiled lighting shader: the tool did not finish ({}). The game uses the translated shader.", e.lines().next().unwrap_or(""))]),
+        }
+    }
+    let _ = fs::create_dir_all(p.edited());
+    fs::write(lighting_stamp(p), lighting_marker(p).to_string()).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// What is done already, step by step (the page's checklist).
 pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
     let list: &[(&str, &str)] = if p.package.is_some() { &PACKAGE_STEPS } else { &STEPS };
@@ -502,7 +574,7 @@ pub fn steps(p: &Paths, running: Option<&str>) -> Vec<StepState> {
         "exe" => exe_ok(p),
         "textures" => textures_ok(p),
         "harness" => p.harness().is_file() && shaders_ok(p),
-        "shaders" => shaders_ok(p),
+        "shaders" => shaders_ok(p) && lighting_ok(p),
         "ini" => crate::settings::play_paths_ok(&p.game_dir, p),
         _ => false,
     };
@@ -868,9 +940,13 @@ fn crashed_shaders(p: &Paths) -> usize {
 
 /// Finds the shaders in the romfs and main and translates them to SPIR-V (both modes).
 fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, String> {
-    if shaders_ok(p) {
-        return Ok(true);
+    if !shaders_ok(p) && !translate_shaders(r, p, jobs, cwd)? {
+        return Ok(false);
     }
+    lighting_step(r, p, cwd)
+}
+
+fn translate_shaders(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, String> {
     if !p.harness().is_file() {
         return Err(format!("The shader translator is missing ({}).", crate::dump::fwd(&p.harness())));
     }
@@ -1080,6 +1156,7 @@ mod tests {
             dlc: None,
             game_dir: game.clone(),
             package: None,
+            lighting_edit: false,
         };
         // main's NSO header with its build ID at +0x40
         let mut nso = vec![0u8; 0x60];

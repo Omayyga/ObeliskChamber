@@ -60,7 +60,7 @@ function toolsHtml(tools) {
 }
 
 
-function stepsHtml(s) {
+function stepsHtml(s, cfg) {
   const p = s.progress;
   const running = p.state === 'running';
   const pct = p.total ? Math.floor((100 * p.done) / p.total) : 0;
@@ -76,6 +76,10 @@ function stepsHtml(s) {
         ${p.state === 'error' ? `<div class="banner danger">${icon('circle-x')}<div style="white-space: pre-wrap">${esc(progressMsg(p.message))}</div></div>` : ''}
         ${p.state === 'cancelled' || p.state === 'done' ? `<p class="dim">${esc(progressMsg(p.message))}</p>` : ''}
         ${!running && !s.complete && p.state !== 'error' ? `<p class="faint">${esc(t('setup.firstRunHint', { jobs: s.jobs }))}</p>` : ''}
+        <div class="stack" id="lighting-edit-box">
+          <label class="switch"><input type="checkbox" id="lighting-edit" ${cfg.lighting_edit ? 'checked' : ''} ${running ? 'disabled' : ''}> ${esc(t('setup.lightingEdit'))}</label>
+          <p class="faint">${esc(t('setup.lightingEditNote'))}</p>
+        </div>
         <div class="row">
           ${running
             ? `<button class="btn" id="setup-cancel">${icon('circle-x')}${esc(t('setup.pause'))}</button>`
@@ -112,6 +116,23 @@ export async function render(el, ctx) {
   }
 
   function bindSteps() {
+    // Experimental: decompiled lighting shader. The box is saved at once; it takes effect the next time Set up runs (the shader
+    // step shows as not done until then).
+    el.querySelector('#lighting-edit')?.addEventListener('change', async (ev) => {
+      try {
+        cfg.lighting_edit = ev.target.checked;
+        await api('save_config', { config: cfg });
+        status = await api('setup_status');
+        const card = el.querySelector('#steps-card');
+        if (card) {
+          card.outerHTML = stepsHtml(status, cfg);
+          refreshIcons();
+          bindSteps();
+        }
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+    });
     el.querySelector('#setup-run')?.addEventListener('click', async () => {
       try {
         await api('start_setup');
@@ -168,7 +189,7 @@ export async function render(el, ctx) {
         ${!status.cpu_problem && status.cpu_note ? `<div class="banner info" id="cpu-note">${icon('info')}<div><strong>${esc(t('setup.cpuCompat'))}</strong> ${esc(status.cpu_note)}</div></div>` : ''}
 
         ${status.package ? '' : toolsHtml(status.tools)}
-        ${ok && saved === path ? stepsHtml(status) : ''}
+        ${ok && saved === path ? stepsHtml(status, cfg) : ''}
 
         <div class="card">
           <h2>${icon('terminal')}${esc(t('setup.log'))}</h2>
@@ -243,7 +264,7 @@ export async function render(el, ctx) {
     }
     const card = el.querySelector('#steps-card');
     if (card) {
-      card.outerHTML = stepsHtml(status);
+      card.outerHTML = stepsHtml(status, cfg);
       refreshIcons();
       bindSteps();
     } else {
