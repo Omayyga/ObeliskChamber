@@ -1079,7 +1079,7 @@ void Overlay::Impl::draw_counter(const FrameInfo& f, double now_s) {
     const float gap = size * 0.15f;
     const float margin = size * 0.8f;
     const int n = counter_n;
-    float lines_w[4] = {};
+    float lines_w[5] = {};   // one per counter_lines entry: the detailed view with frame generation fills all five (EmblemWeave 4904f0b: [4] was written past)
     float line_h = 0, text_w = 0;
     for (int i = 0; i < n; ++i) {
         const ImVec2 sz = font->CalcTextSizeA(size, FLT_MAX, 0.0f, counter_lines[i].c_str());
