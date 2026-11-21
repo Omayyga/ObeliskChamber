@@ -617,6 +617,7 @@ void stats_add(uint64_t frame, double ns, double busy_ns) {
     NXLOG_I("nvn.gpustats", "full barriers by caller %s", site_report(kSiteBarrier, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "pass ends by caller %s", site_report(kSitePassEnd, frames, 12).c_str());
     NXLOG_I("nvn.gpustats", "passes reopened on the same targets by caller %s", site_report(kSiteReopen, frames, 12).c_str());
+    NXLOG_I("nvn.gpustats", "narrowed barriers by caller %s", site_report(kSiteNarrow, frames, 12).c_str());
     if (nxrt::config_get_bool("nvn", "prep_ahead", false)) {
         static uint64_t done0 = 0, learned0 = 0;
         const uint64_t done = prep_ahead_done(), learned = prep_ahead_learned();
@@ -1118,7 +1119,7 @@ void site_scene_begin() {
 // Sites claimed after the begin start from 0, which is right: they had no count before it.
 void site_scene_end(const char* label, double frames) {
     if (!(frames > 0)) return;
-    const char* what[kSiteKinds] = {"full barriers", "pass ends", "passes reopened on the same targets"};
+    const char* what[kSiteKinds] = {"full barriers", "pass ends", "passes reopened on the same targets", "narrowed barriers"};
     for (int kind = 0; kind < kSiteKinds; ++kind) {
         const std::string r = site_lines(kind, frames, 16, [](Site& s, uint64_t) { return s.scene0.load(std::memory_order_relaxed); }, [kind] {
             return g_site_other[kind].load(std::memory_order_relaxed) - g_site_other_scene0[kind].load(std::memory_order_relaxed);
@@ -1150,6 +1151,20 @@ void memory_barrier(VkCommandBuffer cb, const char* site_fn, int site_line) {
     b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
     b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &b;
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+void scoped_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+                    VkAccessFlags2 dst_access, const char* site_fn, int site_line) {
+    site_count(kSiteNarrow, site_fn, site_line);
+    VkMemoryBarrier2 b = {VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    b.srcStageMask = src_stage;
+    b.srcAccessMask = src_access;
+    b.dstStageMask = dst_stage;
+    b.dstAccessMask = dst_access;
     VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     di.memoryBarrierCount = 1;
     di.pMemoryBarriers = &b;
