@@ -471,7 +471,7 @@ fn textures_ok(p: &Paths) -> bool {
     p.repo.join("tools").join("textures").join("third_party").join("astc-encoder").join("Source").join("astcenc.h").is_file()
 }
 
-const SHADER_TRANSLATOR_VERSION: u32 = 3; // 3: real derivatives for the NVN2 shuffle pattern (#29 eyes); 2: portable 32-lane warps (game-build/release/fefw_build.py has the same number)
+const SHADER_TRANSLATOR_VERSION: u32 = 4; // 4: integer abs without SAbs, which hangs NVIDIA GPUs (#121); 3: real derivatives for the NVN2 shuffle pattern (#29 eyes); 2: portable 32-lane warps (game-build/release/fefw_build.py has the same number)
 
 /// U1 (opt-in, for Intel testers): `[setup] intel_shaders = true` in ObeliskChamber.ini translates the shaders as Ryujinx does for
 /// Intel GPUs: 64-bit float math lowered to 32-bit and no barriers in divergent branches (upstream #45, for issue #81). Changing it
