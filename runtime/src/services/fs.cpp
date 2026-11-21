@@ -458,6 +458,48 @@ bool has_exefs_patches(const RomfsMod& m) {
     return false;
 }
 
+// What the last Set up did with each mod's exefs patches: <[fs] exefs>/exefs_mods.txt (fefw_build.py write_exefs_record), lines
+// "applied<TAB>mod", "left out<TAB>mod<TAB>why", "not used<TAB>mod". Empty when the file is missing (no Set up since, or no patches).
+std::map<std::string, std::pair<std::string, std::string>> exefs_record() {
+    std::map<std::string, std::pair<std::string, std::string>> out;
+    const std::string dir = config_get_str("fs", "exefs", "");
+    if (dir.empty()) return out;
+    std::ifstream f(stdfs::u8path(dir) / "exefs_mods.txt");
+    std::string line;
+    while (f && std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        const size_t a = line.find('\t');
+        if (a == std::string::npos) continue;
+        const size_t b = line.find('\t', a + 1);
+        const std::string name = line.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1);
+        out[name] = {line.substr(0, a), b == std::string::npos ? std::string() : line.substr(b + 1)};
+    }
+    return out;
+}
+
+// The start-up log line for a mod with exefs patches: what the last Set up did with them, not only that Set up applies them.
+void log_exefs_patches(const RomfsMod& m, const std::map<std::string, std::pair<std::string, std::string>>& rec) {
+    const auto it = rec.find(m.name);
+    bool patches = false;   // .ips / .pchtxt: what Set up applies (other files in exefs/ are an emulator's and not used here)
+    std::error_code ec;
+    for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(m.exefs), ec)) {
+        std::wstring ext = e.path().extension().wstring();
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+        if (e.is_regular_file(ec) && (ext == L".ips" || ext == L".pchtxt")) patches = true;
+    }
+    if (it == rec.end() && !patches)
+        NXLOG_I("mods", "%s: exefs files other than .ips / .pchtxt patches and DLLs are not used", m.name.c_str());
+    else if (it == rec.end())
+        NXLOG_W("mods", "%s: exefs patches are not in this build (Set up applies them, not the start-up): press Set up to apply them", m.name.c_str());
+    else if (it->second.first == "applied")
+        NXLOG_I("mods", "%s: exefs patches applied by Set up", m.name.c_str());
+    else if (it->second.first == "left out")
+        NXLOG_W("mods", "%s: exefs patches left out by the last Set up: %s", m.name.c_str(), it->second.second.c_str());
+    else
+        NXLOG_I("mods", "%s: exefs patches are for another version of the game (none for this main)", m.name.c_str());
+}
+
 std::shared_ptr<fs::RomfsImage> rom_image() {
     std::lock_guard<std::mutex> lk(st().mu);
     if (st().rom) return st().rom;
@@ -466,8 +508,9 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     std::string err;
     const std::string dir = romfs_dir();
     std::vector<std::string> overlays;
+    const auto record = exefs_record();
     for (const RomfsMod& m : installed_mods()) {
-        if (m.has_exefs && has_exefs_patches(m)) NXLOG_I("mods", "%s: exefs patches are applied by Set up (fefw_build.py), not at start-up", m.name.c_str());
+        if (m.has_exefs && has_exefs_patches(m)) log_exefs_patches(m, record);
         if (!m.romfs.empty()) {
             NXLOG_I("mods", "%s: RomFS from %s", m.name.c_str(), m.romfs.c_str());
             overlays.push_back(m.romfs);
