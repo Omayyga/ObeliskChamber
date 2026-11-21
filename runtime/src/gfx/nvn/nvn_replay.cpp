@@ -1867,7 +1867,7 @@ int storage_slot_for(int nvn_stage, int c0_offset) {
 // dispatch stay in the pool.
 struct Shadow { gfx::Buffer buf; VkDeviceSize size = 0; uint64_t last = 0; };
 std::unordered_map<uint64_t, Shadow> g_shadows;            // by GPU address and size
-struct ShadowUse { uint64_t addr; VkDeviceSize size; BufRef host; VkBuffer buf; VkDeviceSize off; bool writes; bool direct; MirrorSpan mirror; };
+struct ShadowUse { uint64_t addr; VkDeviceSize size; BufRef host; VkBuffer buf; VkDeviceSize off; bool writes; bool direct; MirrorSpan mirror; bool host_direct = false; };   // host_direct: bound in the pool itself
 std::vector<ShadowUse> g_shadow_uses;                       // this dispatch
 // Results of direct bindings still only in the pool copy: nvn_gpu_pool.cpp (out_add ... out_end_submit, "compute out").
 bool g_shadowing = false;
@@ -1915,6 +1915,30 @@ bool compute_direct_on() {
     static const bool on = nxrt::config_get_bool("nvn", "compute_direct", true);
     return on;
 }
+// [nvn] cs_ssbo_readonly (default off until A/B'd): a compute shader's storage buffer that reflection shows is never stored to and never used
+// by an atomic (DescriptorBinding::written; a pointer passed to a function counts as written) is bound as read-only: its shadow is not copied
+// back, no GPU write is recorded for it (the pool copy's pages stay valid), and dispatch_barriers = tracked counts it as a read.
+// Technique from FEFW-recomp ebdb5a1.
+bool cs_ssbo_readonly_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "cs_ssbo_readonly", false);
+    return on;
+}
+// [nvn] compute_shadow_min_bytes (default 0: off): a compute binding smaller than this that the shader does not use with an atomic
+// (DescriptorBinding::atomic) and that the pool copy cannot serve is bound in the pool itself, over PCIe, instead of a shadow copied in and
+// out with a barrier each side. compute_hot_host does this for hot pages and whole dispatches without atomics; this is per binding and for
+// any pages. Technique from FEFW-recomp ebdb5a1 (their default 4096).
+VkDeviceSize compute_shadow_min_bytes() {
+    static const VkDeviceSize n = static_cast<VkDeviceSize>(std::max<int64_t>(0, nxrt::config_get_int("nvn", "compute_shadow_min_bytes", 0)));
+    return n;
+}
+// [nvn] shadow_lean (default off until A/B'd): the barrier before a mirror_fill is recorded only when the fill records a copy, and a shadow's
+// result is not also copied into the pool copy when the range covers no whole page (mirror_span_written re-validates whole pages only, so
+// that copy was never used). Technique from FEFW-recomp ebdb5a1 / 9af4167.
+bool shadow_lean_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "shadow_lean", false);
+    return on;
+}
+uint64_t g_sh_small_host = 0, g_sh_ro = 0, g_sh_fill_no_barrier = 0, g_sh_partial_skip = 0;   // summary line
 
 // Every result still only in the pool copy goes back to the pool (in queue order, before what is recorded next).
 void flush_compute_out(int why) {
@@ -2271,17 +2295,24 @@ void sh_barrier_once() {
 
 // The buffer a dispatch binds for [addr, addr + size): the pool copy, the shadow (its copy-in recorded now), or `host` when it cannot have
 // either.
-BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writes) {
+BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writes, bool atomic = true) {
     if (!g_shadowing || !host.ok || size == 0) return host;
+    // a range bound in the pool itself is remembered, so that a later binding of this dispatch that overlaps it stays in the pool too (a shadow
+    // copied back over it would undo what the dispatch wrote there)
+    auto in_pool = [&]() -> BufRef {
+        g_shadow_uses.push_back({addr, size, host, host.buffer, host.offset, false, false, MirrorSpan{}, true});
+        return host;
+    };
     for (ShadowUse& u : g_shadow_uses) {
         if (u.addr == addr && u.size == size) {           // the same range bound twice: one binding
+            if (u.host_direct) return host;
             u.writes |= writes;
             BufRef r = host; r.buffer = u.buf; r.offset = u.off; r.avail = size;
             return r;
         }
         if (addr < u.addr + u.size && u.addr < addr + size) {   // overlapping ranges stay coherent in the pool
             compute_out_guard(addr, size, kOutDispatch);
-            return host;
+            return in_pool();
         }
     }
     // a result an earlier dispatch left in the pool copy: this dispatch binds it there again (the pages are not valid for the tracker
@@ -2298,20 +2329,23 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         }
     }
     if (!out_lazy()) compute_out_guard(addr, size, kOutDispatch);
-    if (size > kShadowMax) { compute_out_guard(addr, size, kOutDispatch); return host; }
+    if (size > kShadowMax) { compute_out_guard(addr, size, kOutDispatch); return in_pool(); }
     if (const uint64_t hot_max = compute_hot_host_max(); hot_max && size <= hot_max && !g_cs_atomics && mirror_range_hot(addr, size)) {
         compute_out_guard(addr, size, kOutDispatch);   // the dispatch reads the pool: held results there go back first
         ++g_sh_hot_host;
-        return host;
+        return in_pool();
     }
     const MirrorSpan ms = mirror_span(addr, size);    // pages holding a compute result count as current there (compute_out_lazy)
     if (ms.buf && compute_direct_on()) {
         bool ok = ms.valid;
         int why = kFillNone;
         if (!ok) {
-            sh_barrier_once();
+            const bool lean = shadow_lean_on();
+            if (!lean) sh_barrier_once();
+            const bool had_barrier = g_sh_barrier;
             uint64_t filled = 0;
-            ok = mirror_fill(F->cb, addr, size, &filled, &why);
+            ok = mirror_fill(F->cb, addr, size, &filled, &why, lean ? &g_sh_barrier : nullptr);   // lean: the barrier only before a copy
+            if (lean && !had_barrier && !g_sh_barrier) ++g_sh_fill_no_barrier;
             if (filled) { g_sh_copied = true; g_sh_bytes_fill += filled; }
             if (ok) ++g_sh_direct_filled;
         }
@@ -2327,6 +2361,10 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
     else if (ms.buf) ++g_sh_reason[kShReasonDirectOff];
     else ++g_sh_reason[kShReasonNoSpan];
     compute_out_guard(addr, size, kOutDispatch);      // the shadow reads the pool: held results there go back first
+    if (const VkDeviceSize min = compute_shadow_min_bytes(); min && size < min && !atomic) {
+        ++g_sh_small_host;
+        return in_pool();
+    }
     const uint64_t key = addr ^ (static_cast<uint64_t>(size) << 40) ^ (static_cast<uint64_t>(size) >> 24);
     Shadow& sh = g_shadows[key];
     if (!sh.buf || sh.size != size) {
@@ -2336,7 +2374,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
         if (device().create_buffer(size, usage, gfx::MemoryUse::GpuOnly, &sh.buf, "nvn compute shadow") != VK_SUCCESS) {
             sh.buf = gfx::Buffer{};
             g_shadows.erase(key);
-            return host;
+            return in_pool();
         }
         sh.size = size;
     }
@@ -2363,7 +2401,7 @@ BufRef shadow_of(uint64_t addr, VkDeviceSize size, const BufRef& host, bool writ
 void shadows_after_dispatch() {
     bool any = false;
     for (const ShadowUse& u : g_shadow_uses) {
-        if (!u.writes) continue;
+        if (u.host_direct || !u.writes) continue;
         if (u.direct) {
             if (out_add(u.addr, u.size, u.buf, u.off, u.host)) ++g_sh_merged;   // written again before it went back: one copy out for both
             continue;
@@ -2372,7 +2410,9 @@ void shadows_after_dispatch() {
         VkBufferCopy c = {0, u.host.offset, u.size};
         vkCmdCopyBuffer(F->cb, u.buf, u.host.buffer, 1, &c);
         g_sh_bytes_out += u.size;
-        if (u.mirror.buf) {
+        const bool whole_page = ((u.addr + 4095) & ~uint64_t{4095}) + 4096 <= ((u.addr + u.size) & ~uint64_t{4095});
+        if (u.mirror.buf && !whole_page && shadow_lean_on()) ++g_sh_partial_skip;
+        else if (u.mirror.buf) {
             VkBufferCopy mc = {0, u.mirror.offset, u.size};
             vkCmdCopyBuffer(F->cb, u.buf, u.mirror.buf, 1, &mc);
             mirror_span_written(u.addr, u.size);
@@ -2400,6 +2440,12 @@ void shadows_after_dispatch() {
             if (compute_hot_host_max())
                 NXLOG_I("nvn.replay", "compute shadows: %llu small hot bindings bound in the pool instead ([nvn] compute_hot_host = %llu bytes)",
                         static_cast<unsigned long long>(g_sh_hot_host), static_cast<unsigned long long>(compute_hot_host_max()));
+            if (compute_shadow_min_bytes() || cs_ssbo_readonly_on() || shadow_lean_on())
+                NXLOG_I("nvn.replay", "compute shadows: %llu small bindings bound in the pool ([nvn] compute_shadow_min_bytes = %llu), %llu read-only "
+                        "storage buffers ([nvn] cs_ssbo_readonly), %llu fills with no barrier and %llu copy-backs to the pool copy skipped ([nvn] shadow_lean)",
+                        static_cast<unsigned long long>(g_sh_small_host), static_cast<unsigned long long>(compute_shadow_min_bytes()),
+                        static_cast<unsigned long long>(g_sh_ro), static_cast<unsigned long long>(g_sh_fill_no_barrier),
+                        static_cast<unsigned long long>(g_sh_partial_skip));
         }
         for (auto it = g_shadows.begin(); it != g_shadows.end();) {
             if (F->serial - it->second.last > 600) {
@@ -2617,8 +2663,10 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                                 break;
                             }
                         }
+                        const bool cs_ro = cs_ssbo_readonly_on() && d.nvn_stage == kCompute && !b.written;
                         if (g_shadowing && br.ok) {                                  // before gpu_wrote: the shadow reads the pool copy while valid
-                            const BufRef sh = shadow_of(bind.addr, bi.range, br, true);
+                            if (cs_ro) ++g_sh_ro;
+                            const BufRef sh = shadow_of(bind.addr, bi.range, br, !cs_ro, b.atomic);
                             bi.buffer = sh.buffer;
                             bi.offset = sh.offset;
                         }
@@ -2643,7 +2691,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         // and the next draw does not have to bind again. (In the translated Fortune's Weave shaders no vertex or fragment shader writes one.)
                         static const bool ssbo_ro = nxrt::config_get_bool("nvn", "gfx_ssbo_readonly", true);
                         const bool read_only_gfx = ssbo_ro && d.nvn_stage != kCompute && !b.written;
-                        if (br.ok && !served && !read_only_gfx) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
+                        if (br.ok && !served && !read_only_gfx && !cs_ro) gpu_wrote(bind.addr, bi.range, kWriteStorage);      // a storage buffer may be written by the shader
                     }
                     break;
                 }
@@ -2779,7 +2827,7 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                         d.shader->hash.c_str(), b.name.c_str(), static_cast<unsigned long long>(bytes));
             if (v && g_shadowing) {                                        // before gpu_wrote: the shadow reads the pool copy while valid
                 const BufRef host = resolve_buffer(addr, bytes);
-                const BufRef sh = shadow_of(addr, bytes, host, storage);
+                const BufRef sh = shadow_of(addr, bytes, host, storage, b.atomic);
                 if (sh.buffer != host.buffer)
                     if (VkBufferView sv = make_buffer_view(sh.buffer, sh.offset, bytes, vfmt)) v = sv;   // offset: non-zero in the pool copy
             }
@@ -4846,7 +4894,9 @@ bool cs_collect(const ProgLayout& pl, uint64_t indirect, CsSet& o) {
                         if (slot < 0 || slot >= 16) return false;
                         if (S.ssbo[st][slot].addr) {
                             const GState::Bind& bd = S.ssbo[st][slot];
-                            o.wr.push_back({bd.addr, bd.size ? bd.addr + bd.size : UINT64_MAX});
+                            const CsRange rng{bd.addr, bd.size ? bd.addr + bd.size : UINT64_MAX};
+                            if (cs_ssbo_readonly_on() && !b.written) o.rd.push_back(rng);   // [nvn] cs_ssbo_readonly
+                            else o.wr.push_back(rng);
                         }
                         break;
                     }

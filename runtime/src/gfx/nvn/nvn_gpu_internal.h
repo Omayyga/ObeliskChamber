@@ -190,7 +190,9 @@ void mirror_span_written(uint64_t gpu_address, uint64_t size);
 // copied) when a page is hot, banned or cannot be tracked, or the range has no copy. *bytes (optional) receives the bytes copied.
 // Why mirror_fill could not make a range current in the pool copy (`why`, when given): the compute shadow summary counts them.
 enum FillFail { kFillNone = 0, kFillOff, kFillNoMirror, kFillRange, kFillNoChunk, kFillNoSource, kFillHot, kFillBanned, kFillArm, kFillNotValid, kFillKinds };
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why = nullptr);
+// barrier_done (optional, [nvn] shadow_lean): when it is false and a copy is recorded, a memory barrier is recorded before the copies and it
+// becomes true; null: the caller recorded the barrier already.
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why = nullptr, bool* barrier_done = nullptr);
 // True when a page of [gpu_address, gpu_address + size) that is not current in the pool copy is hot (per-frame CPU data): mirror_fill would
 // refuse it with kFillHot. Records nothing.
 bool mirror_range_hot(uint64_t gpu_address, uint64_t size);

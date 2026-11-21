@@ -1486,3 +1486,189 @@ int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t
 }
 
 }  // namespace nxrt::nvn::be::gpu
+
+// ---- 64-bit floats to 32-bit (spirv_lower_float64) ----------------------------------------------------------------------------
+namespace nxrt::nvn::be::gpu {
+namespace {
+
+enum : uint32_t {
+    kOpSourceContinued = 2, kOpSource = 3, kOpSourceExtension = 4, kOpName = 5, kOpMemberName = 6, kOpString = 7, kOpLine = 8,
+    kOpExtension = 10, kOpExtInstImport = 11, kOpExtInst = 12, kOpMemoryModel = 14, kOpEntryPoint = 15, kOpExecutionMode = 16,
+    kOpCapability = 17, kOpTypeVoid = 19, kOpTypeInt = 21, kOpTypeFloat = 22, kOpTypePointer = 32, kOpTypeForwardPointer = 39,
+    kOpConstantFirst = 41, kOpConstant = 43, kOpConstantComposite = 44, kOpConstantLast = 52, kOpFunction = 54,
+    kOpDecorate = 71, kOpMemberDecorate = 72, kOpCompositeConstruct = 80, kOpCopyObject = 83, kOpFConvert = 115, kOpBitcast = 124,
+    kOpExecutionModeId = 331, kOpModuleProcessed = 330, kOpNoLine = 317,
+    kCapFloat64 = 10, kStorageFunction = 7, kGlslPackDouble = 59, kGlslUnpackDouble = 60,
+};
+
+// Instructions whose word 1 is not a result type (so a literal or an id there is not taken for one).
+bool no_result_type(uint32_t op) {
+    switch (op) {
+        case kOpSourceContinued: case kOpSource: case kOpSourceExtension: case kOpName: case kOpMemberName: case kOpString: case kOpLine:
+        case kOpExtension: case kOpExtInstImport: case kOpMemoryModel: case kOpEntryPoint: case kOpExecutionMode: case kOpCapability:
+        case kOpDecorate: case kOpMemberDecorate: case kOpModuleProcessed: case kOpNoLine: case kOpExecutionModeId:
+            return true;
+        default:
+            return op >= kOpTypeVoid && op <= kOpTypeForwardPointer;   // type declarations: word 1 is their own id
+    }
+}
+
+}  // namespace
+
+bool spirv_lower_float64(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    if (in.size() < 5) return false;
+    std::vector<Inst> insts;
+    for (size_t i = 5; i < in.size();) {
+        const uint32_t len = in[i] >> 16;
+        if (len == 0 || i + len > in.size()) return false;
+        insts.push_back({i, in[i] & 0xffff, len});
+        i += len;
+    }
+    auto W = [&](const Inst& n, uint32_t k) { return in[n.at + k]; };
+
+    // Pass 1: the types and imports involved.
+    std::map<uint32_t, uint32_t> f64, f32, u32;   // ids (value unused)
+    std::map<uint32_t, uint32_t> glsl;
+    std::map<uint32_t, uint32_t> is_type;
+    bool cap64 = false;
+    for (const Inst& n : insts) {
+        if (n.op >= kOpTypeVoid && n.op <= kOpTypeForwardPointer && n.len >= 2) is_type[W(n, 1)] = n.op;
+        if (n.op == kOpTypeFloat && n.len >= 3) (W(n, 2) == 64 ? f64 : W(n, 2) == 32 ? f32 : is_type)[W(n, 1)] = n.op;
+        if (n.op == kOpTypeInt && n.len >= 4 && W(n, 2) == 32 && W(n, 3) == 0) u32[W(n, 1)] = 1;
+        if (n.op == kOpCapability && n.len >= 2 && W(n, 1) == kCapFloat64) cap64 = true;
+        if (n.op == kOpExtInstImport && n.len >= 3) {
+            const char* name = reinterpret_cast<const char*>(&in[n.at + 2]);
+            const size_t room = (n.len - 2) * 4;
+            if (std::strncmp(name, "GLSL.std.450", room) == 0) glsl[W(n, 1)] = 1;
+        }
+    }
+    if (f64.empty() || f32.empty() || !cap64) return false;
+    const uint32_t float32 = f32.begin()->first;
+
+    // Pointers to a double: only in function variables (memory the host or other shaders also see keeps its layout). The pointer
+    // type is mapped onto an existing Function pointer to float, or kept with float as its pointee.
+    std::map<uint32_t, uint32_t> remap;   // type id -> the type it becomes
+    std::map<uint32_t, uint32_t> drop;    // declarations left out
+    for (const auto& kv : f64) { remap[kv.first] = float32; drop[kv.first] = 1; }
+    uint32_t f32_fn_ptr = 0;
+    for (const Inst& n : insts)
+        if (n.op == kOpTypePointer && n.len == 4 && W(n, 2) == kStorageFunction && f32.count(W(n, 3)) && !f32_fn_ptr) f32_fn_ptr = W(n, 1);
+    std::map<uint32_t, uint32_t> f64_ptr;
+    for (const Inst& n : insts) {
+        if (n.op != kOpTypePointer || n.len != 4 || !f64.count(W(n, 3))) continue;
+        if (W(n, 2) != kStorageFunction) return false;
+        f64_ptr[W(n, 1)] = 1;
+        if (f32_fn_ptr) { remap[W(n, 1)] = f32_fn_ptr; drop[W(n, 1)] = 1; }
+        else f32_fn_ptr = W(n, 1);   // this declaration stays, with float as its pointee
+    }
+    // No other type may contain a double or a pointer to one (vectors, matrices, arrays, structs, function signatures, ...).
+    for (const Inst& n : insts) {
+        if (!(n.op >= kOpTypeVoid && n.op <= kOpTypeForwardPointer) || n.op == kOpTypeFloat || n.op == kOpTypeInt) continue;
+        if (n.op == kOpTypePointer) {
+            if (n.len == 4 && f64_ptr.count(W(n, 3))) return false;   // a pointer to a pointer to a double
+            continue;
+        }
+        if (n.op == kOpTypeForwardPointer) {
+            if (n.len >= 2 && f64_ptr.count(W(n, 1))) return false;
+            continue;
+        }
+        // the type ids of these declarations start at word 2 (OpTypeImage's later words and array lengths are literals or constants,
+        // neither of which can be one of these type ids)
+        for (uint32_t k = 2; k < n.len; ++k)
+            if (f64.count(W(n, k)) || f64_ptr.count(W(n, k))) return false;
+    }
+
+    // Values: their types, the definitions, and the 32-bit unsigned and float constants.
+    std::map<uint32_t, uint32_t> value_type;
+    std::map<uint32_t, const Inst*> def;
+    std::map<uint32_t, uint32_t> u32_const, f32_const_by_bits;
+    for (const Inst& n : insts) {
+        if (no_result_type(n.op) || n.len < 3 || !is_type.count(W(n, 1))) continue;
+        value_type[W(n, 2)] = W(n, 1);
+        def[W(n, 2)] = &n;
+        if (n.op >= kOpConstantFirst && n.op <= kOpConstantLast && f64.count(W(n, 1))) return false;   // a double constant
+        if (n.op == kOpConstant && n.len == 4 && u32.count(W(n, 1))) u32_const[W(n, 2)] = W(n, 3);
+        if (n.op == kOpConstant && n.len == 4 && f32.count(W(n, 1)) && !f32_const_by_bits.count(W(n, 3))) f32_const_by_bits[W(n, 3)] = W(n, 2);
+    }
+    auto is64 = [&](uint32_t value) {
+        const auto it = value_type.find(value);
+        return it != value_type.end() && f64.count(it->second) != 0;
+    };
+
+    uint32_t bound = in[3];
+    std::vector<uint32_t> new_consts;
+    auto float_const = [&](uint32_t bits) {
+        if (const auto it = f32_const_by_bits.find(bits); it != f32_const_by_bits.end()) return it->second;
+        const uint32_t id = bound++;
+        f32_const_by_bits[bits] = id;
+        new_consts.insert(new_consts.end(), {(4u << 16) | kOpConstant, float32, id, bits});
+        return id;
+    };
+
+    std::vector<uint32_t> res(in.begin(), in.begin() + 5);
+    res.reserve(in.size() + 32);
+    size_t first_fn = 0;
+    for (const Inst& n : insts) {
+        std::vector<uint32_t> q(in.begin() + static_cast<std::ptrdiff_t>(n.at), in.begin() + static_cast<std::ptrdiff_t>(n.at + n.len));
+        if (n.op == kOpCapability && n.len >= 2 && W(n, 1) == kCapFloat64) continue;
+        if ((n.op == kOpTypeFloat || n.op == kOpTypePointer) && drop.count(W(n, 1))) continue;
+        if ((n.op == kOpName || n.op == kOpDecorate || n.op == kOpMemberName || n.op == kOpMemberDecorate) && n.len >= 2 && drop.count(W(n, 1))) continue;
+        if (n.op == kOpTypePointer && n.len == 4 && f64.count(W(n, 3))) q[3] = float32;   // the kept pointer declaration
+        if (n.op == kOpBitcast && n.len == 4 && (f64.count(W(n, 1)) || is64(W(n, 3)))) return false;
+        if (n.op == kOpExtInst && n.len >= 5) {
+            bool touches = f64.count(W(n, 1)) != 0;
+            for (uint32_t k = 5; k < n.len && !touches; ++k) touches = is64(W(n, k));
+            if (touches && !glsl.count(W(n, 3))) return false;
+            if (glsl.count(W(n, 3)) && W(n, 4) == kGlslUnpackDouble && touches) return false;
+            if (glsl.count(W(n, 3)) && W(n, 4) == kGlslPackDouble && f64.count(W(n, 1))) {
+                if (n.len != 6) return false;
+                const auto d = def.find(W(n, 5));
+                if (d == def.end()) return false;
+                const Inst& c = *d->second;
+                if ((c.op != kOpCompositeConstruct && c.op != kOpConstantComposite) || c.len != 5) return false;
+                const auto lo = u32_const.find(W(c, 3)), hi = u32_const.find(W(c, 4));
+                if (lo == u32_const.end() || hi == u32_const.end()) return false;
+                const uint64_t bits = static_cast<uint64_t>(lo->second) | (static_cast<uint64_t>(hi->second) << 32);
+                double dv;
+                std::memcpy(&dv, &bits, 8);
+                const float fv = static_cast<float>(dv);
+                uint32_t fb;
+                std::memcpy(&fb, &fv, 4);
+                q = {(4u << 16) | kOpCopyObject, float32, W(n, 2), float_const(fb)};
+            }
+        }
+        if (n.op == kOpFConvert && n.len == 4 && (f64.count(W(n, 1)) || is64(W(n, 3)))) {
+            const auto ot = value_type.find(W(n, 3));
+            const bool from32 = ot != value_type.end() && f32.count(ot->second), from64 = is64(W(n, 3));
+            const bool to32 = f32.count(W(n, 1)) != 0, to64 = f64.count(W(n, 1)) != 0;
+            if (!((to64 && from32) || (to32 && from64) || (to64 && from64))) return false;   // a 16-bit side
+            q = {(4u << 16) | kOpCopyObject, float32, W(n, 2), W(n, 3)};
+        }
+        // the result type of a value (only instructions that define one: def[] is keyed by their own result id)
+        if (!no_result_type(n.op) && n.len >= 3) {
+            const auto d = def.find(W(n, 2));
+            if (d != def.end() && d->second == &n) {
+                if (const auto r = remap.find(q[1]); r != remap.end()) q[1] = r->second;
+            }
+        }
+        if (n.op == kOpFunction && !first_fn) first_fn = res.size();
+        res.insert(res.end(), q.begin(), q.end());
+    }
+    if (!first_fn) return false;
+    res.insert(res.begin() + static_cast<std::ptrdiff_t>(first_fn), new_consts.begin(), new_consts.end());
+    res[3] = bound;
+
+    // Nothing 64-bit may be left: no Float64 capability, no 64-bit float type, no value typed with a dropped type.
+    for (size_t i = 5; i < res.size();) {
+        const uint32_t len = res[i] >> 16, op = res[i] & 0xffff;
+        if (len == 0 || i + len > res.size()) return false;
+        if (op == kOpCapability && len >= 2 && res[i + 1] == kCapFloat64) return false;
+        if (op == kOpTypeFloat && len >= 3 && res[i + 2] == 64) return false;
+        if (!no_result_type(op) && len >= 3 && drop.count(res[i + 1])) return false;
+        i += len;
+    }
+    out = std::move(res);
+    return true;
+}
+
+}  // namespace nxrt::nvn::be::gpu

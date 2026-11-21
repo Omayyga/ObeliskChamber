@@ -80,8 +80,8 @@ const ImVec4 kGreen(0.55f, 0.86f, 0.55f, 1.0f);
 const ImVec4 kRed(1.0f, 0.42f, 0.38f, 1.0f);
 const ImVec4 kAccent(0.42f, 0.78f, 0.96f, 1.0f);
 
-enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kTabGame, kTabDebug, kTabCount };
-constexpr const char* kTabNames[kTabCount] = {"Display", "Graphics", "Frame rate", "Audio", "Controls", "Game", "Debug"};
+enum Tab { kTabDisplay, kTabGraphics, kTabFrameRate, kTabAudio, kTabControls, kTabGame, kTabMods, kTabDebug, kTabCount };
+constexpr const char* kTabNames[kTabCount] = {"Display", "Graphics", "Frame rate", "Audio", "Controls", "Game", "Mods", "Debug"};
 
 // ---- the ObeliskChamber.ini keys the menu edits -------------------------------------------------------------------------------------------------
 // The value read at start is kept (boot) so a restart-only row can show what is in force and the bottom bar can list what waits. A key the
@@ -1797,6 +1797,7 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         int step = ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) ? 1 : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) ? -1 : 0;
         if (step) {
             m.tab_request = (m.tab + step + kTabCount) % kTabCount;
+            if (m.tab_request == kTabMods && !gfx::has_mod_panels()) m.tab_request = (m.tab_request + step + kTabCount) % kTabCount;
             m.focus_tab = m.tab_request;
             m.focus_first = true;
         }
@@ -1845,7 +1846,9 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
         const float help_h = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
         const float bottom = help_h + ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y * 3;
         if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons | ImGuiTabBarFlags_FittingPolicyShrink)) {
+            const bool mods_tab = gfx::has_mod_panels();   // the Mods tab only when a code mod added a panel
             for (int t = 0; t < kTabCount; ++t) {
+                if (t == kTabMods && !mods_tab) continue;
                 char label[48];
                 std::snprintf(label, sizeof label, "  %s  ###tab%d", tr(kTabNames[t]), t);
                 if (!ImGui::BeginTabItem(label, nullptr, m.tab_request == t ? ImGuiTabItemFlags_SetSelected : 0)) continue;
@@ -1859,6 +1862,13 @@ void settings_menu(play::UiHost& host, gfx::Overlay& ov) {
                     case kTabAudio: audio_page(host, m); break;
                     case kTabControls: controls_page(host, m, live); break;
                     case kTabGame: game_page(host, m); break;
+                    case kTabMods:   // the code mods' panels (mod API 5; EmblemWeave's 4): they apply at once, not with this menu's Save
+                        ImGui::TextDisabled("%s", tr("Code mods' own settings. Changes apply at once."));
+                        ImGui::Spacing();
+                        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);   // room for the sliders' labels
+                        gfx::draw_mod_panels();
+                        ImGui::PopItemWidth();
+                        break;
                     case kTabDebug: debug_page(host, m, ov); break;
                 }
                 ImGui::PopItemWidth();

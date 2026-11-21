@@ -236,6 +236,22 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             fixed = w;
             fixed.erase(fixed.begin() + static_cast<std::ptrdiff_t>(cap_at), fixed.begin() + static_cast<std::ptrdiff_t>(cap_at) + 2);
             code = &fixed;
+        } else if (uses64 && !device().features().shader_float64) {
+            // A GPU without shaderFloat64 (Intel Arc, Iris Xe: issue #81) loses the device on such a module. Four of Fortune's Weave's
+            // compute shaders (auto exposure) use doubles; Set up's [setup] intel_shaders translates them without, and this lowers the
+            // ones already translated with them. [gfx] lower_float64 = false: leave them (to test the translation path alone).
+            static const bool lower = config_get_bool("gfx", "lower_float64", true);
+            static std::mutex mu;
+            static int noted = 0;
+            const bool ok = lower && spirv_lower_float64(w, fixed);
+            if (ok) code = &fixed;
+            std::lock_guard<std::mutex> lk(mu);
+            if (noted++ < 16) {
+                if (ok) NXLOG_I(kTag, "%s: 64-bit floats made 32-bit for this GPU (no shaderFloat64; [gfx] lower_float64)", what ? what : "shader");
+                else NXLOG_W(kTag, "%s uses 64-bit floats, which this GPU lacks (no shaderFloat64), in a form that is not made 32-bit here: it may "
+                                   "hang the GPU. Set [setup] intel_shaders = true in ObeliskChamber.ini and press Set up%s",
+                             what ? what : "a shader", lower ? "" : " ([gfx] lower_float64 is false)");
+            }
         }
     }
     // Every Location output of a vertex / tessellation evaluation / geometry shader starts at (0,0,0,1) as on the console: a component the

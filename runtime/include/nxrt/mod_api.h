@@ -54,6 +54,17 @@
  *     per row, a help line, up to three tabs; left / right and the confirm button are the mod's to answer. For settings that are
  *     numbers or choices, which a plain menu of the game cannot change in place.
  *
+ *   - (version 5) a panel of the mod's own settings in the overlay's Mods window ([gfx] mods_key, default F8) and on the menu's Mods
+ *     tab (add_panel, panel_visible), drawn with simple widgets (NxModUi). The same calls, at the same places in NxModApi, as
+ *     EmblemWeave's mod API version 4, so a mod written for either runtime's panels works in both: see "Two version 4s" below.
+ *
+ * Two version 4s. EmblemWeave's runtime (the same lineage) also has a version 4, whose first new member, add_panel, sits where ours has
+ * open_list. Both take three arguments and answer an int, and the runtime tells the two apart by the first argument: open_list is
+ * given the Ctx of the calling game thread, add_panel a title, which can never be that Ctx. So in this header the member is a union
+ * of the two names, and version 5 adds panel_visible where EmblemWeave has it. A mod that needs open_list checks version >= 4 and
+ * that the runtime is this one (a game module that offers no list screen answers 0); a mod that needs panels checks version >= 4
+ * (EmblemWeave) or >= 5 (this runtime): both work in both.
+ *
  * Loading can be turned off with [fs] dll_mods = false. A DLL runs with the same rights as the game: install only mods you trust.
  */
 #ifndef NXRT_MOD_API_H
@@ -67,7 +78,7 @@
 extern "C" {
 #endif
 
-#define NXMOD_API_VERSION 4u
+#define NXMOD_API_VERSION 5u
 
 typedef void (*NxModInlineFn)(Ctx* c, uint64_t addr, void* user);
 typedef int (*NxModSiteFn)(Ctx* c, uint64_t addr, void* user);   /* midhook / entry hook: nonzero = handled (nxrt/hooks.h) */
@@ -105,6 +116,36 @@ typedef struct NxModList {
     /* left (dir -1) or right (dir +1) on a row: nonzero when the row's value changed (it is drawn again) */
     int (*side)(Ctx* c, int row, int dir, void* user);
 } NxModList;
+
+/* (version 5; EmblemWeave's version 4) A mod's panel in the Mods window ([gfx] mods_key, default F8) and on the menu's Mods tab. Each
+ * mod's panel is a section that folds open; the panel function draws the section's contents with these widgets, each frame they
+ * are on screen.
+ *
+ * The panel function runs on the thread that presents frames, NOT the game's main thread, while the game keeps running. It may read
+ * guest memory (check is_mapped first) and change the mod's own variables, but it must not call call_guest or change game state that
+ * the game could be using at that moment: set a flag and do the work in on_frame instead.
+ *
+ * Labels are UTF-8. Two widgets of one panel need different labels; text after "##" is not shown but makes a label unique
+ * ("Go back##1"). The functions that return int answer 1 when the player changed the value or pressed the button this frame.
+ * The layout is EmblemWeave's, member for member. */
+typedef struct NxModUi {
+    uint32_t size;                                            /* sizeof(NxModUi) of the runtime */
+    void (*text)(const char* text);
+    void (*text_disabled)(const char* text);                  /* greyed out: hints, units, state */
+    void (*text_colored)(uint32_t rgba, const char* text);    /* 0xRRGGBBAA */
+    int (*checkbox)(const char* label, int* value);           /* value 0 / 1 */
+    int (*slider_float)(const char* label, float* value, float min, float max, const char* format);   /* format NULL = "%.2f" */
+    int (*slider_int)(const char* label, int* value, int min, int max, const char* format);           /* format NULL = "%d" */
+    int (*button)(const char* label);
+    void (*same_line)(void);                                  /* the next widget goes on the same line */
+    void (*separator)(const char* label);                     /* a line across, with the label in it; NULL = a plain line */
+    void (*begin_disabled)(int disabled);                     /* widgets up to end_disabled are greyed out and ignore input */
+    void (*end_disabled)(void);
+    int (*tree_node)(const char* label, int default_open);    /* 1 = open: draw the children, then call tree_pop */
+    void (*tree_pop)(void);
+    void (*tooltip)(const char* text);                        /* shown while the mouse is on the widget drawn just before */
+} NxModUi;
+typedef void (*NxModPanelFn)(const NxModUi* ui, void* user);
 
 typedef struct NxModApi {
     uint32_t version;            /* NXMOD_API_VERSION of the runtime */
@@ -184,8 +225,21 @@ typedef struct NxModApi {
     /* Opens a list screen from the confirm handler of a menu item of the game (item = that item; c = the Ctx the handler was given).
      * The list is copied; its functions are called on the game thread while the screen is open. Returns 1 when the screen was made,
      * 0 when the game module offers no such screen or it could not be made. The answer the item's handler should then give the game
-     * is the game's own for "opened a screen" (Fire Emblem: Fortune's Weave: 9). One list is open at a time. */
-    int (*open_list)(Ctx* c, uint64_t item, const struct NxModList* list);
+     * is the game's own for "opened a screen" (Fire Emblem: Fortune's Weave: 9). One list is open at a time.
+     *
+     * add_panel (version 5 here, EmblemWeave's version 4: the same member, see "Two version 4s" above): adds a section titled `title`
+     * to the Mods window and the menu's Mods tab (see NxModUi): fn(ui, user) draws its contents each frame they are on screen and
+     * the section is unfolded. From nxmod_init or later (one added in nxmod_init shows once nxmod_init has returned 0). Returns 1,
+     * 0 when an argument is missing. Without an overlay (headless runs, or the overlay switched off) the panel is never drawn. */
+    union {
+        int (*open_list)(Ctx* c, uint64_t item, const struct NxModList* list);
+        int (*add_panel)(const char* title, NxModPanelFn fn, void* user);
+    };
+
+    /* ---- version 5 (check api->version >= 5 before use; EmblemWeave: version 4) ---- */
+
+    /* 1 while a mod's panel is on screen (the Mods window, or the menu's Mods tab; the game gets no input meanwhile). Any thread. */
+    int (*panel_visible)(void);
 } NxModApi;
 
 typedef int (*NxModInitFn)(const NxModApi* api, const char* mod_dir);

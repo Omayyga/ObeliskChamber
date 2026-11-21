@@ -122,4 +122,12 @@ bool spirv_add_xfb(const std::vector<uint32_t>& in, std::vector<uint32_t>& out, 
 // one pass. Returns the number of loops rewritten (0: out untouched).
 int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
+// A GPU without shaderFloat64 (Intel Arc and Iris Xe) loses the device on a module that uses 64-bit floats. In Fortune's Weave four
+// translated compute shaders (auto exposure) keep scalar doubles in function variables, built from constants with PackDouble2x32 and
+// converted to and from 32-bit. This makes them 32-bit: the double type becomes float, FConvert between the two becomes a copy, and
+// PackDouble2x32 of two constant words becomes the float constant of that double. Any other use of a double (in memory other than a
+// function variable, in a vector, struct, array, function signature or constant, a bitcast, UnpackDouble2x32, a non-GLSL extended
+// instruction) leaves out untouched and returns false. (Technique from EmblemWeave 3b068f1, XiØN; written here.)
+bool spirv_lower_float64(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+
 }  // namespace nxrt::nvn::be::gpu

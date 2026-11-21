@@ -439,6 +439,9 @@ are brought in here with his commits, so the history shows him as the author, an
 - **ProjectReLink**: Vulkan objects destroyed on a low-priority thread (`[nvn] reaper`). **TotK Recomp**: the profile stamp that
   warns when a runtime profile is out of date.
 - The Intel players on issue #81, whose logs and test runs made the Intel fixes possible.
+- **Mi-Kel** ([EmblemWeave #71](https://github.com/XiONDiGiTaL/EmblemWeave/pull/71)): the code mods' panels (the Mods window on
+  F8 and the menu's Mods tab, `add_panel`, `panel_visible`, the `NxModUi` widgets). Ported from that pull request (GPL-3.0, as here)
+  with the same interface, so a mod's panel works in both runtimes.
 
 **This fork**
 - **[xinthefreefallxai](https://github.com/xinthefreefallxai)**: maintainer. Chose what to build, directed the work, tested every

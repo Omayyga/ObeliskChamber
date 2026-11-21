@@ -915,6 +915,10 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
             features_.multi_viewport, features_.shader_draw_parameters, features_.descriptor_indexing, features_.fragment_shader_interlock,
             features_.depth_clip_control, features_.custom_border_color, features_.external_memory_host, features_.push_descriptor,
             features_.ubo_robustness, features_.device_fault, features_.gpu_checkpoints);
+    if (!features_.shader_float64)
+        NXLOG_W(kTag, "this GPU has no 64-bit float math (shaderFloat64): the shaders that use doubles are made 32-bit as they load "
+                      "([gfx] lower_float64). If the GPU still hangs, set [setup] intel_shaders = true in ObeliskChamber.ini and press Set up "
+                      "(it translates the shaders without doubles)");
     {
         VkPhysicalDeviceExternalMemoryHostPropertiesEXT xh = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
         VkPhysicalDeviceVulkan11Properties p11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES, features_.external_memory_host ? &xh : nullptr};

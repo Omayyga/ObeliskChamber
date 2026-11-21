@@ -399,3 +399,67 @@ NXTEST(preload_pack_all_shaders) {
     nxrt::config_set("nvn", "shader_order", "shader_order.txt");
     fs::remove_all(dir.parent_path(), ec);
 }
+
+// Reflection of written / atomic storage (fefw-recomp e218e54 and ebdb5a1, metrist38): the SPIR-V opcode numbers of the pointer
+// instructions, image atomics through OpImageTexelPointer, float atomics, and pointers chosen by OpSelect.
+NXTEST(reflect_storage_written_and_atomic) {
+    std::vector<uint32_t> spv = {0x07230203u, 0x00010300u, 0u, 80u, 0u};
+    auto op = [&](uint32_t opcode, std::initializer_list<uint32_t> operands) {
+        spv.push_back(static_cast<uint32_t>((operands.size() + 1) << 16) | opcode);
+        spv.insert(spv.end(), operands.begin(), operands.end());
+    };
+    op(15, {5, 1, 0x6e69616du, 0});                   // OpEntryPoint GLCompute %1 "main"
+    const uint32_t vars[] = {20, 21, 22, 23, 24, 25};  // set 1 bindings 0..5
+    for (uint32_t i = 0; i < 6; ++i) { op(71, {vars[i], 34, 1}); op(71, {vars[i], 33, i}); }
+    op(71, {26, 34, 3}); op(71, {26, 33, 0});         // set 3 binding 0: a storage texel buffer
+    op(71, {13, 2});                                  // the struct is a Block
+    op(19, {2});                                      // %2 void
+    op(33, {3, 2});                                   // %3 fn void()
+    op(22, {10, 32});                                 // %10 float
+    op(21, {11, 32, 0});                              // %11 uint
+    op(20, {12});                                     // %12 bool
+    op(30, {13, 10});                                 // %13 struct { float }
+    op(32, {14, 12, 13});                             // %14 ptr StorageBuffer struct
+    op(32, {15, 12, 10});                             // %15 ptr StorageBuffer float
+    op(25, {16, 11, 5, 0, 0, 0, 2, 33});              // %16 image uint Buffer sampled=2 R32ui
+    op(32, {17, 0, 16});                              // %17 ptr UniformConstant image
+    op(32, {18, 11, 11});                             // %18 ptr Image uint
+    op(43, {11, 40, 0});                              // %40 uint 0
+    op(43, {10, 41, 0x3f800000u});                    // %41 float 1.0
+    op(41, {12, 42});                                 // %42 true
+    for (uint32_t v : vars) op(59, {14, v, 12});      // the six buffers
+    op(59, {17, 26, 0});                              // the texel buffer
+    op(54, {2, 1, 0, 3});                             // OpFunction
+    op(248, {50});                                    // OpLabel
+    op(65, {15, 51, 20, 40});                         // binding 0: loaded only
+    op(61, {10, 52, 51});
+    op(68, {11, 53, 25, 0});                          // binding 5: OpArrayLength only (68 is not a pointer instruction)
+    op(65, {15, 54, 21, 40});                         // binding 1: stored to
+    op(62, {54, 52});
+    op(65, {15, 55, 22, 40});                         // binding 2: OpAtomicFAddEXT
+    op(6035, {10, 56, 55, 40, 40, 41});
+    op(65, {15, 57, 23, 40});                         // binding 3: chosen by OpSelect, then stored to
+    op(169, {15, 58, 42, 54, 57});
+    op(62, {58, 41});
+    op(70, {15, 59, 24, 40, 40});                     // binding 4: OpInBoundsPtrAccessChain (70), then stored to
+    op(62, {59, 41});
+    op(60, {18, 60, 26, 40, 40});                     // texel buffer: OpImageTexelPointer, then OpAtomicIAdd
+    op(234, {11, 61, 60, 40, 40, 40});
+    op(253, {});                                      // OpReturn
+    op(56, {});                                       // OpFunctionEnd
+
+    ShaderReflection refl;
+    std::string err;
+    REQUIRE(reflect_spirv(spv.data(), spv.size(), refl, &err));
+    const DescriptorBinding* b[6];
+    for (uint32_t i = 0; i < 6; ++i) { b[i] = refl.find(1, i); REQUIRE(b[i] != nullptr); }
+    const DescriptorBinding* tb = refl.find(3, 0);
+    REQUIRE(tb != nullptr);
+    CHECK(!b[0]->written && !b[0]->atomic);
+    CHECK(b[1]->written && !b[1]->atomic);
+    CHECK(b[2]->written && b[2]->atomic);
+    CHECK(b[3]->written && !b[3]->atomic);
+    CHECK(b[4]->written && !b[4]->atomic);
+    CHECK(!b[5]->written && !b[5]->atomic);
+    CHECK(tb->written && tb->atomic);
+}
