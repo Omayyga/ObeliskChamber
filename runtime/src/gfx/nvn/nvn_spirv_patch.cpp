@@ -1275,6 +1275,10 @@ bool spirv_alpha_test(const std::vector<uint32_t>& in, uint32_t func, std::vecto
 
 }  // namespace nxrt::nvn::be::gpu
 
+// ---- spirv_native_float_add -------------------------------------------------------------------------------------------------------------
+
+namespace nxrt::nvn::be::gpu {
+
 // ---- spirv_relax_exact ------------------------------------------------------------------------------------------------------------------
 int spirv_relax_exact(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
     if (in.size() < 5 || in[0] != 0x07230203u) return 0;
@@ -1293,10 +1297,6 @@ int spirv_relax_exact(const std::vector<uint32_t>& in, std::vector<uint32_t>& ou
     out = std::move(w);
     return n;
 }
-
-// ---- spirv_native_float_add -------------------------------------------------------------------------------------------------------------
-
-namespace nxrt::nvn::be::gpu {
 
 int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
     enum : uint32_t {
