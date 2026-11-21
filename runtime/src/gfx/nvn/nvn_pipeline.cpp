@@ -239,6 +239,22 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words_in, const
             } else {
                 NXLOG_W(kTag, "%s: %s is not a SPIR-V module, not used ([nvn] shader_replace_dir)", what, f.filename().string().c_str());
             }
+        } else {
+            // A file for this hash under another word count: say which count this module has, so the file can be named for it.
+            static const std::unordered_set<std::string> hashes = [] {
+                std::unordered_set<std::string> v;
+                std::error_code e;
+                for (const auto& d : std::filesystem::directory_iterator(replace_dir, e)) {
+                    const std::string n = d.path().filename().string();
+                    const size_t u = n.find('_');
+                    if (u != std::string::npos) v.insert(n.substr(0, u));
+                }
+                NXLOG_I(kTag, "[nvn] shader_replace_dir = %s: files for %zu shader(s)", replace_dir.c_str(), v.size());
+                return v;
+            }();
+            static std::atomic<int> noted{0};
+            if (hashes.count(what) && noted.fetch_add(1, std::memory_order_relaxed) < 16)
+                NXLOG_W(kTag, "%s: this module has %zu words and the folder has no %s ([nvn] shader_replace_dir)", what, words_in.size(), f.filename().string().c_str());
         }
     }
     const std::vector<uint32_t>& words = replaced.empty() ? words_in : replaced;
