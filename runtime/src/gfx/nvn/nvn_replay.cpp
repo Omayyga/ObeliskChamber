@@ -189,17 +189,17 @@ struct PendingWrite { Ref<Texture> tex; VkImageLayout layout; bool att_done = fa
 std::vector<PendingWrite> g_pending;
 
 // Barrier diet (Road to 0.4.0 G1b, first two callers; NVIDIA, AMD and Intel alike, since the scopes are exact):
-// [nvn] narrow_pass_conflicts (default false): a pass that renders again into an attachment an earlier pass wrote with no barrier after it
+// [nvn] narrow_pass_conflicts (default true; A/B 2026-11-20, 3090 Ti: with narrow_copy_barriers, GPU time -2%, full barriers 144 -> 92 a frame): a pass that renders again into an attachment an earlier pass wrote with no barrier after it
 // (pending_conflict) gets an attachment-to-attachment barrier instead of a full one, so compute and copies are not drained for it.
 bool narrow_pass_conflicts_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "narrow_pass_conflicts", false);
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_pass_conflicts", true);
     return on;
 }
-// [nvn] narrow_copy_barriers (default false): after a texture-to-texture copy between two images, a transfer-to-transfer barrier instead
+// [nvn] narrow_copy_barriers (default true): after a texture-to-texture copy between two images, a transfer-to-transfer barrier instead
 // of a full one. Every other later use of the two images changes their layout (they are left in TRANSFER_SRC / TRANSFER_DST), and that
 // layout change carries the dependency; a full barrier lies before the copy already (end_pass, and the trackers closed by run_list).
 bool narrow_copy_barriers_on() {
-    static const bool on = nxrt::config_get_bool("nvn", "narrow_copy_barriers", false);
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_copy_barriers", true);
     return on;
 }
 bool g_tracked = false;         // this submission uses tracked barriers
