@@ -218,7 +218,30 @@ uint64_t GraphicsKey::hash() const {
 
 // A module for SPIR-V words. The translator declares OpCapability Float64 in every module although no module uses a 64-bit float;
 // devices without shaderFloat64 (Intel iGPUs) reject that, so the capability is dropped when no OpTypeFloat 64 exists.
-static VkShaderModule create_module(const std::vector<uint32_t>& words, const char* what) {
+static VkShaderModule create_module(const std::vector<uint32_t>& words_in, const char* what) {
+    // [nvn] shader_replace_dir (measurement, default empty): a folder of replacement modules. A file named <hash>_<words>.spv, the shader's
+    // 16-digit hash and the word count of the module being made, takes that module's place before any of the changes below. The word
+    // count keeps a replacement for the translated shader away from the variants made from it (private outputs, HDR). It is for testing
+    // whether the same shader built another way (optimised, or decompiled and compiled again) runs faster; nothing ships such a file.
+    static const std::string replace_dir = config_get_str("nvn", "shader_replace_dir", "");
+    std::vector<uint32_t> replaced;
+    if (!replace_dir.empty() && what) {
+        const std::filesystem::path f = std::filesystem::path(replace_dir) / (std::string(what) + "_" + std::to_string(words_in.size()) + ".spv");
+        std::error_code ec;
+        const uintmax_t bytes = std::filesystem::file_size(f, ec);
+        if (!ec && bytes >= 20 && bytes % 4 == 0) {
+            std::vector<uint32_t> w(bytes / 4);
+            std::ifstream in(f, std::ios::binary);
+            if (in.read(reinterpret_cast<char*>(w.data()), static_cast<std::streamsize>(bytes)) && w[0] == 0x07230203u) {
+                replaced = std::move(w);
+                NXLOG_I(kTag, "%s: module of %zu words replaced by %s (%zu words; [nvn] shader_replace_dir)", what, words_in.size(),
+                        f.filename().string().c_str(), replaced.size());
+            } else {
+                NXLOG_W(kTag, "%s: %s is not a SPIR-V module, not used ([nvn] shader_replace_dir)", what, f.filename().string().c_str());
+            }
+        }
+    }
+    const std::vector<uint32_t>& words = replaced.empty() ? words_in : replaced;
     std::vector<uint32_t> fixed;
     const std::vector<uint32_t>* code = &words;
     {
