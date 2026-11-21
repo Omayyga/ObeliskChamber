@@ -3,6 +3,7 @@
 // the timeline semaphore, deferred destruction, barriers and the public backend API (include/nxrt/nvn_backend.h).
 // Design follows smo-recomp (record on game threads, replay on one render thread) and SuperMarioWonderRecomp docs/nvn (a submit
 // is replayed under one lock and never overlaps the next); the code is new.
+#include "nxrt/boot_timeline.h"
 #include "nxrt/nvn_backend.h"
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -1866,6 +1867,7 @@ bool install_backend(const BackendDesc& desc) {
     if (desc.register_entry_points) {
         install();
         register_all_impls();
+        boot_mark("NVN back end");
         NXLOG_I("nvn", "NVN back end installed: %zu of %zu entry points implemented", implemented_count(), entry_count());
     }
     return true;

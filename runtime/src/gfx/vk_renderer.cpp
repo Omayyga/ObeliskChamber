@@ -19,6 +19,7 @@
 #include <windows.h>
 #endif
 
+#include "nxrt/boot_timeline.h"
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
@@ -708,6 +709,7 @@ struct Renderer::Impl {
         }
         dirty = false;
         st.swapchain_creates++;
+        boot_mark("swapchain");
         NXLOG_I(kTag, "swapchain %ux%u, %u images, format %d, color space %d (%s), present mode %s%s", ext.width, ext.height, count, static_cast<int>(format),
                 static_cast<int>(color_space), extras::output_kind_name(kind), present_mode_name(active), active != requested ? " (requested mode not available)" : "");
         {

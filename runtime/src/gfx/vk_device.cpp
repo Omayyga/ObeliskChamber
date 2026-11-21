@@ -15,6 +15,7 @@
 #include <mutex>
 #include <tuple>
 
+#include "nxrt/boot_timeline.h"
 #include "nxrt/config.h"
 #include "nxrt/gauge.h"
 #include "nxrt/memguard.h"
@@ -605,6 +606,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkResult r = vkCreateInstance(&ici, nullptr, &instance_);
     if (r != VK_SUCCESS) return fail("vkCreateInstance failed (" + std::to_string(r) + ")");
     volkLoadInstance(instance_);
+    boot_mark("vulkan instance");
     features_.swapchain_colorspace = x_colorspace;
     if (debug_utils_) vkCreateDebugUtilsMessengerEXT(instance_, &dbg, nullptr, &messenger_);
 
@@ -1072,6 +1074,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     VkFenceCreateInfo fci = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(device_, &fci, nullptr, &impl_->once_fence) == VK_SUCCESS) vk_gauge_fences().add(1);
 
+    boot_mark("vulkan device");
     NXLOG_I(kTag, "device ready: %s, queue family %u, validation %s, %s", props_.deviceName, queue_family_, validation_ ? "on" : "off",
             headless ? "headless" : "window surface");
     return true;
