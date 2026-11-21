@@ -137,6 +137,12 @@ are tuned; change them only if you know what you're testing.
 | `compile_eco` | `auto` | Shader build threads go to the efficiency cores on Intel 12th gen+ style CPUs | Leave it |
 | `compile_pace_ms` / `compile_pace_after_ms` | `8` / `20` | When a frame runs late, background shader work steps aside so the game gets the cores. Never for work a draw waits for | A small CPU with load stutter: raise `compile_pace_ms`. `0` turns it off |
 
+**NVIDIA: the driver's shader cache size.** Besides the game's own caches (`pipeline_cache.bin` and the shader pack), NVIDIA's driver keeps
+compiled shaders on disk, up to a size you choose in the **NVIDIA app > Graphics > Global Settings > Shader Cache Size** (older drivers:
+NVIDIA Control Panel > Manage 3D settings). Leave it at **Driver Default** or larger. **Disabled** or a small size makes the driver throw
+compiled shaders away, so the stutter of first use comes back on the next start; Disabled is only a step in NVIDIA's procedure for clearing
+the cache, not a setting to keep. A driver update clears this cache by itself, so the first session after one may stutter a little more.
+
 ## CPU and threads
 
 | Key | Default | What it does | Change it if... |
@@ -167,6 +173,8 @@ All of these are on by default on NVIDIA and AMD. On Intel, `[gfx] intel_compat`
 | `camera_patch_cached` | `true` | Faster camera block patching with an upscaler | Leave it |
 | `reaper` | `true` | Vulkan objects are destroyed on a low-priority thread instead of the render thread | Leave it |
 | `split_submit_ms` | `0` (off) | Long submissions go to the GPU in parts, so the GPU starts sooner | A CPU-bound PC with waits on the GPU: try `2` |
+| `narrow_pass_conflicts`, `narrow_copy_barriers` | `true` | Barriers between passes on the same target and after texture copies wait only for that kind of work (GPU time -2% at 4K on an RTX 3090 Ti) | Corrupted pictures: `false` and report it |
+| `narrow_transfer_pass_ends`, `narrow_shadow_barriers`, `narrow_update_barriers` | `false` | The same for barriers around copies, clears, compute shadow copies and uniform updates. No gain measured on NVIDIA | AMD or Intel testers: try `true` and compare |
 | `stat_counters` | `always` | The game's statistics counters are written every time (`once` saved 30 µs a frame but could hang) | Leave it |
 | `shading_rate` | unset | Coarser shading for chosen draws | Expert use; see CONFIG.md |
 
@@ -176,6 +184,17 @@ All of these are on by default on NVIDIA and AMD. On Intel, `[gfx] intel_compat`
 |---|---|---|---|
 | `[gfx] intel_compat` | `auto` | On every Intel GPU: turns off `lean_draws`, `residency`, `batch_ubo_updates`, `feedback_levels` and `depth_ro_sticky`, and uses full barriers. These lost the GPU at the title screen on Arc (issue #81) | Only to test on Intel: `0`. Any of those keys set by hand still wins |
 | `[nvn] pool_slabs` | `auto` | Small memory pools share one 16 MiB import. Off on Intel | Leave it |
+| `[setup] intel_shaders` | `false` | Set up translates the shaders the way Ryujinx does for Intel GPUs: 64-bit float math done in 32-bit, no barriers inside branches (issue #81) | Intel Arc or iGPU testers only: set `true` in `ObeliskChamber.ini`, then press **Set up** (it translates every shader again). Report whether the game gets further than before |
+
+## AMD testing (`[gfx]`)
+
+Both keys are off by default and meant for testing on AMD Radeon cards. Turn on one at a time and compare the frame rate and the picture
+(an A/B with `tools/perf/ab_run.ps1` if you can), then report it.
+
+| Key | Default | What it does | Change it if... |
+|---|---|---|---|
+| `rt_no_storage` | `false` | Render targets the game marked compressible are made without storage usage, so AMD's colour compression can stay on | An AMD tester: try `true`. A missing effect or black area means a shader did store to one: report it with the log |
+| `image_format_lists` | `false` | Images that are viewed in a second format name those formats when they are made, which also lets the driver keep compression | An AMD tester: try `true` |
 
 ## Menus, sound and quality of life
 

@@ -84,7 +84,7 @@ namespace SpirvHarness
         {
             string build = string.Join(",", new[] { typeof(Program).Assembly, typeof(Translator).Assembly }
                 .Distinct().Select(a => a.ManifestModule.ModuleVersionId.ToString("N")[..12]));
-            string[] keyed = ["--no-val", "--no-retry", "--debug-mode"];
+            string[] keyed = ["--no-val", "--no-retry", "--debug-mode", "--no-float64", "--no-divergent-barriers"];
             string[] valued = ["--target-env", "--host", "--texture-pool", "--sampler-pool", "--reflect"];
             string opts = string.Join(" ", keyed.Where(args.Contains).Concat(valued.Where(v => Opt(args, v, null) != null).Select(v => $"{v}={Opt(args, v, null)}")));
             return $"# spirv_harness journal\t{TranslatorVersion}\t{build}\t{opts}";

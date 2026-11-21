@@ -353,6 +353,19 @@ gfx::ImageDesc make_desc(const Shape& s, VkFormat fmt, VkImageUsageFlags usage, 
     d.samples = static_cast<VkSampleCountFlagBits>(s.samples);
     d.create_view = false;
     d.name = "nvn texture";
+    // A1b ([gfx] image_format_lists, default false; Red Tunic's finding for AMD): a mutable image names the formats its views can have
+    // (format_view_ok's family), instead of allowing every compatible format, which keeps AMD's colour compression (DCC) on such images.
+    static const bool lists = nxrt::config_get_bool("gfx", "image_format_lists", false);
+    if (lists && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
+        auto put = [&d](VkFormat f) {
+            if (f == VK_FORMAT_UNDEFINED || d.view_format_count >= 4) return;
+            for (uint32_t i = 0; i < d.view_format_count; ++i) if (d.view_formats[i] == f) return;
+            d.view_formats[d.view_format_count++] = f;
+        };
+        put(fmt);
+        put(srgb_partner(fmt));
+        if (bit_alias_class(fmt)) { put(float_alias(fmt)); put(uint_alias(fmt)); put(sint_alias(fmt)); }
+    }
     return d;
 }
 
@@ -830,7 +843,19 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
     // The console reads and writes any colour texture through an image handle; the builder's IMAGE flag is a hint the game does not always
     // set (the froxel volume of the fog is written by a vertex shader without it). Every uncompressed colour image therefore keeps the
     // storage usage when the GPU accepts the combination.
-    if (!g->depth && !is_block_format(chosen)) {
+    // A1 ([gfx] rt_no_storage, default false; Red Tunic's RX_VK_RT_NO_STORAGE): a 2D single-level render target the game made
+    // COMPRESSIBLE and not IMAGE gets no storage usage, which on AMD turns colour compression (DCC) off for the whole image. The console
+    // could still store to it through an image handle; a shader that does gets the dummy image ("has no storage view" in the log).
+    static const bool rt_no_storage = nxrt::config_get_bool("gfx", "rt_no_storage", false);
+    const bool keep_compression = rt_no_storage && !g->depth && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && s.type == VK_IMAGE_TYPE_2D && s.levels == 1 &&
+                                  (t->b.flags & NVN_TEXTURE_FLAGS_COMPRESSIBLE) && !(t->b.flags & NVN_TEXTURE_FLAGS_IMAGE);
+    if (keep_compression) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 20)
+            NXLOG_I(kTag, "texture %u: %s %ux%u render target made without storage usage, for compression ([gfx] rt_no_storage)", t->id, g->fmt->name,
+                    s.base.width, s.base.height);
+    }
+    if (!g->depth && !is_block_format(chosen) && !keep_compression) {
         add(VK_IMAGE_USAGE_STORAGE_BIT);
         // sRGB formats have no storage support. The console's image stores write the raw bits (no sRGB encode), which is what a UNORM view
         // of the same image does: storage usage is then allowed through EXTENDED_USAGE when the UNORM partner can be stored to.

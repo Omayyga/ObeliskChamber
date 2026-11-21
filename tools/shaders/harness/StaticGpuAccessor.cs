@@ -256,7 +256,12 @@ namespace SpirvHarness
         public bool QueryHostSupportsGeometryShader() => DesktopHost;
         public bool QueryHostSupportsGeometryShaderPassthrough() => false;
         public bool QueryHostSupportsTransformFeedback() => false;
-        public bool QueryHostSupportsShaderFloat64() => DesktopHost;
+        // U1 (Intel, opt-in at Set up: [setup] intel_shaders): --no-float64 lowers the game's 64-bit float math to 32-bit
+        // (Ryujinx's DoubleToFloat pass) and --no-divergent-barriers keeps barriers out of divergent branches, as Ryujinx
+        // answers for Intel GPUs. Both default to the desktop answers (yes).
+        public static bool NoFloat64, NoDivergentBarriers;
+        public bool QueryHostSupportsShaderFloat64() => DesktopHost && !NoFloat64;
+        public bool QueryHostSupportsShaderBarrierDivergence() => !NoDivergentBarriers;
         public bool QueryHostSupportsShaderBallot() => false;
         public bool QueryHostSupportsViewportMask() => false;
         public bool QueryHostSupportsNonConstantTextureOffset() => false;
