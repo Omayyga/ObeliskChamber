@@ -1365,7 +1365,7 @@ bool mirror_range_hot(uint64_t gpu_address, uint64_t size) {
     return false;
 }
 
-bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why) {
+bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64_t* bytes, int* why, bool* barrier_done) {
     int dummy = 0;
     int& w = why ? *why : dummy;
     w = kFillNone;
@@ -1415,7 +1415,13 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
         }
         p = q;
     }
-    if (!copies.empty()) vkCmdCopyBuffer(cb, src, chunk, static_cast<uint32_t>(copies.size()), copies.data());
+    if (!copies.empty()) {
+        if (barrier_done && !*barrier_done) {      // earlier writes to these pages (any command) before the copies read them
+            memory_barrier(cb);
+            *barrier_done = true;
+        }
+        vkCmdCopyBuffer(cb, src, chunk, static_cast<uint32_t>(copies.size()), copies.data());
+    }
     const bool done = ok && (range_valid(m, first, last - first + 1) || new_servable(m, first, last));
     if (!done && w == kFillNone) w = kFillNotValid;
     return done;
