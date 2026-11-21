@@ -47,6 +47,14 @@ bool wake_after_unlock() {
 thread_local std::vector<std::shared_ptr<KThread>> t_pending_wakes;
 thread_local int t_guard_depth = 0;
 std::atomic<uint64_t> g_wakes_deferred{0};
+// [kernel] per_object_wakes (K1, default true; env NXRT_KERNEL_PER_OBJECT_WAKES): an event signal wakes only the WaitSynchronization
+// waiters that wait on that event (by its wait_key), not every waiter, which each woke, found nothing ready and slept again. Counted in
+// the gauges kernel.sync_wakes / kernel.sync_wakes_skipped. false: every signal wakes every waiter (as before).
+bool per_object_wakes() {
+    static const bool on = config_get_bool("kernel", "per_object_wakes", true);
+    return on;
+}
+std::atomic<uint64_t> g_sync_wakes{0}, g_sync_wakes_skipped{0};
 void flush_pending_wakes() {
     if (t_pending_wakes.empty()) return;
     for (auto& t : t_pending_wakes) WakeConditionVariable(thread_cv(*t));
@@ -258,6 +266,15 @@ void stats_report_loop(int64_t seconds) {
                     static_cast<unsigned long long>(s->spun), static_cast<unsigned long long>(s->woken),
                     s->woken ? s->lat_sum * us_per_tick / static_cast<double>(s->woken) : 0.0, s->lat_max * us_per_tick, s->woken ? hist : "-");
         }
+        // K1 / K2 counters over the same window (as the kernel.* gauges show them, as differences here)
+        static uint64_t prev_w = 0, prev_s = 0, prev_d = 0;
+        const uint64_t w = g_sync_wakes.load(std::memory_order_relaxed), sk = g_sync_wakes_skipped.load(std::memory_order_relaxed),
+                       d = g_wakes_deferred.load(std::memory_order_relaxed);
+        NXLOG_I("kernel", "wakes in %llds: event and session signals woke %llu waiters, skipped %llu not waiting on them ([kernel] per_object_wakes = %d); "
+                "%llu wakes made after the kernel lock was released ([kernel] wake_after_unlock = %d)", static_cast<long long>(seconds),
+                static_cast<unsigned long long>(w - prev_w), static_cast<unsigned long long>(sk - prev_s), per_object_wakes() ? 1 : 0,
+                static_cast<unsigned long long>(d - prev_d), wake_after_unlock() ? 1 : 0);
+        prev_w = w; prev_s = sk; prev_d = d;
     }
 }
 
@@ -623,16 +640,6 @@ uint32_t cancel_synchronization(uint32_t thread_handle) {
     return kOk;
 }
 
-namespace {
-// [kernel] per_object_wakes (K1, default true; env NXRT_KERNEL_PER_OBJECT_WAKES): an event signal wakes only the WaitSynchronization
-// waiters that wait on that event (by its wait_key), not every waiter, which each woke, found nothing ready and slept again. Counted in
-// the gauges kernel.sync_wakes / kernel.sync_wakes_skipped. false: every signal wakes every waiter (as before).
-bool per_object_wakes() {
-    static const bool on = config_get_bool("kernel", "per_object_wakes", true);
-    return on;
-}
-std::atomic<uint64_t> g_sync_wakes{0}, g_sync_wakes_skipped{0};
-}  // namespace
 
 void notify_waitable_changed(const void* key) {
     const bool filter = key && per_object_wakes();
