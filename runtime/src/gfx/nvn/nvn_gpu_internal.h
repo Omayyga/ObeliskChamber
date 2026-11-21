@@ -126,10 +126,16 @@ void image_barrier(VkCommandBuffer cb, VkImage image, VkImageLayout from, VkImag
 // All commands before, all commands after, all memory (used after passes, dispatches, copies and fills). The caller's function and line
 // (filled in by the compiler) count the barrier for gpustats' "full barriers by caller" line ([prof] gpu_stats).
 void memory_barrier(VkCommandBuffer cb, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE());
+// A memory barrier with the scopes given (the barrier diet's narrowed callers, [nvn] narrow_pass_conflicts / narrow_copy_barriers). It is
+// not a full barrier: memory_barrier_count does not change, so the trackers that wait for one (open dispatches, batched updates) still
+// record their own. Counted for gpustats under kSiteNarrow.
+void scoped_barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+                    VkAccessFlags2 dst_access, const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE());
 // Call-site counts for gpustats ([prof] gpu_stats): full memory barriers (kSiteBarrier) and render passes ended (kSitePassEnd, counted by
 // nvn_replay.cpp's end_pass with its own caller's site). A fixed table per kind; a site past its room is counted as "other".
 // kSiteReopen: a pass begun on the same targets as the pass just ended, counted under the site that ended it.
-enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteReopen = 2, kSiteKinds = 3 };
+// kSiteNarrow: memory barriers recorded with narrowed scopes instead of a full one (scoped_barrier).
+enum SiteKind { kSiteBarrier = 0, kSitePassEnd = 1, kSiteReopen = 2, kSiteNarrow = 3, kSiteKinds = 4 };
 void site_count(int kind, const char* fn, int line);
 // The counts since the previous call, per frame over `frames`, the largest first: "fn:line 12.3, fn:line 4.0, ..." (at most `top`).
 std::string site_report(int kind, double frames, int top);
