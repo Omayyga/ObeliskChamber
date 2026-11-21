@@ -17,6 +17,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -1200,6 +1201,20 @@ static void retype_int_fetches(const std::string& hash, std::string& bytes) {
 }
 
 bool ShaderCache::read_spv(const std::string& hash, std::string& out, int* source) {
+    // [nvn] edited_shaders: a module Set up's optional step made from this shader (decompiled, edited, compiled again) takes the
+    // translated one's place here, before every change the runtime makes to a module itself.
+    if (!edited_.empty() && edited_.count(hash)) {
+        if (read_file(edited_dir_ + "/" + hash + ".spv", out) && out.size() >= 20 && out.size() % 4 == 0 && std::memcmp(out.data(), "\x03\x02\x23\x07", 4) == 0) {
+            if (source) *source = 3;
+            static std::atomic<int> noted{0};
+            if (noted.fetch_add(1, std::memory_order_relaxed) < 8)
+                NXLOG_I("nvn", "shader %s: the edited module is used (%zu words; [nvn] edited_shaders, %s)", hash.c_str(), out.size() / 4, edited_dir_.c_str());
+            retype_int_fetches(hash, out);
+            return true;
+        }
+        NXLOG_W("nvn", "shader %s: %s/%s.spv is not a SPIR-V module; the translated shader is used", hash.c_str(), edited_dir_.c_str(), hash.c_str());
+        out.clear();
+    }
     bool mem = false;
     if (pack_read(hash, out, &mem)) {
         pre_from_pack_.fetch_add(1, std::memory_order_relaxed);
@@ -1405,6 +1420,18 @@ bool ShaderCache::open(const std::string& dir) {
     dir_ = dir;
     open_ = true;
     NXLOG_I("nvn", "shader cache %s: %zu records", dir.c_str(), lines_.size());
+    // [nvn] edited_shaders (default true): modules in <shader cache>/../edited (or [nvn] edited_shaders_dir) replace the translated
+    // shaders of the same hash. The folder exists only when Set up's "decompiled lighting shader" option made it; false ignores it.
+    if (nxrt::config_get_bool("nvn", "edited_shaders", true)) {
+        edited_dir_ = nxrt::config_get_str("nvn", "edited_shaders_dir", "");
+        if (edited_dir_.empty()) edited_dir_ = (std::filesystem::path(dir).parent_path() / "edited").string();
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(edited_dir_, ec)) {
+            const std::filesystem::path f = e.path();
+            if (f.extension() == ".spv" && lines_.count(f.stem().string())) edited_.insert(f.stem().string());
+        }
+        if (!edited_.empty()) NXLOG_I("nvn", "edited shaders: %zu in %s ([nvn] edited_shaders)", edited_.size(), edited_dir_.c_str());
+    }
     pack_open();
     start_preload();
     return true;
