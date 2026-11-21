@@ -202,6 +202,28 @@ bool narrow_copy_barriers_on() {
     static const bool on = nxrt::config_get_bool("nvn", "narrow_copy_barriers", true);
     return on;
 }
+// Barrier diet, second round (default false until its A/B):
+// [nvn] narrow_transfer_pass_ends: a texture copy or clear that ends the open pass (or follows passes ended without a barrier) gets a
+// transfer-to-transfer barrier instead of a full one. The pass's attachment writes stay pending; the images the copy or clear touches
+// change layout to a transfer layout first, and that layout change carries their dependency. A pass whose draws wrote other memory
+// still ends with its full barrier (end_pass), and a copy within one image keeps the full barrier.
+bool narrow_transfer_pass_ends_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_transfer_pass_ends", false);
+    return on;
+}
+// [nvn] narrow_shadow_barriers: the barrier between a dispatch's compute-shadow copies and the dispatch itself is transfer-to-compute
+// instead of full (only copies are recorded between the full barrier before the copies and this one).
+bool narrow_shadow_barriers_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_shadow_barriers", false);
+    return on;
+}
+// [nvn] narrow_update_barriers: the barrier after GPU-ordered memory writes (uniform buffer updates and reports, alone or batched, and
+// query results copied into memory) is transfer-to-everything instead of full. A full barrier lies before each run of those writes, and
+// only transfer commands are recorded between it and this one.
+bool narrow_update_barriers_on() {
+    static const bool on = nxrt::config_get_bool("nvn", "narrow_update_barriers", false);
+    return on;
+}
 bool g_tracked = false;         // this submission uses tracked barriers
 bool g_pass_unsafe = false;     // a draw of the open pass may write memory other than its attachments
 bool g_prog_writes = false;     // the bound program has storage buffer or storage image bindings
@@ -739,6 +761,27 @@ void end_pass(bool to_pass = false, const char* site_fn = __builtin_FUNCTION(), 
     g_pass_unsafe = false;
     g_bound_pipeline = VK_NULL_HANDLE;
     g_dirty = kAllDirty;
+}
+
+// The barrier that ends a run of transfer writes (narrow_update_barriers), counted under the caller's site.
+void transfer_writes_done(const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE()) {
+    if (narrow_update_barriers_on() && g_tracked)
+        scoped_barrier(F->cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                       VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, site_fn, site_line);
+    else
+        memory_barrier(F->cb, site_fn, site_line);
+}
+
+// end_pass before a copy or clear between images that it moves to transfer layouts (narrow_transfer_pass_ends). Where end_pass would have
+// recorded a full barrier (an open pass, or passes ended without one), a transfer-to-transfer barrier orders the earlier copies and clears.
+void end_pass_for_transfer(const char* site_fn = __builtin_FUNCTION(), int site_line = __builtin_LINE()) {
+    if (!narrow_transfer_pass_ends_on() || !g_tracked) { end_pass(false, site_fn, site_line); return; }
+    const bool had = P.open || !g_pending.empty();
+    const uint64_t before = memory_barrier_count(F->cb);
+    end_pass(true, site_fn, site_line);
+    if (had && memory_barrier_count(F->cb) == before)   // (a pass whose draws wrote other memory ended with its full barrier)
+        scoped_barrier(F->cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                       VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT, site_fn, site_line);
 }
 
 // A pass is about to use `t` as an attachment in `layout`. An earlier pass that ended without a barrier wrote it, and no layout change
@@ -5067,7 +5110,11 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     }
     bind_sets(*pl, VK_PIPELINE_BIND_POINT_COMPUTE);
     g_int_pl = nullptr;
-    if (g_sh_copied) {
+    if (g_sh_copied && narrow_shadow_barriers_on()) {
+        scoped_barrier(F->cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_UNIFORM_READ_BIT);
+        gstamp("shadow in");
+    } else if (g_sh_copied) {
         memory_barrier(F->cb);     // the copies into the shadows before the dispatch reads them
         gstamp("shadow in");
     }
@@ -5221,7 +5268,7 @@ SubRes sub_of(const TextureViewInfo& v, bool has_view) {
 void do_clear_texture(const P_ClearTexture& p) {
     Texture* t = p.tex;
     if (!t || !tex_gpu(t)) return;
-    end_pass();
+    end_pass_for_transfer();
     SubRes s = sub_of(p.view, p.has_view);
     tex_ensure_exact(t, *F);
     tex_transition(t, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -5315,7 +5362,8 @@ void do_copy_buffer_texture(const P_CopyBufTex& p, bool to_texture) {
 void do_copy_texture_texture(const P_CopyTexTex& p) {
     Texture *s = p.src, *d = p.dst;
     if (!s || !d || !tex_gpu(s) || !tex_gpu(d)) return;
-    end_pass();
+    if (same_image(s, d)) end_pass();     // one image in GENERAL: no layout change carries the dependency
+    else end_pass_for_transfer();
     SubRes ss = sub_of(p.src_view, p.has_src_view), ds = sub_of(p.dst_view, p.has_dst_view);
     const VkExtent3D se = tex_extent(s, ss.level), de = tex_extent(d, ds.level);
     if (ss.level < tex_level_drop(s) || ds.level < tex_level_drop(d)) {   // an image stored without its top level: no texels to copy there
@@ -5380,7 +5428,7 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
         const bool linear = (p.flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) || (tex_scale(s) != tex_scale(d) && !tex_is_depth(s) && !tex_is_depth(d));
         vkCmdBlitImage(F->cb, tex_image(s), sl, tex_image(d), dl, 1, &b, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
-    if (!same && g_tracked && narrow_copy_barriers_on())   // see narrow_copy_barriers_on: later copies into or out of them in the same layout
+    if (!same_image(s, d) && g_tracked && narrow_copy_barriers_on())   // see narrow_copy_barriers_on: later copies into or out of them in the same layout
         scoped_barrier(F->cb, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                        VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
     else
@@ -5438,7 +5486,7 @@ bool wm_batch_on() {
 void wm_close() {
     if (!g_wm_open) return;
     g_wm_open = false;
-    if (F && F->cb == g_wm_cb && memory_barrier_count(F->cb) == g_wm_mark) memory_barrier(F->cb);
+    if (F && F->cb == g_wm_cb && memory_barrier_count(F->cb) == g_wm_mark) transfer_writes_done();
     g_wm_ranges.clear();
 }
 
@@ -5485,7 +5533,7 @@ void do_write_memory(uint64_t gpu_addr, const void* data, uint32_t size, bool ba
         g_wm_cb = F->cb;
         g_wm_mark = memory_barrier_count(F->cb);
     } else {
-        memory_barrier(F->cb);
+        transfer_writes_done();
         g_wm_open = false;
         g_wm_ranges.clear();
     }
@@ -5933,7 +5981,7 @@ void run_list(const CmdList& list, int depth) {
                         if (b.ok && g_occ_last >= 0) {
                             vkCmdCopyQueryPoolResults(F->cb, g_occ_pool, static_cast<uint32_t>(g_occ_last), 1, b.buffer, b.offset, 16,
                                                       VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                            memory_barrier(F->cb);
+                            transfer_writes_done();
                         }
                     }
                     break;
@@ -5953,7 +6001,7 @@ void run_list(const CmdList& list, int depth) {
                             if (b.ok) {
                                 // the feedback query has two results (written, needed): the second would land on the timestamp word, which is written again after it
                                 vkCmdCopyQueryPoolResults(F->cb, cw.pool, static_cast<uint32_t>(cw.last), 1, b.buffer, b.offset, 16, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-                                memory_barrier(F->cb);
+                                transfer_writes_done();
                                 if (&cw == &g_cw[1]) do_write_memory(p.address + 8, &rep.timestamp, 8);
                             }
                         }
