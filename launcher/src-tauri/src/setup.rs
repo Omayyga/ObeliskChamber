@@ -473,6 +473,14 @@ fn textures_ok(p: &Paths) -> bool {
 
 const SHADER_TRANSLATOR_VERSION: u32 = 4; // 4: integer abs without SAbs, which hangs NVIDIA GPUs (#121); 3: real derivatives for the NVN2 shuffle pattern (#29 eyes); 2: portable 32-lane warps (game-build/release/fefw_build.py has the same number)
 
+/// U1 (opt-in, for Intel testers): `[setup] intel_shaders = true` in ObeliskChamber.ini translates the shaders as Ryujinx does for
+/// Intel GPUs: 64-bit float math lowered to 32-bit and no barriers in divergent branches (upstream #45, for issue #81). Changing it
+/// makes the next Set up translate every shader again (the stamp records it).
+fn intel_shaders(p: &Paths) -> bool {
+    let ini = crate::ini::Ini::parse(&fs::read_to_string(crate::settings::game_ini(&p.game_dir)).unwrap_or_default());
+    matches!(ini.get("setup", "intel_shaders").map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("true" | "1" | "on" | "yes"))
+}
+
 fn shaders_ok(p: &Paths) -> bool {
     let stamp = fs::read_to_string(p.shader_stamp()).unwrap_or_default();
     let v: serde_json::Value = serde_json::from_str(&stamp).unwrap_or_default();
@@ -480,6 +488,7 @@ fn shaders_ok(p: &Paths) -> bool {
         && v["complete"].as_bool() == Some(true)
         && v["translator_version"].as_u64() == Some(SHADER_TRANSLATOR_VERSION as u64)
         && v["romfs"].as_str() == Some(crate::dump::fwd(&p.romfs).as_str())
+        && v["intel_shaders"].as_bool().unwrap_or(false) == intel_shaders(p)
 }
 
 /// What is done already, step by step (the page's checklist).
@@ -883,6 +892,10 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
         }
         fs::write(&marker, want.to_string()).map_err(|e| e.to_string())?;
     }
+    let intel = intel_shaders(p);
+    if intel {
+        r.log(vec!["[setup] intel_shaders is on: the shaders are translated with 64-bit floats lowered to 32-bit and no barriers in divergent branches (for Intel GPUs).".to_string()]);
+    }
     let harness = |jobs: usize| {
         let mut c = if p.package.is_some() {
             Command::new(p.harness())
@@ -892,6 +905,7 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
             c
         };
         c.arg("--batch").arg(p.corpus()).arg("--out").arg(p.spirv()).args(["--jobs", &jobs.to_string()]);
+        if intel { c.args(["--no-float64", "--no-divergent-barriers"]); }
         // SPIR-V validation needs spirv-val from the Vulkan SDK, which players do not have (the release package never validates)
         if p.package.is_some() || (std::env::var_os("VULKAN_SDK").is_none() && which("spirv-val.exe").is_none()) {
             c.arg("--no-val");
@@ -915,7 +929,7 @@ fn shader_steps(r: &Runner, p: &Paths, jobs: usize, cwd: &Path) -> Result<bool, 
         r.log(vec![format!("{crashed} shaders crashed the translator and were left out; the game draws without them (status \"crash\" in {}).",
                            crate::dump::fwd(&p.spirv().join("results.tsv")))]);
     }
-    let stamp = serde_json::json!({ "complete": true, "translator_version": SHADER_TRANSLATOR_VERSION, "romfs": crate::dump::fwd(&p.romfs), "crashed": crashed });
+    let stamp = serde_json::json!({ "complete": true, "translator_version": SHADER_TRANSLATOR_VERSION, "romfs": crate::dump::fwd(&p.romfs), "crashed": crashed, "intel_shaders": intel });
     fs::write(p.shader_stamp(), stamp.to_string()).map_err(|e| e.to_string())?;
     // the corpus is only the extractor's output for the translator: several GB the game never reads
     let _ = fs::remove_dir_all(p.corpus());

@@ -1195,6 +1195,12 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     ci.usage = d.usage;
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageFormatListCreateInfo fl = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    if (d.view_format_count && (d.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {   // core in Vulkan 1.2
+        fl.viewFormatCount = d.view_format_count;
+        fl.pViewFormats = d.view_formats;
+        ci.pNext = &fl;
+    }
     VmaAllocationCreateInfo ai = {};
     ai.usage = VMA_MEMORY_USAGE_AUTO;
     // VK_EXT_memory_priority (used for a dedicated allocation; ignored without the extension): what is rendered to stays in video memory

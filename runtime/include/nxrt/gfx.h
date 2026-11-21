@@ -83,6 +83,10 @@ struct ImageDesc {
     // [gfx] residency's demoted textures: placed in a pool of small blocks of their own, so they do not fill the room their whole images
     // left in the shared blocks (which then empty and go back to the OS)
     bool small_pool = false;
+    // A1b ([gfx] image_format_lists): the formats a MUTABLE_FORMAT image's views may use, chained as VkImageFormatListCreateInfo, so the
+    // driver can keep compression it would turn off for "any compatible format". 0: no list (every compatible format allowed).
+    VkFormat view_formats[4] = {};
+    uint32_t view_format_count = 0;
 };
 
 struct Image {
