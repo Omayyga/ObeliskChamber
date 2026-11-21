@@ -18,8 +18,7 @@ The edits:
 
 A shader this was not written for is left alone: the edit is applied only to a module whose SHA-256 is in TESTED (unless
 --allow-untested), and only when every anchor it expects is found. Measured on an RTX 3090 Ti at 4K DLAA: the pass went
-from 1.90 ms to 1.36 ms and the route from 89.8 to 92.0 fps (docs: claude/Lighting_Shader_Edit_AB_2026-11-21.md in the
-project notes; PR #159 comments).
+from 1.85 ms to 1.30 ms and a walk through the town from 88.3 to 90.9 fps, with matching screenshots.
 
 usage: lighting_edit.py --spirv <shader cache>/spirv --out <shader cache>/edited [--spirv-cross exe] [--glslang exe]
        lighting_edit.py --self-test

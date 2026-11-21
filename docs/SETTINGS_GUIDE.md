@@ -145,8 +145,8 @@ does not change the picture, and compiles it again:
 - the soft sun shadow is sampled in full (25 samples) only at shadow edges; elsewhere 5 samples decide. A shadow thinner than the
   filter could change.
 
-Measured on an RTX 3090 Ti at 4K DLAA: the lighting pass went from about 1.9 ms to about 1.25 ms, and a walk through the town gained
-about 2% in frames per second with no visible difference. It has been tested on one graphics card and one area of the game, so treat it
+Measured on an RTX 3090 Ti at 4K DLAA: the lighting pass went from about 1.85 ms to about 1.3 ms, and a walk through the town gained
+2 to 3% in frames per second with no visible difference. It has been tested on one graphics card and one area of the game, so treat it
 as a test. Ticking or clearing the box takes effect the next time you press Set up (a few seconds; nothing else is rebuilt). The edited
 shader is written to `shader_cache/edited` beside the translated ones, which stay as they are. To compare without running Set up, set
 `[nvn] edited_shaders = false` in `ObeliskChamber.ini`. If the option does nothing, the Set up log says why: the tool leaves alone a
