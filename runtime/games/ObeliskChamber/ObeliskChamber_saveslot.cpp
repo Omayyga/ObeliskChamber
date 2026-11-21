@@ -10,7 +10,8 @@
 //   title: New Game      vtable 0x20c2b08, ACall 0x16d4810                                    starts in the next free folder
 //                        The title menu's builder (0x16d2d60) makes New Game selectable only without a save (item+0x51 = !exists,
 //                        read through slot 6 alone) and Continue only with one. With slots a new game overwrites nothing, so
-//                        New Game's slot 6 answers yes always.
+//                        New Game's slot 6 answers yes always. The menu's cursor then starts on New Game (the first selectable entry),
+//                        so the first time a title menu draws Continue, the cursor is put on Continue ([fefw] title_continue).
 //   title: Delete Save   vtable 0x20c41e8, ACall 0x16d6910 (Extra)                            left / right: the slot in use
 //   + menu: Save         vtables 0x212ab80, 0x20144e8 (hub), 0x214c8c0; ACall 0x188b880 (the save prompt, 0x16da940(root))
 //                        A opens a list (ObeliskChamber_optmenu.cpp's pick list) with a Save tab (New Slot, then the slots: A on a row
@@ -41,6 +42,7 @@
 #include "nxrt/abi.h"
 #include "nxrt/config.h"
 #include "nxrt/dispatch.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/services.h"
@@ -62,6 +64,7 @@ enum Pending { kPendNone, kPendSave };
 
 uint64_t g_base = 0;
 bool g_on = true, g_hooked = false, g_failed = false;
+bool g_tc_ok = false;   // [fefw] title_continue: SetCurrent is where it was expected
 
 std::mutex g_mu;                 // everything below: the game's threads (the path hook) and its main thread (the menus)
 std::string g_root;              // the account save's host folder (UTF-8), known from the first path the game asks for
@@ -352,12 +355,53 @@ void redraw(::Ctx* c, uint64_t item) {
     if (rd(item, &vt) && rd(vt + kSlotRedraw * 8, &fn) && fn_lookup(fn)) call(c, fn, {item});
 }
 
+// ---- the title's cursor starts on Continue ([fefw] title_continue, default on) ------------------------------------------------------------
+// Without slots the game makes New Game unselectable when a save exists, so the menu's cursor starts on Continue, the first selectable
+// entry. With slots New Game is selectable too (above), and the cursor started on it. The first time a title menu draws its Continue entry
+// (get_text), the menu and the entry are noted; at the next frame boundary (saveslot_frame, the game thread between updates, not inside a
+// draw) the cursor moves to Continue with the menu's own SetCurrent (0x1713340: (menu, item, 1, 1, 0), as the game's own callers set an
+// initial entry), but only while it is still on New Game, so a player's own move is never undone. Each menu gets it once.
+constexpr uint64_t kSetCurrent = 0x1713340;
+constexpr uint64_t kMenuCurrent = 0x150;       // BasicMenu: the current item
+uint64_t g_tc_menu = 0, g_tc_item = 0;        // noted by get_text, applied by saveslot_frame (both on the game thread)
+uint64_t g_tc_done_menu = 0, g_tc_done_item = 0;
+int g_tc_idle = 0;                            // frames since a Continue entry was drawn: a title menu made again at the same address counts as new
+bool title_continue_on() {
+    static const bool on = config_get_bool("fefw", "title_continue", true);
+    return on;
+}
+void title_continue_note(uint64_t item) {
+    uint64_t menu = 0;
+    g_tc_idle = 0;
+    if (!rd(item + 8, &menu) || !menu || (menu == g_tc_done_menu && item == g_tc_done_item)) return;   // +8: its menu (BasicMenu::AddItem)
+    g_tc_menu = menu;
+    g_tc_item = item;
+}
+void title_continue_frame() {
+    if (++g_tc_idle > 30) g_tc_done_menu = g_tc_done_item = 0;
+    if (!g_tc_menu) return;
+    const uint64_t menu = g_tc_menu, item = g_tc_item;
+    g_tc_menu = g_tc_item = 0;
+    g_tc_done_menu = menu;
+    g_tc_done_item = item;
+    uint64_t cur = 0;
+    uint8_t selectable = 0;
+    if (!rd(menu + kMenuCurrent, &cur) || kind_of(cur) != kNewGame || kind_of(item) != kContinue) return;
+    if (!rd(item + 0x51, &selectable) || !selectable) return;       // Continue selectable: the Auto save exists
+    ::Ctx* c = kernel::current_ctx();
+    if (!c) return;
+    call(c, g_base + kSetCurrent, {menu, item, 1, 1, 0});
+    static int told = 0;
+    if (told++ < 3) NXLOG_I(kTag, "title: the cursor starts on Continue ([fefw] title_continue)");
+}
+
 // slot 2: the game's label, with the slot it stands for
 char g_text[5][160];
 void get_text(::Ctx* c) {
     const uint64_t item = c->x[0];
     const uint64_t text = call(c, g_base + kGetText, {item});
     const Kind k = kind_of(item);
+    if (k == kContinue && g_tc_ok && title_continue_on()) title_continue_note(item);
     c->x[0] = text;
     if (!text || k == kNone || !mem::is_mapped(text, 1)) return;
     const char* own = reinterpret_cast<const char*>(text);
@@ -724,6 +768,7 @@ void saveslot_install(uint64_t base) {
 
 // Main thread, once per frame: hooks the entries once the game's data is there and is the build the addresses are for.
 void saveslot_frame() {
+    if (g_hooked && g_tc_ok) title_continue_frame();
     if (g_hooked || g_failed || !g_on || !g_base) return;
     uint64_t probe = 0;
     if (!rd(g_base + kVtContinue + kSlotACall * 8, &probe) || !probe) return;
@@ -765,6 +810,8 @@ void saveslot_frame() {
         patch(kVtPromptYes, kFnInvoke, hle_register("fefw.saveslot.prompt_yes", prompt_yes));
         patch(kVtPromptNo, kFnInvoke, hle_register("fefw.saveslot.prompt_no", prompt_no));
     } else if (g_load_ok) NXLOG_W(kTag, "the game's Continue prompt is not where it was expected: a Load row loads on a second A");
+    g_tc_ok = fn_lookup(g_base + kSetCurrent);
+    if (!g_tc_ok) NXLOG_W(kTag, "the menu's SetCurrent is not where it was expected: the title's cursor starts on the first entry");
     g_hooked = true;
     NXLOG_I(kTag, "save slots hooked: Continue, New Game, Delete Save and Save choose the folder ([fefw] save_slots)");
 }
