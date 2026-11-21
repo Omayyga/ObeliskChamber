@@ -145,6 +145,9 @@ struct DescriptorBinding {
     // Storage buffers: some instruction stores to the buffer or applies an atomic to it (through access chains from the variable; a
     // pointer passed to a function counts). A graphics shader's buffer that is never written stays valid in the device-local pool copies.
     bool written = false;
+    // Storage buffers: some atomic instruction (or a call) uses the buffer. Compute shadows keep small atomic buffers
+    // (histograms, counters) shadowed under [nvn] compute_shadow_min_bytes.
+    bool atomic = false;
 };
 
 struct ShaderIo {
