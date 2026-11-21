@@ -649,6 +649,44 @@ NXTEST(native_float_add_ignores_other_modules) {
     CHECK_EQ(gpu::spirv_native_float_add(vs, out), 0);
 }
 
+// ---- spirv_relax_exact ([nvn] relax_exact) ----------------------------------------------------------------------------------------
+NXTEST(relax_exact_drops_only_no_contraction) {
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 20u, 0u};
+    auto op = [&](uint32_t code, std::initializer_list<uint32_t> operands) {
+        w.push_back(static_cast<uint32_t>((operands.size() + 1) << 16) | code);
+        w.insert(w.end(), operands.begin(), operands.end());
+    };
+    op(17, {1});                  // Capability Shader
+    op(14, {0, 1});               // MemoryModel Logical GLSL450
+    op(71, {9, 42});              // Decorate %9 NoContraction
+    op(71, {7, 30, 0});           // Decorate %7 Location 0
+    op(71, {10, 42});             // Decorate %10 NoContraction
+    op(71, {8, 0});               // Decorate %8 RelaxedPrecision
+    op(22, {5, 32});              // %5 float
+    const std::vector<uint32_t> before = w;
+    std::vector<uint32_t> out;
+    CHECK_EQ(gpu::spirv_relax_exact(w, out), 2);
+    CHECK(w == before);
+    CHECK_EQ(out.size(), before.size() - 6);
+    int decorations = 0;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16;
+        REQUIRE(len && i + len <= out.size());
+        if ((out[i] & 0xffff) == 71) {
+            ++decorations;
+            CHECK(out[i + 2] != 42u);
+        }
+        i += len;
+    }
+    CHECK_EQ(decorations, 2);
+    std::vector<uint32_t> again = {7u};
+    CHECK_EQ(gpu::spirv_relax_exact(out, again), 0);     // nothing left: out untouched
+    CHECK_EQ(again.size(), size_t(1));
+    CHECK_EQ(gpu::spirv_relax_exact(std::vector<uint32_t>{1u, 2u}, again), 0);
+    CHECK_EQ(gpu::spirv_relax_exact(std::vector<uint32_t>{0x07230203u, 0x10300u, 0, 1, 0, 0x00050047u, 1}, again), 0);   // a cut-off instruction
+    CHECK_EQ(again.size(), size_t(1));
+}
+
 // ---- spirv_lower_float64 (GPUs without shaderFloat64) ---------------------------------------------------------------------------
 namespace {
 // A compute module in the shape of the game's auto-exposure shaders: a double function variable, a double built by PackDouble2x32 of

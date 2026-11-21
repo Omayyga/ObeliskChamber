@@ -280,6 +280,36 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
                 NXLOG_I(kTag, "%s: %d float add loop(s) to a buffer are native atomic adds", what ? what : "shader", n);
         }
     }
+    // [nvn] relax_exact (measurement, default empty): shader hash prefixes, separated by commas or spaces, or `all`. Those modules lose
+    // their NoContraction decorations (spirv_relax_exact), so the driver's compiler may fuse and reorder their float maths. The Nsight
+    // trace of 0.3.1 shows the lighting shader 6385c299 holding 165 live registers; this tests whether the exact marks cost registers.
+    static const std::vector<std::string> relax = [] {
+        std::vector<std::string> v;
+        std::string cur;
+        for (const char c : config_get_str("nvn", "relax_exact", "") + " ") {
+            if (c == ',' || c == ' ' || c == ';') {
+                if (!cur.empty()) v.push_back(cur);
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        return v;
+    }();
+    std::vector<uint32_t> relaxed;
+    if (!relax.empty() && what) {
+        const std::string h = what;
+        bool hit = false;
+        for (const std::string& r : relax) hit = hit || r == "all" || h.compare(0, r.size(), r) == 0;
+        if (hit) {
+            const int n = spirv_relax_exact(*code, relaxed);
+            if (n > 0) {
+                code = &relaxed;
+                static std::atomic<int> logged{0};
+                if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d exact-maths marks dropped ([nvn] relax_exact)", what, n);
+            }
+        }
+    }
     // [nvn] spirv_salt (measurement only): an OpSourceExtension with the salt in every module gives the driver a new shader hash, so a run
     // compiles every shader from scratch without touching the driver's own cache on disk.
     static const std::string salt = config_get_str("nvn", "spirv_salt", "");
