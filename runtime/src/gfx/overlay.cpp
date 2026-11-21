@@ -1109,7 +1109,10 @@ bool Overlay::handle_event(const input::Event& e) {
         }
         return true;   // the toggle key never reaches the game (press, repeat and release)
     }
-    if (s.mods_sc != SDL_SCANCODE_UNKNOWN && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.mods_sc) {
+    // The Mods key is taken only while a code mod has a panel (or the Mods window is up): otherwise it goes to the game as before, so a
+    // mod that watches the same key itself (the F8 Appearance Editor polls F8 with GetAsyncKeyState) is not answered twice.
+    if (s.mods_sc != SDL_SCANCODE_UNKNOWN && (e.type == EventType::KeyDown || e.type == EventType::KeyUp) && e.u.key.scancode == s.mods_sc &&
+        (has_mod_panels() || (s.visible && s.mods_mode.load()))) {
         if (e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) {
             if (s.visible && s.mods_mode.load()) {
                 set_visible(false);
