@@ -283,10 +283,10 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
     // [nvn] relax_exact (measurement, default empty): shader hash prefixes, separated by commas or spaces, or `all`. Those modules lose
     // their NoContraction decorations (spirv_relax_exact), so the driver's compiler may fuse and reorder their float maths. The Nsight
     // trace of 0.3.1 shows the lighting shader 6385c299 holding 165 live registers; this tests whether the exact marks cost registers.
-    static const std::vector<std::string> relax = [] {
+    static const auto hash_list = [](const char* key) {
         std::vector<std::string> v;
         std::string cur;
-        for (const char c : config_get_str("nvn", "relax_exact", "") + " ") {
+        for (const char c : config_get_str("nvn", key, "") + " ") {
             if (c == ',' || c == ' ' || c == ';') {
                 if (!cur.empty()) v.push_back(cur);
                 cur.clear();
@@ -295,19 +295,35 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             }
         }
         return v;
-    }();
+    };
+    static const auto listed = [](const std::vector<std::string>& list, const char* hash) {
+        if (list.empty() || !hash) return false;
+        const std::string h = hash;
+        for (const std::string& r : list)
+            if (r == "all" || h.compare(0, r.size(), r) == 0) return true;
+        return false;
+    };
+    static const std::vector<std::string> relax = hash_list("relax_exact");
     std::vector<uint32_t> relaxed;
-    if (!relax.empty() && what) {
-        const std::string h = what;
-        bool hit = false;
-        for (const std::string& r : relax) hit = hit || r == "all" || h.compare(0, r.size(), r) == 0;
-        if (hit) {
-            const int n = spirv_relax_exact(*code, relaxed);
-            if (n > 0) {
-                code = &relaxed;
-                static std::atomic<int> logged{0};
-                if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d exact-maths marks dropped ([nvn] relax_exact)", what, n);
-            }
+    if (listed(relax, what)) {
+        const int n = spirv_relax_exact(*code, relaxed);
+        if (n > 0) {
+            code = &relaxed;
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d exact-maths marks dropped ([nvn] relax_exact)", what, n);
+        }
+    }
+    // [nvn] no_unroll (measurement, default empty): the same kind of list. Every loop of those modules gets the DontUnroll loop control
+    // (spirv_no_unroll). Nsight shows the driver turning the lighting shader's 18,000 instructions into about 60,600 machine instructions,
+    // most likely by unrolling its 7 loops; this tests whether the hint is honoured and what it does to registers and time.
+    static const std::vector<std::string> no_unroll = hash_list("no_unroll");
+    std::vector<uint32_t> hinted;
+    if (listed(no_unroll, what)) {
+        const int n = spirv_no_unroll(*code, hinted);
+        if (n > 0) {
+            code = &hinted;
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d loop(s) marked DontUnroll ([nvn] no_unroll)", what, n);
         }
     }
     // [nvn] spirv_salt (measurement only): an OpSourceExtension with the salt in every module gives the driver a new shader hash, so a run

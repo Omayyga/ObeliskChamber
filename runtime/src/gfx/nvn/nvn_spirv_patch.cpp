@@ -1298,6 +1298,28 @@ int spirv_relax_exact(const std::vector<uint32_t>& in, std::vector<uint32_t>& ou
     return n;
 }
 
+// ---- spirv_no_unroll ---------------------------------------------------------------------------------------------------------------------
+int spirv_no_unroll(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    if (in.size() < 5 || in[0] != 0x07230203u) return 0;
+    std::vector<uint32_t> w = in;
+    int n = 0;
+    for (size_t i = 5; i < w.size();) {
+        const uint32_t len = w[i] >> 16, op = w[i] & 0xffff;
+        if (len == 0 || i + len > w.size()) return 0;     // not a module this can walk
+        if (op == 246 && len >= 4) {                       // OpLoopMerge merge continue control [parameters]
+            const uint32_t want = (w[i + 3] & ~1u) | 2u;   // Unroll off, DontUnroll on; the other bits and their parameters stay
+            if (w[i + 3] != want) {
+                w[i + 3] = want;
+                ++n;
+            }
+        }
+        i += len;
+    }
+    if (n == 0) return 0;
+    out = std::move(w);
+    return n;
+}
+
 int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
     enum : uint32_t {
         OpExtension = 10, OpCapability = 17, OpTypeRuntimeArray = 29, OpTypeStruct = 30,

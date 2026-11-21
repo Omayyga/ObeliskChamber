@@ -687,6 +687,42 @@ NXTEST(relax_exact_drops_only_no_contraction) {
     CHECK_EQ(again.size(), size_t(1));
 }
 
+// ---- spirv_no_unroll ([nvn] no_unroll) ----------------------------------------------------------------------------------------------
+NXTEST(no_unroll_marks_every_loop) {
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 20u, 0u};
+    auto op = [&](uint32_t code, std::initializer_list<uint32_t> operands) {
+        w.push_back(static_cast<uint32_t>((operands.size() + 1) << 16) | code);
+        w.insert(w.end(), operands.begin(), operands.end());
+    };
+    op(17, {1});                  // Capability Shader
+    op(246, {5, 6, 0});           // LoopMerge %5 %6 None
+    op(246, {7, 8, 1});           // LoopMerge %7 %8 Unroll
+    op(246, {9, 10, 2});          // LoopMerge %9 %10 DontUnroll (already)
+    op(247, {11, 0});             // SelectionMerge %11 None
+    const std::vector<uint32_t> before = w;
+    std::vector<uint32_t> out;
+    CHECK_EQ(gpu::spirv_no_unroll(w, out), 2);
+    CHECK(w == before);
+    REQUIRE(out.size() == before.size());
+    int loops = 0;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16;
+        REQUIRE(len && i + len <= out.size());
+        if ((out[i] & 0xffff) == 246) {
+            ++loops;
+            CHECK_EQ(out[i + 3], 2u);
+        } else {
+            for (uint32_t k = 0; k < len; ++k) CHECK_EQ(out[i + k], before[i + k]);
+        }
+        i += len;
+    }
+    CHECK_EQ(loops, 3);
+    std::vector<uint32_t> again = {7u};
+    CHECK_EQ(gpu::spirv_no_unroll(out, again), 0);     // nothing left: out untouched
+    CHECK_EQ(gpu::spirv_no_unroll(std::vector<uint32_t>{1u, 2u}, again), 0);
+    CHECK_EQ(again.size(), size_t(1));
+}
+
 // ---- spirv_lower_float64 (GPUs without shaderFloat64) ---------------------------------------------------------------------------
 namespace {
 // A compute module in the shape of the game's auto-exposure shaders: a double function variable, a double built by PackDouble2x32 of

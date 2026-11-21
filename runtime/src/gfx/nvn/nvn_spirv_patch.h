@@ -127,6 +127,10 @@ int spirv_native_float_add(const std::vector<uint32_t>& in, std::vector<uint32_t
 // switch: results may differ in the last bits). Returns the number of decorations dropped (0: out untouched).
 int spirv_relax_exact(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
 
+// Every OpLoopMerge of the module gets the loop control DontUnroll (and loses Unroll), a hint to the driver's compiler ([nvn] no_unroll,
+// a measurement switch). Returns the number of loops changed (0: out untouched).
+int spirv_no_unroll(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);
+
 // A GPU without shaderFloat64 (Intel Arc and Iris Xe) loses the device on a module that uses 64-bit floats. In Fortune's Weave four
 // translated compute shaders (auto exposure) keep scalar doubles in function variables, built from constants with PackDouble2x32 and
 // converted to and from 32-bit. This makes them 32-bit: the double type becomes float, FConvert between the two becomes a copy, and
