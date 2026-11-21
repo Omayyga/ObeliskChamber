@@ -37,7 +37,7 @@ import subprocess
 import sys
 import tempfile
 
-TOOL_VERSION = 1
+TOOL_VERSION = 2
 
 # hash of the game's shader (the cache's file name) -> the edits to make, in order
 TARGETS = {
@@ -185,6 +185,39 @@ EDITS = {"sun_shadows": edit_sun_shadows, "probes": edit_probes}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# names
+
+_BLOCK_OPEN = re.compile(r'^(layout\(.*\) (?:uniform|buffer) )(\w+)$')
+_BLOCK_CLOSE = re.compile(r'^\} (\w+);$')
+
+
+def keep_block_names(src):
+    """The runtime finds out what a uniform or storage block is from its variable's name (support_buffer, fp_c5, fp_s0, ...). In the
+    translated module the block type and its variable share that name, which GLSL cannot say, so spirv-cross calls the variable
+    <name>_1. Here the type becomes <name>_t and the variable gets the name back, so the compiled module names it as before."""
+    out = list(src)
+    renames = {}
+    i = 0
+    while i < len(out):
+        m = _BLOCK_OPEN.match(out[i])
+        if m and i + 1 < len(out) and out[i + 1].strip() == '{':
+            j = i + 2
+            while j < len(out) and not out[j].startswith('}'):
+                j += 1
+            c = _BLOCK_CLOSE.match(out[j]) if j < len(out) else None
+            if c and c[1] == m[2] + '_1':
+                out[i] = m[1] + m[2] + '_t'
+                out[j] = '} ' + m[2] + ';'
+                renames[c[1]] = m[2]
+            i = j
+        i += 1
+    if not renames:
+        return out
+    pat = re.compile(r'\b(' + '|'.join(re.escape(k) for k in renames) + r')\b')
+    return [pat.sub(lambda x: renames[x[1]], l) for l in out]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # SPIR-V checks (no tools needed)
 
 def _words(data):
@@ -196,16 +229,23 @@ def _words(data):
     return w
 
 
+def _string(w, i, n):
+    b = b''.join(struct.pack('<I', x) for x in w[i:i + n])
+    return b.split(b'\0', 1)[0].decode('utf-8', 'replace')
+
+
 def interface(data):
-    """(version, {(set, binding)}, {(storage class, location)}, execution modes) of a module."""
+    """(version, {(set, binding): variable name}, {(storage class, location)}, execution modes) of a module."""
     w = _words(data)
-    sets, bindings, locs, storage, modes = {}, {}, {}, {}, set()
+    sets, bindings, locs, storage, modes, names = {}, {}, {}, {}, set(), {}
     i = 5
     while i < len(w):
         op, n = w[i] & 0xffff, w[i] >> 16
         if n == 0:
             raise Skip("a damaged SPIR-V module")
-        if op == 71 and n >= 4:      # OpDecorate
+        if op == 5 and n >= 3:       # OpName
+            names[w[i + 1]] = _string(w, i + 2, n - 2)
+        elif op == 71 and n >= 4:    # OpDecorate
             if w[i + 2] == 34: sets[w[i + 1]] = w[i + 3]
             if w[i + 2] == 33: bindings[w[i + 1]] = w[i + 3]
             if w[i + 2] == 30: locs[w[i + 1]] = w[i + 3]
@@ -214,7 +254,7 @@ def interface(data):
         elif op == 16 and n >= 3:    # OpExecutionMode
             modes.add(w[i + 2])
         i += n
-    return (w[1], {(sets[v], bindings[v]) for v in sets if v in bindings},
+    return (w[1], {(sets[v], bindings[v]): names.get(v, '') for v in sets if v in bindings},
             {(storage.get(v), l) for v, l in locs.items()}, modes)
 
 
@@ -222,7 +262,10 @@ def check_same_interface(before, after):
     v0, b0, l0, m0 = interface(before)
     v1, b1, l1, m1 = interface(after)
     _need(v1 >= 0x10300, "the compiled module is older than SPIR-V 1.3")
-    _need(b1 <= b0, f"the compiled module binds something the shader does not: {sorted(b1 - b0)}")
+    _need(set(b1) <= set(b0), f"the compiled module binds something the shader does not: {sorted(set(b1) - set(b0))}")
+    # the runtime reads what a binding is from its variable's name
+    wrong = sorted(f"{k}: {b0[k]!r} became {b1[k]!r}" for k in b1 if b1[k] != b0[k])
+    _need(not wrong, "the compiled module names its bindings differently (" + '; '.join(wrong[:4]) + ")")
     _need(l1 == l0, "the compiled module's inputs and outputs differ")
     _need(m1 == m0, "the compiled module's execution modes differ")
 
@@ -258,7 +301,7 @@ def run(cmd):
 
 
 def edit_text(text, edits):
-    src = text.split('\n')
+    src = keep_block_names(text.split('\n'))
     notes = []
     for name in edits:
         src, note = EDITS[name](src)
@@ -343,6 +386,11 @@ def self_test():
         raise AssertionError("an unknown shader was edited")
     except Skip:
         pass
+    blk = ["layout(set = 0, binding = 0, std140) uniform support_buffer", "{", "    float _m5[73];", "} support_buffer_1;", "",
+           "layout(set = 1, binding = 16, std430) buffer fp_s0", "{", "    uint _m0[];", "} fp_s0_1;", "",
+           "void main()", "{", "    float a = support_buffer_1._m5[0] + float(fp_s0_1._m0[1]);", "}"]
+    text = '\n'.join(keep_block_names(blk))
+    assert "uniform support_buffer_t" in text and "} support_buffer;" in text and "support_buffer._m5[0]" in text and "fp_s0._m0[1]" in text and "_1." not in text, text
     print("lighting_edit self-test: ok")
 
 
