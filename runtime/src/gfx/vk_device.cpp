@@ -3,6 +3,8 @@
 // checks, buffers, one-shot submits.
 // Ideas taken from SuperMarioWonderRecomp (MIT) docs/nvn/DEBUG-2.md #69 (ASTC on NVIDIA desktop) and #70 (iGPU listed first):
 // the checks and the GPU rule are written from scratch, see docs/S4b.md.
+#include <windows.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -490,6 +492,27 @@ int video_live_percent() {
     return pct;
 }
 
+// [gfx] nv_shader_cache_gb (default 10, 0 = leave the driver's own limit): NVIDIA's driver reads __GL_SHADER_DISK_CACHE_SIZE (bytes) and
+// __GL_SHADER_DISK_CACHE_SKIP_CLEANUP from the environment of the process that loads it, for that process only. Newer drivers no longer
+// offer "Shader Cache Size" in the Control Panel, and the default limit prunes a cache as large as this game's (12,000 shaders and
+// thousands of pipelines), so stutter comes back after it fills. Set before the instance is made, so the driver sees them when it loads;
+// a value the player set in the environment stays. Other vendors' drivers ignore both. Technique from Fritchii (b7fa91274).
+static void set_nv_shader_cache_env() {
+    const int64_t gb = config_get_int("gfx", "nv_shader_cache_gb", 10);
+    if (gb <= 0) return;
+    char cur[64];
+    if (GetEnvironmentVariableA("__GL_SHADER_DISK_CACHE_SIZE", cur, sizeof cur)) {
+        NXLOG_I(kTag, "NVIDIA shader disk cache: __GL_SHADER_DISK_CACHE_SIZE = %s from the environment, kept", cur);
+        return;
+    }
+    char v[32];
+    std::snprintf(v, sizeof v, "%lld", static_cast<long long>(gb) * 1024 * 1024 * 1024);
+    SetEnvironmentVariableA("__GL_SHADER_DISK_CACHE_SIZE", v);
+    if (!GetEnvironmentVariableA("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", cur, sizeof cur)) SetEnvironmentVariableA("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1");
+    NXLOG_I(kTag, "NVIDIA shader disk cache: up to %lld GB for this process, no cleanup ([gfx] nv_shader_cache_gb; other drivers ignore it)",
+            static_cast<long long>(gb));
+}
+
 // ---- creation ---------------------------------------------------------------------------------------------------------
 std::unique_ptr<Device> Device::create(const DeviceDesc& desc, std::string* error) {
     std::unique_ptr<Device> d(new Device());
@@ -517,6 +540,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool headless = desc.headless >= 0 ? desc.headless != 0 : config_get_bool("gfx", "headless", false);
     std::string gpu_want = !desc.gpu.empty() ? desc.gpu : config_get_str("gfx", "gpu", "");
 
+    set_nv_shader_cache_env();          // before the driver loads (the instance below)
     disable_overwolf_vulkan_layers();   // Overwolf's installed Vulkan layers collide with the driver hooks Streamline and NGX install
     // DLSS / DLAA: Streamline must see the instance, device and swapchain calls, so the loader functions come from sl.interposer.dll
     const PFN_vkGetInstanceProcAddr sl_gipa = extras::streamline_preinit();
