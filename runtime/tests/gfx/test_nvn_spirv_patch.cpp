@@ -648,3 +648,106 @@ NXTEST(native_float_add_ignores_other_modules) {
     REQUIRE(load_hash(kVertexHash, vs));
     CHECK_EQ(gpu::spirv_native_float_add(vs, out), 0);
 }
+
+// ---- spirv_lower_float64 (GPUs without shaderFloat64) ---------------------------------------------------------------------------
+namespace {
+// A compute module in the shape of the game's auto-exposure shaders: a double function variable, a double built by PackDouble2x32 of
+// a constant, FConvert both ways and a multiply. vector_of_doubles: also declares a vector of doubles (a shape that is refused).
+std::vector<uint32_t> f64_module(bool vector_of_doubles) {
+    std::vector<uint32_t> w = {0x07230203u, 0x00010300u, 0u, 40u, 0u};
+    auto op = [&](uint32_t code, std::initializer_list<uint32_t> operands) {
+        w.push_back(static_cast<uint32_t>((operands.size() + 1) << 16) | code);
+        w.insert(w.end(), operands.begin(), operands.end());
+    };
+    op(17, {1});                                                   // Capability Shader
+    op(17, {10});                                                  // Capability Float64
+    op(11, {1, 0x4c534c47u, 0x6474732eu, 0x3035342eu, 0u});        // %1 = ExtInstImport "GLSL.std.450"
+    op(14, {0, 1});                                                // MemoryModel Logical GLSL450
+    op(15, {5, 2, 0x6e69616du, 0u});                               // EntryPoint GLCompute %2 "main"
+    op(16, {2, 17, 1, 1, 1});                                      // ExecutionMode %2 LocalSize 1 1 1
+    op(19, {3});                                                   // %3 void
+    op(33, {4, 3});                                                // %4 fn void()
+    op(22, {5, 32});                                               // %5 float
+    op(22, {6, 64});                                               // %6 double
+    op(21, {7, 32, 0});                                            // %7 uint
+    op(23, {8, 7, 2});                                             // %8 uvec2
+    op(32, {9, 7, 6});                                             // %9 ptr Function double
+    if (vector_of_doubles) op(23, {30, 6, 2});                     // %30 dvec2
+    op(43, {7, 10, 0u});                                           // %10 uint 0
+    op(43, {7, 11, 0x41f00000u});                                  // %11 uint: the high word of 2^32 as a double
+    op(44, {8, 12, 10, 11});                                       // %12 uvec2(0, hi)
+    op(43, {5, 13, 0x3f800000u});                                  // %13 float 1.0
+    op(54, {3, 2, 0, 4});                                          // %2 = Function
+    op(248, {14});                                                 // Label
+    op(59, {9, 15, 7});                                            // %15 = Variable Function
+    op(12, {6, 16, 1, 59, 12});                                    // %16 = PackDouble2x32(%12)
+    op(115, {6, 17, 13});                                          // %17 = FConvert double(1.0)
+    op(133, {6, 18, 16, 17});                                      // %18 = FMul
+    op(62, {15, 18});                                              // Store
+    op(61, {6, 19, 15});                                           // %19 = Load
+    op(115, {5, 20, 19});                                          // %20 = FConvert float
+    op(253, {});                                                   // Return
+    op(56, {});                                                    // FunctionEnd
+    return w;
+}
+}  // namespace
+
+NXTEST(lower_float64_auto_exposure_shape) {
+    const std::vector<uint32_t> in = f64_module(false);
+    std::vector<uint32_t> out;
+    REQUIRE(gpu::spirv_lower_float64(in, out));
+    bool cap64 = false, type64 = false, const_2p32 = false, fconvert = false;
+    for (size_t i = 5; i < out.size();) {
+        const uint32_t len = out[i] >> 16, code = out[i] & 0xffff;
+        REQUIRE(len != 0);
+        if (code == 17 && out[i + 1] == 10) cap64 = true;
+        if (code == 22 && out[i + 2] == 64) type64 = true;
+        if (code == 43 && out[i + 1] == 5 && out[i + 3] == 0x4f800000u) const_2p32 = true;   // 2^32 as a float
+        if (code == 115) fconvert = true;
+        i += len;
+    }
+    CHECK(!cap64);
+    CHECK(!type64);
+    CHECK(const_2p32);
+    CHECK(!fconvert);
+    CHECK(out[3] == in[3] + 1);   // one new constant
+    std::error_code ec;
+    if (fs::exists(kSpirvVal, ec)) {
+        std::string log;
+        CHECK_MSG(run_spirv_val(in, "lower64_in", log) == 0, "the test module itself: " + log);
+        CHECK_MSG(run_spirv_val(out, "lower64_out", log) == 0, "spirv-val: " + log);
+    }
+    std::vector<uint32_t> untouched;
+    CHECK(!gpu::spirv_lower_float64(f64_module(true), untouched));   // a vector of doubles is not lowered
+    CHECK(untouched.empty());
+}
+
+// Every module of the shader cache that uses doubles (four in Fortune's Weave) is lowered, and spirv-val accepts the result.
+NXTEST(lower_float64_shader_cache) {
+    std::error_code ec;
+    if (!fs::exists(kSpvDir, ec) || !fs::exists(kSpirvVal, ec)) {
+        nxtest::skip("shader cache or spirv-val absent");
+        return;
+    }
+    int found = 0;
+    for (const auto& e : fs::directory_iterator(kSpvDir, ec)) {
+        if (e.path().extension() != ".spv") continue;
+        std::vector<uint32_t> w;
+        if (!load_words(e.path(), w)) continue;
+        bool uses64 = false;
+        for (size_t i = 5; i < w.size() && !uses64;) {
+            const uint32_t len = w[i] >> 16;
+            if (len == 0) break;
+            uses64 = (w[i] & 0xffff) == 22 && w[i + 2] == 64;
+            i += len;
+        }
+        if (!uses64) continue;
+        ++found;
+        std::vector<uint32_t> out;
+        CHECK_MSG(gpu::spirv_lower_float64(w, out), e.path().filename().string() + " was not lowered");
+        if (out.empty()) continue;
+        std::string log;
+        CHECK_MSG(run_spirv_val(out, "lower64_cache", log) == 0, e.path().filename().string() + ": " + log);
+    }
+    if (!found) nxtest::skip("no module of the shader cache uses doubles");
+}
