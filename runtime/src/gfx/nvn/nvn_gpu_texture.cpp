@@ -2174,12 +2174,26 @@ void tex_residency_tick(Frame& f) {
     // demotions: over residency_percent of the OS budget, the textures no draw used for residency_idle_s, the longest unused first, until
     // the use is 5 points under it (at most 512 MiB a look); over 92%, ten seconds unused is enough
     int pct = nxrt::gfx::video_live_percent();   // the room free inside VMA's blocks is not pressure: the next images go there
+    // [gfx] residency_os_pressure (default off; FEFW-recomp ebdb5a1): demote also while the OS counts this process at max(residency_percent
+    // + 5, 85)% or more of the budget. Freed room inside VMA's blocks keeps the live figure low while the OS (and pool_mirror_pressure_percent,
+    // which then refuses new pool copy chunks) still sees the blocks as used.
+    static const bool os_on = nxrt::config_get_bool("gfx", "residency_os_pressure", false);
+    int os_pct = os_on ? nxrt::gfx::video_usage_percent() : -1;
     uint64_t budget = nxrt::gfx::video_budget_bytes();
     if (pct < 0 || !budget) return;
     static const uint64_t test_mb = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0)));
     if (test_mb && (test_mb << 20) < budget) {   // test aid: a smaller card's budget (the use stays this process' real one)
         pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(pct) / ((test_mb << 20) / 100));
+        if (os_pct >= 0) os_pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
         budget = test_mb << 20;
+    }
+    if (os_pct >= std::min(100, std::max(cfg.percent + 5, 85))) {
+        static bool noted = false;
+        if (!noted && pct < cfg.percent) {
+            noted = true;
+            NXLOG_I(kTag, "residency: the OS counts %d%% of the video memory budget in use (live %d%%): demoting ([gfx] residency_os_pressure)", os_pct, pct);
+        }
+        pct = std::max(pct, os_pct);
     }
     if (pct < cfg.percent) return;
     const bool urgent = pct >= cfg.urgent_percent;
