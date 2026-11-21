@@ -140,7 +140,7 @@ void poll_capture(UiHost& host, Page& p) {
         if (p.fps_capture) {
             // The frame rate hotkey takes keyboard keys only; a mouse button or a wheel notch is dropped and the capture ends.
             if (reserved) {
-                set_notice(p, name + " opens this menu and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
+                set_notice(p, name + " opens this menu or the Mods window and cannot be the frame rate hotkey. Press another key, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }
@@ -153,7 +153,7 @@ void poll_capture(UiHost& host, Page& p) {
         } else if (p.rebind >= 0 && p.rebind < static_cast<int>(p.edit.bindings.size())) {
             const Settings cur = host.settings();
             if (reserved || (id.kind == InKind::Key && id == cur.fps.key)) {
-                set_notice(p, name + (reserved ? " opens this menu" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
+                set_notice(p, name + (reserved ? " opens this menu or the Mods window" : " is the frame rate counter hotkey") + " and cannot be bound. Press another input, Escape cancels.", true);
                 host.begin_capture();
                 return;
             }

@@ -6,6 +6,7 @@
 // image applies when it is built (fs.cpp, on the game's first file access, long before the first frame).
 #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cwctype>
 #include <cstdlib>
@@ -23,9 +24,11 @@
 #include "nxrt/dispatch.h"
 #include "nxrt/game.h"
 #include "nxrt/hooks.h"
+#include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 #include "nxrt/mod_api.h"
+#include "nxrt/mod_panels.h"
 #include "nxrt/services_api.h"
 #include "services_internal.h"
 
@@ -75,8 +78,19 @@ struct Editor {
     std::string owner_name;      // a runtime edit's owner, for the log
 };
 
+// A panel a mod added to the Mods window and the menu's Mods tab (add_panel, version 5; EmblemWeave's version 4)
+struct Panel {
+    std::string title;
+    NxModPanelFn fn;
+    void* user;
+    const Mod* owner;            // the mod whose nxmod_early / nxmod_init added it (removed if that mod declines), or null
+    bool live;                   // shown: added outside those, or that nxmod_init has returned 0
+};
+
 struct State {
     std::mutex mu;
+    std::vector<Panel> panels;
+    std::atomic<size_t> live_panels{0};   // has_panels without the lock
     std::vector<Editor> editors;
     bool edits_closed = false;   // the RomFS image has asked: later edit_file calls are too late
     std::vector<std::string> folders;   // the installed mods' folders (mod_folder), filled on first use
@@ -355,6 +369,32 @@ int64_t api_zstd_compress(const void* src, uint64_t src_size, void* dst, uint64_
     return st().codec.zstd_compress && (src || !src_size) ? st().codec.zstd_compress(src, src_size, dst, cap, level) : -1;
 }
 
+// ---- version 5 (EmblemWeave's version 4): panels in the Mods window and on the menu's Mods tab -----------------------------------------
+std::atomic<bool> g_panel_visible{false};
+
+int api_add_panel(const char* title, NxModPanelFn fn, void* user) {
+    if (!title || !*title || !fn) return 0;
+    std::lock_guard<std::mutex> lk(st().mu);
+    // added from nxmod_early / nxmod_init: kept back until nxmod_init returns 0, so the overlay never calls into a mod that is still
+    // starting or that declined
+    const bool live = st().in_init == nullptr;
+    st().panels.push_back({title, fn, user, st().in_init, live});
+    if (live) st().live_panels.fetch_add(1, std::memory_order_relaxed);
+    NXLOG_I(kTag, "%s: added the panel \"%s\" to the Mods window", st().in_init ? st().in_init->name.c_str() : "a code mod", title);
+    return 1;
+}
+int api_panel_visible() { return g_panel_visible.load(std::memory_order_relaxed) ? 1 : 0; }
+
+// The member after free_mem is open_list in this runtime's version 4 and add_panel in EmblemWeave's (mod_api.h, "Two version 4s"): both
+// have three integer or pointer arguments and answer an int, so on Windows x64 they arrive in the same registers whichever name the
+// mod called. open_list is given the calling game thread's Ctx; a title is never that Ctx.
+int list_or_panel_impl(void* a, void* b, void* c) {
+    ::Ctx* const cur = kernel::current_ctx();
+    if (cur && a == static_cast<void*>(cur))
+        return open_list(cur, reinterpret_cast<uint64_t>(b), static_cast<const ::NxModList*>(c));
+    return api_add_panel(static_cast<const char*>(a), reinterpret_cast<NxModPanelFn>(b), c);
+}
+
 void* api_alloc(uint64_t size) { return std::calloc(1, static_cast<size_t>(size ? size : 1)); }
 void api_free(void* p) { std::free(p); }
 
@@ -380,6 +420,7 @@ void withdraw(Mod* m) {
     std::lock_guard<std::mutex> lk(st().mu);
     std::erase_if(st().frame, [m](const FrameFn& f) { return f.owner == m; });
     std::erase_if(st().editors, [m](const Editor& e) { return e.owner == m; });
+    std::erase_if(st().panels, [m](const Panel& p) { return p.owner == m; });   // never live: their mod had not started
     for (auto& [name, f] : st().fns)   // the thunks stay (the game may hold their addresses): they answer 0 from now on
         if (f.owner == m) f.fn = nullptr;
 }
@@ -400,6 +441,14 @@ void start_all() {
             withdraw(m);
             NXLOG_W(kTag, "%s: declined to start (nxmod_init returned %d); its hooks are removed", m->name.c_str(), rc);
             continue;   // the DLL stays loaded: it may still own memory the runtime saw
+        }
+        {
+            std::lock_guard<std::mutex> lk(st().mu);
+            for (Panel& p : st().panels)
+                if (p.owner == m && !p.live) {
+                    p.live = true;
+                    st().live_panels.fetch_add(1, std::memory_order_relaxed);
+                }
         }
         NXLOG_I(kTag, "%s: code mod started (%zu hooks)", m->name.c_str(), m->hooks.size());
     }
@@ -468,7 +517,9 @@ void load_one(const std::string& mod, const std::filesystem::path& mod_dir, cons
     m->api.zstd_compress = &api_zstd_compress;
     m->api.alloc = &api_alloc;
     m->api.free_mem = &api_free;
-    m->api.open_list = &modapi::open_list;
+    // open_list / add_panel: one member, two names (list_or_panel)
+    m->api.add_panel = reinterpret_cast<int (*)(const char*, NxModPanelFn, void*)>(&modapi::list_or_panel);
+    m->api.panel_visible = &api_panel_visible;
     m->init = init;
     m->dir = u8(mod_dir);
     {
@@ -616,5 +667,20 @@ void load_dll_mods(uint64_t base, uint64_t frame_update) {
     if (frame_update) st().frame_hook = hook_add_entry(base + frame_update, &frame_hook);
     else NXLOG_W(kTag, "the game names no frame boundary: code mods are loaded but never started");
 }
+
+int list_or_panel(void* a, void* b, void* c) { return list_or_panel_impl(a, b, c); }
+
+// ---- the Mods window's panels (mod API version 5) ----
+std::vector<PanelInfo> panels() {
+    std::lock_guard<std::mutex> lk(st().mu);
+    std::vector<PanelInfo> out;
+    out.reserve(st().panels.size());
+    for (const Panel& p : st().panels)
+        if (p.live) out.push_back({p.title, p.owner ? p.owner->name : std::string(), p.fn, p.user});
+    return out;
+}
+bool has_panels() { return st().live_panels.load(std::memory_order_relaxed) != 0; }
+
+void set_panel_visible(bool visible) { g_panel_visible.store(visible, std::memory_order_relaxed); }
 
 }  // namespace nxrt::services::modapi
