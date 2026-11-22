@@ -3795,7 +3795,7 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
     constexpr uint64_t kStep = 64ull << 10;
     enum { kGuest, kImage, kMapped, kPrivate, kRegionKinds };
     uint64_t commit[kRegionKinds] = {}, ram[kRegionKinds] = {};
-    struct Alloc { uint64_t base = 0, commit = 0, ram = 0; };
+    struct Alloc { uint64_t base = 0, commit = 0, ram = 0, reserve = 0; };
     std::vector<Alloc> priv;                        // private allocations (by allocation base), in address order
     std::vector<PSAPI_WORKING_SET_EX_INFORMATION> q;
     std::vector<uint32_t> qi;                       // kind << 28 | index in priv + 1 (0: not private)
@@ -3804,14 +3804,20 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
     MEMORY_BASIC_INFORMATION mbi{};
     while (VirtualQuery(a, &mbi, sizeof mbi) == sizeof mbi) {
         const uint64_t lo = reinterpret_cast<uint64_t>(mbi.BaseAddress), sz = mbi.RegionSize;
+        if (mbi.State == MEM_RESERVE && mbi.Type == MEM_PRIVATE && !(lo >= 0x7000000000ull && lo < 0x8000000000ull)) {
+            const uint64_t ab = reinterpret_cast<uint64_t>(mbi.AllocationBase);
+            if (priv.empty() || priv.back().base != ab) priv.push_back({ab, 0, 0, 0});
+            priv.back().reserve += sz;
+        }
         if (mbi.State == MEM_COMMIT && !(lo >= hb && lo < hb + hs)) {
             const int k = (lo >= 0x7000000000ull && lo < 0x8000000000ull) ? kGuest : mbi.Type == MEM_IMAGE ? kImage : mbi.Type == MEM_MAPPED ? kMapped : kPrivate;
             commit[k] += sz;
             uint32_t pi = 0;
             if (k == kPrivate) {
                 const uint64_t ab = reinterpret_cast<uint64_t>(mbi.AllocationBase);
-                if (priv.empty() || priv.back().base != ab) priv.push_back({ab, 0, 0});
+                if (priv.empty() || priv.back().base != ab) priv.push_back({ab, 0, 0, 0});
                 priv.back().commit += sz;
+                priv.back().reserve += sz;
                 pi = static_cast<uint32_t>(priv.size());
             }
             for (uint64_t o = 0; o < sz; o += kStep) {
@@ -3843,11 +3849,12 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
     std::sort(priv.begin(), priv.end(), [](const Alloc& x, const Alloc& y) { return x.ram > y.ram; });
     const double mib = 1048576.0;
     std::string top;
-    char buf[96];
+    char buf[128];
     uint64_t small_ram = 0, small_n = 0;
     for (size_t i = 0; i < priv.size(); ++i) {
         if (i < 10 && priv[i].ram >= (16ull << 20)) {
-            std::snprintf(buf, sizeof buf, "%s%.0f/%.0f", top.empty() ? "" : ", ", priv[i].ram / mib, priv[i].commit / mib);
+            std::snprintf(buf, sizeof buf, "%s%.0f/%.0f of %.0f at %llx", top.empty() ? "" : ", ", priv[i].ram / mib, priv[i].commit / mib,
+                          priv[i].reserve / mib, (unsigned long long)priv[i].base);
             top += buf;
         } else if (priv[i].commit < (1ull << 20)) {
             small_ram += priv[i].ram;
@@ -3857,7 +3864,7 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
     NXLOG_I("nvn.census",
             "%s: RAM outside the heap, in RAM / committed, MiB (sampled every 64 KiB): other guest memory (modules, stacks) %.0f / %.0f, "
             "images (the exe, DLLs) %.0f / %.0f, mapped sections (the heap's views for pool imports among them) %.0f / %.0f, private %.0f / %.0f "
-            "in %zu allocations (the largest in RAM: %s; under 1 MiB each: %llu, %.0f in RAM); process heaps %u: %.0f committed, %.0f allocated",
+            "in %zu allocations (the largest in RAM, in RAM/committed of reserved at base: %s; under 1 MiB each: %llu, %.0f in RAM); process heaps %u: %.0f committed, %.0f allocated",
             why, ram[kGuest] / mib, commit[kGuest] / mib, ram[kImage] / mib, commit[kImage] / mib, ram[kMapped] / mib, commit[kMapped] / mib,
             ram[kPrivate] / mib, commit[kPrivate] / mib, priv.size(), top.empty() ? "none of 16 MiB" : top.c_str(), (unsigned long long)small_n,
             small_ram / mib, static_cast<unsigned>(nh), heap_commit / mib, heap_alloc / mib);

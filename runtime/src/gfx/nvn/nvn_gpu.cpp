@@ -761,7 +761,7 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
             if (g->dev->create_buffer(bytes, usage, gfx::MemoryUse::Staging, &r.buf, "nvn staging ring") == VK_SUCCESS && r.buf.mapped) {
                 std::memset(r.buf.mapped, 0, static_cast<size_t>(bytes));   // the pages are touched now, not by the first big upload
                 r.size = bytes;
-                NXLOG_I(kTag, "staging ring: %llu MB of host memory for texture uploads ([nvn] staging_ring_mb)", static_cast<unsigned long long>(bytes >> 20));
+                NXLOG_I(kTag, "staging ring: %llu MB of host memory for texture uploads ([nvn] staging_ring_mb), mapped at %p", static_cast<unsigned long long>(bytes >> 20), r.buf.mapped);
             } else {
                 if (r.buf.buffer) g->dev->destroy_buffer(r.buf);
                 r.buf = gfx::Buffer{};
