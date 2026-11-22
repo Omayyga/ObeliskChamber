@@ -87,6 +87,7 @@ the seven keys below. If you change one of them yourself, the menus show **Custo
 | `[fefw] fps240` | `0` | Testing only, in the ini (no menu shows it): a 240 fps target, so at low resolutions the frame rate is not stopped at 120 before the CPU is | Measuring how far your CPU goes; not for normal play |
 | `[fefw] frame_fixes` | `1` | At 60 and 120 fps, systems made for 30 fps keep their real speed: capes and hair, physics, cutscene camera shake, animation eases, map markers, menu timers, dialogue typing. Live in F1 | Set `0` only to compare. Without it those systems run 2x fast at 60 and 4x at 120 |
 | `[fefw] frame_fixes_skip` | empty | Groups to leave alone: `dt`, `shader`, `physics`, `cloth`, `quake`, `anim`, `map`, `ui`, `text` | You're narrowing down a problem for a report |
+| `[fefw] cloth_gravity` | `accel` | How gravity and wind on capes and hair are scaled at 60 and 120 fps. `match` keeps hair and capes hanging where they hang at 30 fps | A high ponytail or braid stands up at 60 or 120 fps (#160): try `match` |
 | `[fefw] smooth_step` | on with fps60 / fps120 | Spreads the game's catch-up time over frames | Leave it |
 | `[fefw] cursor_real_time` | `1` | The map cursor keeps its speed when the game runs below its target | Leave it |
 | `[nvn] dynres`, `dynres_target`, `dynres_min` | `false`, `0`, `0.7` | Dynamic resolution: lowers the render size in 10 % steps when the frame rate drops below the target. Needs an output size other than Console. F1 > Display | Slower GPUs that hold the target most of the time but dip in busy areas |
