@@ -44,6 +44,7 @@
 #include "nvn_texprep.h"
 #include "nvn_tess_gen.h"
 #include "vk_gauges.h"
+#include "video_alloc_stats.h"
 #include "nxrt/lowlat.h"
 #include "extras/hdr_nvn.h"
 #include "extras/fsr1_spatial.h"
@@ -6300,6 +6301,12 @@ void load_census(CensusEvent ev, uint64_t present) {
     NXLOG_I("nvn.census", "%s: video memory: images %lld / %.0f MiB, buffers %lld / %.0f MiB (device-local), driver allocations %lld / %.0f MiB",
             why, static_cast<long long>(nxrt::vk_gauge_images().get()), nxrt::vk_gauge_image_bytes().get() / 1048576.0, static_cast<long long>(nxrt::vk_gauge_buffers().get()),
             nxrt::vk_gauge_buffer_bytes().get() / 1048576.0, static_cast<long long>(nxrt::vk_gauge_memory_allocs().get()), nxrt::vk_gauge_memory_bytes().get() / 1048576.0);
+    // What the allocator took from the driver against what it handed out: the driver figure grew over long sessions while the live images
+    // and buffers stayed flat (#155, #162).
+    gfx::VideoAllocStats as;
+    device().alloc_stats(&as);
+    char at[512];
+    if (gfx::video_alloc_text(as, at, sizeof at) > 0) NXLOG_I("nvn.census", "%s: %s", why, at);
 }
 
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per
