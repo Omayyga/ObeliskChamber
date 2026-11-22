@@ -66,6 +66,13 @@ uint64_t heap_reserved();                       // section size
 bool heap_commit(uint64_t offset, uint64_t size);     // commit [kHeapBase+offset, +size) (page granularity)
 bool heap_decommit(uint64_t offset, uint64_t size);
 uint64_t heap_committed();                      // bytes committed through heap_commit minus heap_decommit
+
+// Memory limits scaled to the PC ([memory] scale_limits, off by default): the physical RAM the limits are sized for ([memory] test_ram_gb
+// pretends a smaller PC, for tests), whether scaling is on, and a size picked by RAM class: `small` at 10 GiB or less (an 8 GB PC), `mid` at
+// 20 GiB or less (16 GB), else `big`. With scaling off it returns `big` (the old defaults).
+uint64_t limits_ram_bytes();
+bool limits_scaled();
+int64_t limit_by_ram(int64_t big, int64_t mid, int64_t small);
 // The heap's own page table, without VirtualQuery (which walks every page of the run of identical pages after the address: up to 85 ms
 // on a 10 GiB heap): 1 when every page of [addr, addr + size) is in the primary view and this module left it committed read-write, 0 when
 // one is not, -1 when the table cannot say (outside the primary view, [memory] fast_query = false). heap_epoch() changes with every

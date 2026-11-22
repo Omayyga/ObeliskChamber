@@ -13,6 +13,7 @@
 //                                     other heaps keep their sizes)
 #include "ObeliskChamber_game.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -41,6 +42,7 @@ struct State {
     uint64_t base = 0;
     std::atomic<bool> ok{false};                // main's words checked: the counter and the table can be read
     int64_t cap_mb = 0;
+    bool cap_set = false;                       // file_cache_mb is in the config (0 then means the game's own)
     std::atomic<uint64_t> game_budget{0};       // what the set-up computed (before a cap)
     std::atomic<bool> run{false};
 };
@@ -88,11 +90,16 @@ void cache_thread(int period_s) {
         return;
     }
     s.game_budget.store(budget);
-    const uint64_t cap = static_cast<uint64_t>(s.cap_mb) << 20;
+    uint64_t cap = static_cast<uint64_t>(s.cap_mb) << 20;
+    const char* why = "[fefw] file_cache_mb";
+    if (!cap && !s.cap_set && mem::limits_scaled()) {   // a quarter of the RAM, 1536 MiB at least: 2 GB on an 8 GB PC, 4 GB on 16 GB
+        cap = std::max<uint64_t>(mem::limits_ram_bytes() / 4, 1536ull << 20) & ~((1ull << 20) - 1);
+        why = "a quarter of the RAM, [memory] scale_limits";
+    }
     if (cap && cap < budget) {
         std::memcpy(reinterpret_cast<void*>(s.base + kFileBudget), &cap, 8);
-        NXLOG_I(kTag, "file cache budget: %llu MiB instead of the game's %llu MiB ([fefw] file_cache_mb)", (unsigned long long)(cap >> 20),
-                (unsigned long long)(budget >> 20));
+        NXLOG_I(kTag, "file cache budget: %llu MiB instead of the game's %llu MiB (%s)", (unsigned long long)(cap >> 20),
+                (unsigned long long)(budget >> 20), why);
     } else {
         NXLOG_I(kTag, "file cache budget: the game's %llu MiB%s", (unsigned long long)(budget >> 20), cap ? " ([fefw] file_cache_mb is not smaller)" : "");
     }
@@ -127,7 +134,8 @@ void filecache_install(uint64_t base) {
     if (s.cap_mb > 0 && s.cap_mb < 512) s.cap_mb = 512;
     if (s.cap_mb < 0) s.cap_mb = 0;
     const int period = static_cast<int>(config_get_int("fefw", "file_cache_log", 30));
-    if ((period > 0 || s.cap_mb) && !s.run.exchange(true)) std::thread(cache_thread, period).detach();
+    s.cap_set = config_get_int("fefw", "file_cache_mb", -1) >= 0;   // 0 written out: the game's own, even with scale_limits
+    if ((period > 0 || s.cap_mb || mem::limits_scaled()) && !s.run.exchange(true)) std::thread(cache_thread, period).detach();
 }
 
 }  // namespace nxrt::games::ObeliskChamber

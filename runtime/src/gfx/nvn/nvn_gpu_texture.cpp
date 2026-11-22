@@ -2179,7 +2179,17 @@ void tex_residency_tick(Frame& f) {
     // [gfx] residency_os_pressure (default off; FEFW-recomp ebdb5a1): demote also while the OS counts this process at max(residency_percent
     // + 5, 85)% or more of the budget. Freed room inside VMA's blocks keeps the live figure low while the OS (and pool_mirror_pressure_percent,
     // which then refuses new pool copy chunks) still sees the blocks as used.
-    static const bool os_on = nxrt::config_get_bool("gfx", "residency_os_pressure", false);
+    // [memory] scale_limits makes it the default on cards with a video memory budget of 8 GiB or less: there the live figure stayed at 70% while
+    // the OS counted 96% (#126), and demotion never ran
+    static const bool os_on = [] {
+        uint64_t b = nxrt::gfx::video_budget_bytes();
+        const uint64_t t = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0))) << 20;
+        if (t && t < b) b = t;   // the test aid's smaller card counts here too
+        const bool small_card = b && b <= (8ull << 30);
+        const bool v = nxrt::config_get_bool("gfx", "residency_os_pressure", nxrt::mem::limits_scaled() && small_card);
+        NXLOG_I(kTag, "residency: the OS figure %s ([gfx] residency_os_pressure; budget %.2f GiB)", v ? "counts too" : "is not used", b / 1073741824.0);
+        return v;
+    }();
     int os_pct = os_on ? nxrt::gfx::video_usage_percent() : -1;
     uint64_t budget = nxrt::gfx::video_budget_bytes();
     if (pct < 0 || !budget) return;

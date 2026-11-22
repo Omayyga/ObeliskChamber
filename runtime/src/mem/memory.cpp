@@ -624,6 +624,35 @@ int heap_rw_pages(uint64_t addr, uint64_t size) {
 
 uint64_t heap_epoch() { return g_heap_epoch.load(std::memory_order_seq_cst); }
 
+uint64_t limits_ram_bytes() {
+    static const uint64_t r = [] {
+        const int64_t test_gb = config_get_int("memory", "test_ram_gb", 0);
+        if (test_gb > 0) return static_cast<uint64_t>(test_gb) << 30;
+        MEMORYSTATUSEX ms{};
+        ms.dwLength = sizeof ms;
+        return GlobalMemoryStatusEx(&ms) ? static_cast<uint64_t>(ms.ullTotalPhys) : uint64_t{0};
+    }();
+    return r;
+}
+
+bool limits_scaled() {
+    static const bool on = [] {
+        const bool v = config_get_bool("memory", "scale_limits", false);
+        NXLOG_I(kTag, "memory limits: %s (RAM %.1f GiB%s)", v ? "scaled to this PC ([memory] scale_limits)" : "the fixed defaults ([memory] scale_limits = false)",
+                static_cast<double>(limits_ram_bytes()) / (1024.0 * 1024.0 * 1024.0), config_get_int("memory", "test_ram_gb", 0) > 0 ? ", [memory] test_ram_gb" : "");
+        return v;
+    }();
+    return on;
+}
+
+int64_t limit_by_ram(int64_t big, int64_t mid, int64_t small) {
+    if (!limits_scaled()) return big;
+    const uint64_t r = limits_ram_bytes();
+    if (r && r <= (10ull << 30)) return small;
+    if (r && r <= (20ull << 30)) return mid;
+    return big;
+}
+
 uint64_t heap_committed() {
     std::lock_guard lk(g_heap_mu);
     return g_committed;

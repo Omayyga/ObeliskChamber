@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/memory.h"
 #include "nxrt/diag.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
@@ -753,7 +754,7 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
     StagingRing& r = g->ring;
     if (!r.tried) {
         r.tried = true;
-        const int64_t mb = config_get_int("nvn", "staging_ring_mb", 256);
+        const int64_t mb = config_get_int("nvn", "staging_ring_mb", nxrt::mem::limit_by_ram(256, 128, 64));   // [memory] scale_limits
         if (mb > 0) {
             const VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
