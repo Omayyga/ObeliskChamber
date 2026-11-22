@@ -92,9 +92,14 @@ void cache_thread(int period_s) {
     s.game_budget.store(budget);
     uint64_t cap = static_cast<uint64_t>(s.cap_mb) << 20;
     const char* why = "[fefw] file_cache_mb";
-    if (!cap && !s.cap_set && mem::limits_scaled()) {   // a quarter of the RAM, 1536 MiB at least: 2 GB on an 8 GB PC, 4 GB on 16 GB
-        cap = std::max<uint64_t>(mem::limits_ram_bytes() / 4, 1536ull << 20) & ~((1ull << 20) - 1);
-        why = "a quarter of the RAM, [memory] scale_limits";
+    if (!cap && !s.cap_set && mem::limits_scaled()) {
+        // A quarter of the RAM or 40% of the card, whichever is smaller, 1536 MiB at least: 2 GB on an 8 GB PC, 3.1 GB with an 8 GB card
+        // (#162 and #169 ran well at 3000), 4 GB on 16 GB. The set-up has run by now, so the device and its heap are known.
+        const uint64_t ram = mem::limits_ram_bytes(), vram = mem::limits_video_heap_bytes();
+        uint64_t c = ram ? ram / 4 : ~0ull;
+        if (vram) c = std::min<uint64_t>(c, vram / 10 * 4);
+        cap = std::max<uint64_t>(c, 1536ull << 20) & ~((1ull << 20) - 1);
+        why = (vram && vram / 10 * 4 < (ram ? ram / 4 : ~0ull)) ? "40% of the video memory, [memory] scale_limits" : "a quarter of the RAM, [memory] scale_limits";
     }
     if (cap && cap < budget) {
         std::memcpy(reinterpret_cast<void*>(s.base + kFileBudget), &cap, 8);
@@ -135,7 +140,8 @@ void filecache_install(uint64_t base) {
     if (s.cap_mb < 0) s.cap_mb = 0;
     const int period = static_cast<int>(config_get_int("fefw", "file_cache_log", 30));
     s.cap_set = config_get_int("fefw", "file_cache_mb", -1) >= 0;   // 0 written out: the game's own, even with scale_limits
-    if ((period > 0 || s.cap_mb || mem::limits_scaled()) && !s.run.exchange(true)) std::thread(cache_thread, period).detach();
+    // The thread decides on scale_limits itself, after the set-up, when the graphics card is known
+    if ((period > 0 || s.cap_mb || !s.cap_set) && !s.run.exchange(true)) std::thread(cache_thread, period).detach();
 }
 
 }  // namespace nxrt::games::ObeliskChamber

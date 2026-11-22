@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <functional>
 #include <cstdio>
@@ -635,14 +636,39 @@ uint64_t limits_ram_bytes() {
     return r;
 }
 
+std::atomic<uint64_t> g_limits_video_heap{0};   // the largest device-local heap, from the graphics device (0 until it exists)
+
+void limits_note_video_heap(uint64_t bytes) { g_limits_video_heap.store(bytes, std::memory_order_relaxed); }
+uint64_t limits_video_heap_bytes() { return g_limits_video_heap.load(std::memory_order_relaxed); }
+
+// [memory] scale_limits = auto (default) | true | false. auto: on for a PC with 20 GiB of RAM or less (the 8 and 16 GB classes) or a graphics
+// card whose largest device-local heap is 8.5 GiB or less (8 GB cards report 7.8 to 8.0), the PCs of #126, #155, #162 and #169; off above
+// both. Decided at the first call after the device exists (the RAM alone before it), and logged once with the reason.
 bool limits_scaled() {
-    static const bool on = [] {
-        const bool v = config_get_bool("memory", "scale_limits", false);
-        NXLOG_I(kTag, "memory limits: %s (RAM %.1f GiB%s)", v ? "scaled to this PC ([memory] scale_limits)" : "the fixed defaults ([memory] scale_limits = false)",
-                static_cast<double>(limits_ram_bytes()) / (1024.0 * 1024.0 * 1024.0), config_get_int("memory", "test_ram_gb", 0) > 0 ? ", [memory] test_ram_gb" : "");
+    static const std::string mode = [] {
+        std::string v = config_get_str("memory", "scale_limits", "auto");
+        for (char& ch : v) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         return v;
     }();
-    return on;
+    if (mode != "auto" && mode != "") {
+        static const bool v = config_get_bool("memory", "scale_limits", false);
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            NXLOG_I(kTag, "memory limits: %s ([memory] scale_limits = %s; RAM %.1f GiB)", v ? "scaled to this PC" : "the fixed defaults", mode.c_str(),
+                    static_cast<double>(limits_ram_bytes()) / (1024.0 * 1024.0 * 1024.0));
+        return v;
+    }
+    const uint64_t ram = limits_ram_bytes(), vram = limits_video_heap_bytes();
+    const bool small_ram = ram && ram <= (20ull << 30);
+    const bool small_card = vram && vram <= (17ull << 29);   // 8.5 GiB
+    const bool v = small_ram || small_card;
+    static std::atomic<int> logged{0};   // 1: logged before the device existed, 2: logged with it
+    const int want = vram ? 2 : 1;
+    if (logged.load(std::memory_order_relaxed) < want && logged.exchange(want) < want)
+        NXLOG_I(kTag, "memory limits: %s ([memory] scale_limits = auto; RAM %.1f GiB%s, video memory %s)", v ? "scaled to this PC" : "the fixed defaults",
+                static_cast<double>(ram) / (1024.0 * 1024.0 * 1024.0), small_ram ? " (20 GiB or less)" : "",
+                vram ? (small_card ? "8.5 GiB or less" : "over 8.5 GiB") : "not known yet");
+    return v;
 }
 
 int64_t limit_by_ram(int64_t over16, int64_t at16, int64_t at8) {
