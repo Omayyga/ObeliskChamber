@@ -3851,6 +3851,34 @@ void log_ram_census(const char* why) {
         if (m.owner[i]) { kind_ram[m.owner[i] - 1] += kStep; pooled += kStep; }
         if (tex[i]) { tex_ram += kStep; if (tex[i] == 2) tex_up += kStep; }
     }
+    // The rest of the working set by kind of memory: one VirtualQuery walk of the address space, a residency sample every 64 KiB of what is
+    // committed (the heap is counted above and left out here).
+    enum { kGuest, kImage, kMapped, kPrivate, kRegionKinds };
+    uint64_t rk_commit[kRegionKinds] = {}, rk_ram[kRegionKinds] = {};
+    {
+        std::vector<PSAPI_WORKING_SET_EX_INFORMATION> q;
+        std::vector<uint8_t> qk;
+        q.reserve(1 << 16);
+        uint8_t* a = nullptr;
+        MEMORY_BASIC_INFORMATION mbi{};
+        while (VirtualQuery(a, &mbi, sizeof mbi) == sizeof mbi) {
+            const uint64_t lo = reinterpret_cast<uint64_t>(mbi.BaseAddress), sz = mbi.RegionSize;
+            if (mbi.State == MEM_COMMIT && !(lo >= m.hb && lo < m.hb + m.hs)) {
+                const int k = (lo >= 0x7000000000ull && lo < 0x8000000000ull) ? kGuest : mbi.Type == MEM_IMAGE ? kImage : mbi.Type == MEM_MAPPED ? kMapped : kPrivate;
+                rk_commit[k] += sz;
+                for (uint64_t o = 0; o < sz; o += kStep) {
+                    PSAPI_WORKING_SET_EX_INFORMATION e{};
+                    e.VirtualAddress = reinterpret_cast<void*>(lo + o);
+                    q.push_back(e);
+                    qk.push_back(static_cast<uint8_t>(k));
+                }
+            }
+            a = reinterpret_cast<uint8_t*>(lo + sz);
+            if (lo + sz < lo || lo + sz >= 0x800000000000ull) break;
+        }
+        if (!q.empty() && QueryWorkingSetEx(GetCurrentProcess(), q.data(), static_cast<DWORD>(q.size() * sizeof q[0])))
+            for (size_t i = 0; i < q.size(); ++i) if (q[i].VirtualAttributes.Valid) rk_ram[qk[i]] += kStep;
+    }
     PROCESS_MEMORY_COUNTERS_EX pmc{};
     pmc.cb = sizeof pmc;
     GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc);
@@ -3871,6 +3899,11 @@ void log_ram_census(const char* why) {
             why, pmc.WorkingSetSize / mib, pmc.PrivateUsage / mib, mem::heap_committed() / mib, sampled ? "" : "(not sampled) ", heap_ram / mib,
             pooled / mib, kinds.c_str(), m.outside / mib, tex_ram / mib, tex_size / mib, tex_up / mib, (heap_ram - pooled) / mib,
             texprep::held_bytes() / mib, gpu::staging_ring_size() / mib, gpu::staging_fallback_bytes() / mib, ms);
+    NXLOG_I("nvn.census",
+            "%s: RAM outside the heap, in RAM / committed, MiB (sampled every 64 KiB): other guest memory (modules, stacks) %.0f / %.0f, "
+            "images (the exe, DLLs) %.0f / %.0f, mapped sections %.0f / %.0f, private (runtime, driver, upload buffers) %.0f / %.0f",
+            why, rk_ram[kGuest] / mib, rk_commit[kGuest] / mib, rk_ram[kImage] / mib, rk_commit[kImage] / mib, rk_ram[kMapped] / mib,
+            rk_commit[kMapped] / mib, rk_ram[kPrivate] / mib, rk_commit[kPrivate] / mib);
 }
 
 bool astc_bc1_active() { return gpu::astc_bc1_active_impl(); }
