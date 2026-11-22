@@ -143,6 +143,9 @@ endforeach()
 # The release package compiles it at its own link step (game-build/release/fefw_build.py); this build needs it here too, with the
 # runtime's zstd (nxrt_zstd) for its decoder.
 add_executable(fefw src/fefw_main.cpp src/fefw_hle.cpp res/fefw.rc)
+# fefw_hle.cpp's culling tests follow the lifted code's fused multiply-adds: the lifted libraries of this build are compiled with -mfma
+# (recomp/games/fefw/CMakeLists.txt), so this file is too; without it each of them would be a call into the CRT's fmaf.
+set_source_files_properties(src/fefw_hle.cpp PROPERTIES COMPILE_OPTIONS "-mfma")
 # The target and this folder keep the name fefw (build scripts and build folders point at them); the program is ObeliskChamber.exe.
 set_target_properties(fefw PROPERTIES OUTPUT_NAME "ObeliskChamber")
 set_source_files_properties(res/fefw.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.manifest;${CMAKE_CURRENT_SOURCE_DIR}/res/fefw.ico")
