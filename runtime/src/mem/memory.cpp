@@ -645,12 +645,12 @@ bool limits_scaled() {
     return on;
 }
 
-int64_t limit_by_ram(int64_t big, int64_t mid, int64_t small) {
-    if (!limits_scaled()) return big;
+int64_t limit_by_ram(int64_t over16, int64_t at16, int64_t at8) {
+    if (!limits_scaled()) return over16;
     const uint64_t r = limits_ram_bytes();
-    if (r && r <= (10ull << 30)) return small;
-    if (r && r <= (20ull << 30)) return mid;
-    return big;
+    if (r && r <= (10ull << 30)) return at8;
+    if (r && r <= (20ull << 30)) return at16;
+    return over16;
 }
 
 uint64_t heap_committed() {
