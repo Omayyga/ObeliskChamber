@@ -12,10 +12,17 @@
 //    A draw finds its pipeline by content (shader hashes and key bytes): it takes the finished one, links one from the parts while the whole
 //    one is still being built (the whole one then replaces it), or builds it itself.
 //
+// [nvn] prewarm_budget (0.3.2, S3): NVIDIA's driver keeps about 1 MB of RAM for every pipeline built whole, and a player's key file only grows
+// (2,000+ keys after a few chapters; the 2026-11-22 census put the prewarm at ~1.2 GB of driver memory). So at boot only the `budget` keys a
+// draw used most recently are queued (a side file, <keys>.seen, keeps the session each key was last used in); the others wait until the game
+// sets one of their programs, as with prewarm_boot = false. 0 or "all": every key at boot (before 0.3.2).
+//
 // The VkPipelineCache is also written to disk here: a background thread saves it while new pipelines appear, because a window that is
 // closed ends the process without running the shutdown path. The same thread logs a summary line every 30 s.
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -38,6 +45,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_pipeline.h"
 
@@ -81,6 +89,80 @@ std::unordered_map<uint64_t, std::vector<std::shared_ptr<Job>>> g_jobs;   // by 
 std::vector<std::thread> g_workers;
 std::thread g_saver;
 PrewarmStats g_stats;
+
+// <keys>.seen: the session each key was last used in by a draw (prewarm_budget orders the boot queue by it). Guarded by g_mu.
+constexpr char kSeenMagic[8] = {'N', 'X', 'P', 'K', 'S', 'E', 'E', 'N'};
+std::unordered_map<uint64_t, uint32_t> g_seen;               // digest -> session
+uint32_t g_session = 1;                                       // this session's number (the file's + 1)
+bool g_seen_dirty = false;
+size_t g_budget = 0;                                          // keys queued at boot (0: all)
+size_t g_deferred = 0;                                        // recorded keys left out of the boot queue by the budget
+
+std::string seen_path() { return g_path + ".seen"; }
+
+void load_seen() {
+    std::ifstream f(seen_path(), std::ios::binary);
+    if (!f) return;
+    char magic[8];
+    uint32_t ver = 0, session = 0;
+    f.read(magic, 8);
+    f.read(reinterpret_cast<char*>(&ver), 4);
+    f.read(reinterpret_cast<char*>(&session), 4);
+    if (!f || std::memcmp(magic, kSeenMagic, 8) != 0 || ver != 1) return;
+    g_session = session + 1;
+    struct E { uint64_t d; uint32_t s, pad; } e;
+    while (f.read(reinterpret_cast<char*>(&e), sizeof e)) g_seen[e.d] = e.s;
+}
+
+// Written whole (small: 16 bytes a key) by the saver thread when it changed, and once at the start so the session number moves on.
+void save_seen_locked() {
+    const std::string tmp = seen_path() + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        const uint32_t ver = 1;
+        f.write(kSeenMagic, 8);
+        f.write(reinterpret_cast<const char*>(&ver), 4);
+        f.write(reinterpret_cast<const char*>(&g_session), 4);
+        struct E { uint64_t d; uint32_t s, pad; };
+        for (const auto& [d, sess] : g_seen) {
+            const E e{d, sess, 0};
+            f.write(reinterpret_cast<const char*>(&e), sizeof e);
+        }
+        if (!f) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, seen_path(), ec);
+    if (ec) {
+        std::filesystem::remove(seen_path(), ec);
+        std::filesystem::rename(tmp, seen_path(), ec);
+    }
+    g_seen_dirty = false;
+}
+
+void mark_seen_locked(uint64_t digest) {
+    uint32_t& s = g_seen[digest];
+    if (s != g_session) {
+        s = g_session;
+        g_seen_dirty = true;
+    }
+}
+
+// [nvn] prewarm_budget: auto (default) = every key on PCs over 20 GiB of RAM with the limits not scaled, else 800 at 16 GB and 400 at 8 GB
+// ([memory] scale_limits); a number; 0 or "all" = every key.
+size_t budget_from_config() {
+    std::string v = config_get_str("nvn", "prewarm_budget", "auto");
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "all") return 0;
+    if (v == "auto" || v.empty()) return static_cast<size_t>(std::max<int64_t>(0, nxrt::mem::limit_by_ram(0, 800, 400)));
+    char* end = nullptr;
+    const long long n = std::strtoll(v.c_str(), &end, 10);
+    if (end == v.c_str() || n < 0) {
+        NXLOG_W(kTag, "[nvn] prewarm_budget = %s is not auto, all or a number: auto is used", v.c_str());
+        return static_cast<size_t>(std::max<int64_t>(0, nxrt::mem::limit_by_ram(0, 800, 400)));
+    }
+    return static_cast<size_t>(n);
+}
 
 uint64_t parse_hash(const std::string& hex) {
     uint64_t v = 0;
@@ -288,6 +370,7 @@ void saver_main() {
         if (std::chrono::steady_clock::now() >= next_summary) {
             next_summary += std::chrono::seconds(30);
             log_summary_locked();
+            if (g_seen_dirty) save_seen_locked();
         }
         if (pipeline_cache_dirty()) {
             lk.unlock();
@@ -313,8 +396,10 @@ void prewarm_init() {
             return;
         }
         load_file();
+        load_seen();
         // [nvn] prewarm_boot = false: a key waits until the game sets one of its shaders (the old behaviour)
         const bool boot = config_get_bool("nvn", "prewarm_boot", true);
+        g_budget = budget_from_config();
         g_rec_jobs.resize(g_recs.size());
         for (size_t i = 0; i < g_recs.size(); ++i) {
             auto j = std::make_shared<Job>();
@@ -322,19 +407,47 @@ void prewarm_init() {
             j->digest = digest_of(j->rec.h, j->rec.rest);
             g_rec_jobs[i] = j;
             g_jobs[j->digest].push_back(j);
-            if (boot) {
-                j->in_queue = true;
-                g_queue.push_back(j);
-                parts.push_back(j->rec);
-            }
         }
-        g_stats.queued = boot ? g_recs.size() : 0;
+        // The boot queue: most recently used first (the session a draw last used the key in; keys from before the .seen file count as
+        // session 0), then in the order they were first used. Only the first `budget` go in; the rest when the game sets their programs.
+        std::vector<size_t> order(g_recs.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        auto last = [](const std::shared_ptr<Job>& j) {
+            auto it = g_seen.find(j->digest);
+            return it == g_seen.end() ? 0u : it->second;
+        };
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return last(g_rec_jobs[a]) > last(g_rec_jobs[b]); });
+        size_t newest = 0, never = 0;
+        for (size_t i : order) {
+            const uint32_t s = last(g_rec_jobs[i]);
+            if (s + 1 == g_session) ++newest;
+            if (!s) ++never;
+        }
+        const size_t n = !boot ? 0 : (g_budget ? std::min(g_budget, order.size()) : order.size());
+        for (size_t k = 0; k < n; ++k) {
+            const auto& j = g_rec_jobs[order[k]];
+            j->in_queue = true;
+            g_queue.push_back(j);
+            parts.push_back(j->rec);
+        }
+        g_deferred = boot ? order.size() - n : 0;
+        g_stats.queued = n;
+        save_seen_locked();                                     // the session number moves on even if nothing is drawn
         const unsigned hw = std::max(1u, nxrt::host_threads());
         const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 4, 1, 6));   // was hw / 6, 1 to 4 (2 on 16 threads)
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);
-        NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; %s", g_recs.size(), g_path.c_str(), g_workers.size(),
-                boot ? "all queued from boot, in the order they were first used" : "each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)");
+        if (!boot)
+            NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)",
+                    g_recs.size(), g_path.c_str(), g_workers.size());
+        else if (!g_deferred)
+            NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; all queued from boot, most recently used first ([nvn] prewarm_budget %s; "
+                          "session %u: %zu used last session, %zu with no use on record)",
+                    g_recs.size(), g_path.c_str(), g_workers.size(), g_budget ? "not reached" : "= all", g_session, newest, never);
+        else
+            NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; the %zu most recently used queued from boot ([nvn] prewarm_budget), %zu wait "
+                          "until the game sets their programs (session %u: %zu used last session, %zu with no use on record)",
+                    g_recs.size(), g_path.c_str(), g_workers.size(), n, g_deferred, g_session, newest, never);
     }
     for (const Rec& r : parts) queue_parts(r, false);           // outside g_mu: the pipeline-library side takes its own lock
 }
@@ -347,6 +460,7 @@ void prewarm_record(const GraphicsKey& key) {
     if (g_recs.size() >= kMaxRecords || !g_digests.insert(digest_of(r.h, r.rest)).second) return;
     g_recs.push_back(r);
     g_rec_jobs.push_back(nullptr);                              // built or linked at its draw this session
+    mark_seen_locked(digest_of(r.h, r.rest));
     ++g_stats.recorded;
     append_record(r);
 }
@@ -389,6 +503,7 @@ bool prewarm_take(const GraphicsKey& key, VkPipeline* out, const std::function<b
     const uint64_t digest = digest_of(want.h, want.rest);
     std::unique_lock<std::mutex> lk(g_mu);
     if (!g_enabled) return false;
+    if (g_digests.count(digest)) mark_seen_locked(digest);     // a draw needs this key now: prewarm_budget queues it early next time
     std::shared_ptr<Job> j;
     {
         auto it = g_jobs.find(digest);
@@ -459,6 +574,7 @@ void prewarm_shutdown() {
     for (auto& t : workers) t.join();
     if (saver.joinable()) saver.join();
     std::lock_guard<std::mutex> lk(g_mu);
+    if (g_seen_dirty) save_seen_locked();
     for (auto& [h, vec] : g_jobs)
         for (auto& j : vec)
             if (j->state == 2 && j->pipe) vkDestroyPipeline(vkdev(), j->pipe, nullptr);     // built and never used
@@ -475,6 +591,9 @@ void prewarm_shutdown() {
     g_rec_jobs.clear();
     g_by_any.clear();
     g_digests.clear();
+    g_seen.clear();
+    g_session = 1;
+    g_deferred = 0;
 }
 
 PrewarmStats prewarm_stats() {
