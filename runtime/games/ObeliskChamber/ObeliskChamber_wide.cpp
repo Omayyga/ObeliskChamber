@@ -249,7 +249,10 @@ void log_edge_pane(uint64_t pane, float pw, float ph, float left, float right, c
         if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
         seen.push_back(key);
     }
-    NXLOG_I(kTag, "ultrawide: edge pane (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", static_cast<unsigned long long>(vt), pw, ph, left, right, what);
+    char name[25] = {};
+    std::memcpy(name, reinterpret_cast<const char*>(pane + kPaneName), 24);
+    NXLOG_I(kTag, "ultrawide: edge pane '%s' (vtable 0x%llx, %.0fx%.0f, x %.0f..%.0f) %s", name, static_cast<unsigned long long>(vt), pw, ph, left, right,
+            what);
 }
 
 void widen_pane(uint64_t pane, uint64_t info) {
@@ -287,11 +290,12 @@ void widen_pane(uint64_t pane, uint64_t info) {
     float a = w.k, b = 0.0f;
     if (!(at_left && at_right)) {
         if (std::fabs(ph * m11) < 1000.0f) return;
-        // A picture on one edge wider than half the layout is content, not a side panel's backdrop: the world map's art (about 1480 wide on
-        // the right) came out 1.22 times wider than high and no longer under the panes drawn over it (markers, the cursor), and the title
-        // screen's 1416-wide picture reached into the bar with `fit` (risk R12). It stays at 16:9. Upstream 83906e5 (moistman7).
-        if (right - left > 960.0f) {
-            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (content, not a side backdrop)");
+        // A picture on one edge wider than half the layout: the title screen's dark menu panel (1416 wide on the left) is a side backdrop and
+        // is stretched to the output's edge with `fill` and `stretch` (#156 follow-up: it ended at the 16:9 edge, leaving the 3D scene bare
+        // beside it). With `fit` it stays at 16:9, so it does not reach into the bars (risk R12, upstream 83906e5, moistman7). The world map's
+        // art (Img00, 1480 wide on the right) is content and kept at 16:9 by keep_16_9 above in every mode.
+        if (right - left > 960.0f && image_mode() == ImageMode::Fit) {
+            log_edge_pane(pane, pw, ph, left, right, "kept at 16:9 (wide one-edge picture, ultrawide_images = fit)");
             return;
         }
         const float edge = 960.0f * w.k;
