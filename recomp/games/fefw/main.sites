@@ -71,6 +71,9 @@ inline 0x710156f504
 inline 0x710156f89c
 inline 0x710156ffbc
 inline 0x7101570a98
+# ... and the on-screen test the route drawing calls per segment (0x13834b0, returns x within -m..1920+m and y within -m..1080+m):
+# `fcmp s2, s0` with s0 = x, compared again with 1920 + m before s0 is overwritten
+inline 0x7101383588
 # 2D effects (0xb76680): the ortho built from the effect's screen size (x22) on the stack at sp + 0x80 before `movi d0, #0`; the two
 # full-target scissors (`blr x8`, vtable + 0x58); the epilogue
 inline 0x7100b768d4
