@@ -523,6 +523,7 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     std::string gpu_want = !desc.gpu.empty() ? desc.gpu : config_get_str("gfx", "gpu", "");
 
     disable_overwolf_vulkan_layers();   // Overwolf's installed Vulkan layers collide with the driver hooks Streamline and NGX install
+    set_nvidia_shader_cache_size();     // [gfx] nv_shader_cache_gb: before the driver is loaded
     // DLSS / DLAA: Streamline must see the instance, device and swapchain calls, so the loader functions come from sl.interposer.dll
     const PFN_vkGetInstanceProcAddr sl_gipa = extras::streamline_preinit();
     if (sl_gipa) volkInitializeCustom(sl_gipa);

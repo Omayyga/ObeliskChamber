@@ -18,4 +18,7 @@ void collect_overwolf_layers(const std::string& manifest_text, const std::string
 // ([gfx] disable_overwolf_layers, default true). Registry entries and files are not touched. Does nothing elsewhere.
 void disable_overwolf_vulkan_layers();
 
+// [gfx] nv_shader_cache_gb: NVIDIA shader disk cache size and cleanup for this process, before the loader opens the driver (once).
+void set_nvidia_shader_cache_size();
+
 }  // namespace nxrt::gfx

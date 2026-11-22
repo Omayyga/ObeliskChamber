@@ -242,4 +242,34 @@ void disable_overwolf_vulkan_layers() {
 #endif
 }
 
+// [gfx] nv_shader_cache_gb (default 10): NVIDIA's driver keeps its compiled shaders in a disk cache whose default size (about 1 GiB on older
+// drivers, less on some) is smaller than this game's pipelines; once full, it evicts, and the next start compiles again (hitches or pop-in).
+// Newer drivers read the size per process from __GL_SHADER_DISK_CACHE_SIZE (bytes) and keep old entries with
+// __GL_SHADER_DISK_CACHE_SKIP_CLEANUP (Fritchii; FR1 in the 0.3.2 plan). Set before the loader opens the driver, unless the player set them.
+// Other vendors ignore the variables. 0 leaves them alone.
+void set_nvidia_shader_cache_size() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        const int64_t gb = config_get_int("gfx", "nv_shader_cache_gb", 10);
+        if (gb <= 0) return;
+        auto set_if_absent = [](const char* name, const std::string& value) {
+#ifdef _WIN32
+            char cur[64];
+            if (GetEnvironmentVariableA(name, cur, sizeof cur) > 0) return false;
+            _putenv_s(name, value.c_str());
+            SetEnvironmentVariableA(name, value.c_str());
+#else
+            if (std::getenv(name)) return false;
+            setenv(name, value.c_str(), 0);
+#endif
+            return true;
+        };
+        const bool size = set_if_absent("__GL_SHADER_DISK_CACHE_SIZE", std::to_string(static_cast<unsigned long long>(gb) << 30));
+        const bool keep = set_if_absent("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP", "1");
+        NXLOG_I(kTag, "NVIDIA shader disk cache: %s, %s ([gfx] nv_shader_cache_gb = %lld; other drivers ignore it)",
+                size ? "size set for this process" : "size left as set outside the game", keep ? "old entries kept" : "cleanup left as set outside",
+                static_cast<long long>(gb));
+    });
+}
+
 }  // namespace nxrt::gfx
