@@ -78,6 +78,9 @@ inline 0x7101383588
 # as x - 960, 540 - y): x is squeezed for the compares and put back at 0x1575644, after them
 inline 0x7101575610
 inline 0x7101575644
+# ... and the route loop's bounds (0x156d680): x within -50..1970, kept on the stack (sp + 0x12c / + 0x128) and stored before
+# `str w12, [sp, #0x124]`, where the hook moves them out
+inline 0x710156d7fc
 # 2D effects (0xb76680): the ortho built from the effect's screen size (x22) on the stack at sp + 0x80 before `movi d0, #0`; the two
 # full-target scissors (`blr x8`, vtable + 0x58); the epilogue
 inline 0x7100b768d4
