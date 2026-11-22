@@ -454,8 +454,14 @@ bool heap_create(uint64_t reserve_bytes) {
                 static_cast<unsigned long long>(size), static_cast<unsigned long long>(kHeapMax));
         return false;
     }
-    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never
-    const std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    // [memory] heap_section: auto (default) = a section unless running under Wine (memory.h), 1 = always, 0 = never. true / on / yes and
+    // false / off / no work too (#157: "false" was taken as auto, so the test kept the section)
+    std::string mode = nxrt::config_get_str("memory", "heap_section", "auto");
+    for (char& ch : mode) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (mode == "false" || mode == "off" || mode == "no") mode = "0";
+    if (mode == "true" || mode == "on" || mode == "yes") mode = "1";
+    if (mode != "0" && mode != "1" && mode != "auto" && !mode.empty())
+        NXLOG_W(kTag, "[memory] heap_section = %s is not auto, 0 or 1: auto is used", mode.c_str());
     const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     const bool wine = ntdll && GetProcAddress(ntdll, "wine_get_version");
     if (mode == "0" || (mode != "1" && wine)) {
