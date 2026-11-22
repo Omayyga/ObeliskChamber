@@ -70,7 +70,7 @@ extern "C" void nx_hle_zstd_multiframe(Ctx* c, void (*orig)(Ctx*)) {
 //
 // FEFW_HLE_CULL (environment): unset or 0 = the lifted originals (default), 1 = the native tests, 2 = both, compared: the lifted
 // answer is the one returned, and cull_verify.log beside the program gets the first 16 calls that differ and a count line at the
-// first call and at each power of four after it.
+// first call and at each power of four after it. 3 = diagnostic: the view-volume test passes every box (nothing is view-culled).
 #pragma clang fp contract(off)
 
 namespace {
@@ -209,7 +209,7 @@ int cull_mode() {
     int v = __atomic_load_n(&mode, __ATOMIC_RELAXED);
     if (v < 0) {
         const char* e = getenv("FEFW_HLE_CULL");
-        v = e && e[0] >= '1' && e[0] <= '2' && !e[1] ? e[0] - '0' : 0;
+        v = e && e[0] >= '1' && e[0] <= '3' && !e[1] ? e[0] - '0' : 0;
         __atomic_store_n(&mode, v, __ATOMIC_RELAXED);
     }
     return v;
@@ -244,6 +244,10 @@ extern "C" void nx_hle_cull_view_box(Ctx* c, void (*orig)(Ctx*)) {
     const int mode = cull_mode();
     if (mode == 0) {
         orig(c);
+        return;
+    }
+    if (mode == 3) {   // diagnostic (#156): every box passes the view-volume test (no view culling at all; slower)
+        c->x[0] = 1;
         return;
     }
     const uint64_t vol = c->x[0], box = c->x[1];
