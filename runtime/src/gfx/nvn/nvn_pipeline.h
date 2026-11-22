@@ -129,8 +129,13 @@ void note_pipeline_created(double ms, const char* what);   // counters and the d
 
 // Pipeline cache on disk ([nvn] pipeline_cache): written by a background thread while new pipelines appear and at shutdown.
 bool pipeline_cache_dirty();
-void pipeline_cache_save();
+bool pipeline_cache_save();      // true when the file was written
 void pipeline_cache_flush();
+// What the file held at start (0.3.2): the header names the driver build and GPU (vendor, device, pipelineCacheUUID). A file from another
+// driver build is useless to the driver, which drops it without a word; it is now not handed over, and the log says so.
+enum class PipelineCacheOrigin { none, loaded, stale, unreadable };
+PipelineCacheOrigin pipeline_cache_open();          // opens the cache now if no build did yet
+std::string pipeline_cache_identity();              // "vendor:device:uuid" of this GPU and driver build
 
 // ---- prewarm (nvn_prewarm.cpp) ----------------------------------------------------------------------------------------------
 // Every pipeline that had to be created at a draw is recorded in a key file ([nvn] pipeline_keys). The next run compiles the recorded

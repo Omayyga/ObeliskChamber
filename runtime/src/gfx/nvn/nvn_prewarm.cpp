@@ -17,11 +17,18 @@
 // draw used most recently are queued (a side file, <keys>.seen, keeps the session each key was last used in); the others wait until the game
 // sets one of their programs, as with prewarm_boot = false. 0 or "all": every key at boot (before 0.3.2).
 //
+// [nvn] cache_rewarm (0.3.2): the keys the budget leaves out are built into the pipeline cache anyway, one at a time on a background thread at
+// the lowest priority once the boot queue is done, and each pipeline is destroyed as soon as it is made: the cache keeps the compiled code,
+// the driver frees the ~1 MB it holds per pipeline. A key the game later asks for then builds from the cache in a millisecond or two instead
+// of compiling. A side file, <keys>.rewarm, lists the keys known to be in the cache file under this GPU and driver build (the cache's
+// identity); after a driver update the identity changes, the list starts over and the work resumes across sessions until it is done.
+//
 // The VkPipelineCache is also written to disk here: a background thread saves it while new pipelines appear, because a window that is
 // closed ends the process without running the shutdown path. The same thread logs a summary line every 30 s.
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <atomic>
 #include <chrono>
@@ -48,6 +55,10 @@
 #include "nxrt/memory.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_pipeline.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace nxrt::nvn::be::gpu {
 namespace {
@@ -99,6 +110,87 @@ size_t g_budget = 0;                                          // keys queued at 
 size_t g_deferred = 0;                                        // recorded keys left out of the boot queue by the budget
 
 std::string seen_path() { return g_path + ".seen"; }
+
+// [nvn] cache_rewarm. Guarded by g_mu.
+constexpr char kRewarmMagic[8] = {'N', 'X', 'P', 'K', 'R', 'W', 'R', 'M'};
+std::thread g_rewarm;
+bool g_rewarm_on = false;
+std::string g_rw_identity;                                    // the cache identity the done list belongs to
+std::unordered_set<uint64_t> g_rw_done;                       // keys in the cache file as last saved
+std::vector<uint64_t> g_rw_pending;                           // keys built into the cache since the last save of the file
+bool g_rw_dirty = false;
+struct RewarmStats { uint64_t todo = 0, built = 0, failed = 0, skipped = 0; double ms = 0; std::vector<float> each; bool finished = false; } g_rw;
+// Build times of the first boot prewarm builds (FR4). RTX 3070 Laptop, 2026-11-22: 0.7-0.9 ms each from a warm cache, 8.7-10.3 ms cold.
+std::vector<float> g_boot_ms;
+bool g_boot_ms_logged = false;
+
+std::string rewarm_path() { return g_path + ".rewarm"; }
+
+void load_rewarm_locked(const std::string& identity) {
+    g_rw_done.clear();
+    std::ifstream f(rewarm_path(), std::ios::binary);
+    if (!f) return;
+    char magic[8], id[64] = {};
+    uint32_t ver = 0;
+    f.read(magic, 8);
+    f.read(reinterpret_cast<char*>(&ver), 4);
+    f.read(id, sizeof id);
+    if (!f || std::memcmp(magic, kRewarmMagic, 8) != 0 || ver != 1) return;
+    if (identity != std::string(id, strnlen(id, sizeof id))) {
+        NXLOG_I(kTag, "cache rewarm: the GPU or driver build changed since the last list (%s, now %s): it starts over", std::string(id, strnlen(id, sizeof id)).c_str(),
+                identity.c_str());
+        return;
+    }
+    uint64_t d;
+    while (f.read(reinterpret_cast<char*>(&d), 8)) g_rw_done.insert(d);
+}
+
+void save_rewarm_locked() {
+    const std::string tmp = rewarm_path() + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return;
+        const uint32_t ver = 1;
+        char id[64] = {};
+        std::memcpy(id, g_rw_identity.data(), std::min(g_rw_identity.size(), sizeof id - 1));
+        f.write(kRewarmMagic, 8);
+        f.write(reinterpret_cast<const char*>(&ver), 4);
+        f.write(id, sizeof id);
+        for (uint64_t d : g_rw_done) f.write(reinterpret_cast<const char*>(&d), 8);
+        if (!f) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, rewarm_path(), ec);
+    if (ec) {
+        std::filesystem::remove(rewarm_path(), ec);
+        std::filesystem::rename(tmp, rewarm_path(), ec);
+    }
+    g_rw_dirty = false;
+}
+
+// The cache file was just written: what was built into the cache until then is in it.
+void rewarm_note_saved_locked() {
+    // before the rewarm thread has read the list and set the identity, the list is not written: it would go out with no identity and be
+    // thrown away as "another driver" when the thread reads it (the pending keys wait for the next save)
+    if (!g_rewarm_on || g_rw_pending.empty() || g_rw_identity.empty()) return;
+    for (uint64_t d : g_rw_pending) g_rw_done.insert(d);
+    g_rw_pending.clear();
+    save_rewarm_locked();
+}
+
+float median_of(std::vector<float> v) {
+    if (v.empty()) return 0.0f;
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return v[v.size() / 2];
+}
+
+// [nvn] cache_rewarm: auto (default) = on when prewarm_budget left keys out of the boot queue; true; false.
+bool rewarm_from_config(size_t deferred) {
+    std::string v = config_get_str("nvn", "cache_rewarm", "auto");
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (v == "auto" || v.empty()) return deferred > 0;
+    return !(v == "false" || v == "0" || v == "off" || v == "no");
+}
 
 void load_seen() {
     std::ifstream f(seen_path(), std::ios::binary);
@@ -290,16 +382,28 @@ void worker_main() {
             urgent = j->promoted;
         }
         VkPipeline p = VK_NULL_HANDLE;
+        const auto t0 = std::chrono::steady_clock::now();
         {
             NXFT("prewarm.build");
             GraphicsKey k;
             const ProgLayout* pl = nullptr;
             if (stub_key(j->rec, k, pl)) p = build_graphics_pipeline(k, *pl);
         }
+        const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
         bool next_urgent = false;
         {
             std::lock_guard<std::mutex> lk(g_mu);
             j->state = 2;
+            if (p && g_rewarm_on) g_rw_pending.push_back(j->digest);   // in the cache now, whoever built it
+            if (p && g_boot_ms.size() < 64) {
+                g_boot_ms.push_back(ms);
+                if (g_boot_ms.size() == 64 && !g_boot_ms_logged) {
+                    g_boot_ms_logged = true;
+                    const float med = median_of(g_boot_ms);
+                    NXLOG_I(kTag, "prewarm: the first 64 builds took %.1f ms each (median): the driver's cache %s", med,
+                            med < 2.5f ? "has them (warm)" : med < 5.0f ? "has some of them" : "is cold (a new driver, a new GPU or a cleared cache)");
+                }
+            }
             for (const auto& n : g_queue) {    // the next job this thread would take: no sleep before one a draw is near
                 if (n->state != 0) continue;
                 next_urgent = n->promoted;
@@ -317,6 +421,113 @@ void worker_main() {
         g_cv.notify_all();
         if (!urgent && !next_urgent) pace_shader_work();   // a key-file pipeline built ahead: nothing waits for it yet
     }
+}
+
+// Writes the cache file now and lists what went into it (from the rewarm thread, which holds no lock here).
+void save_rewarm_progress() {
+    size_t pending;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        pending = g_rw_pending.size();
+    }
+    if (!pending || !pipeline_cache_save()) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    std::vector<uint64_t> rest(g_rw_pending.begin() + static_cast<std::ptrdiff_t>(std::min(pending, g_rw_pending.size())), g_rw_pending.end());
+    g_rw_pending.resize(std::min(pending, g_rw_pending.size()));
+    rewarm_note_saved_locked();
+    g_rw_pending = std::move(rest);
+}
+
+// [nvn] cache_rewarm: once the boot queue is done, the keys left out of it go into the pipeline cache one by one (see the top of the file).
+void rewarm_main() {
+    log_set_thread_name("nvn-rewarm");
+    set_compile_thread_priority();
+#if defined(_WIN32)
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);   // below the other compile threads: only spare time
+#endif
+    {
+        std::unique_lock<std::mutex> lk(g_mu);
+        // the boot queue first, then a quiet minute: loads and the first visit to a place promote keys of their own
+        for (;;) {
+            g_cv.wait_for(lk, std::chrono::seconds(2), [] { return g_stop; });
+            if (g_stop) return;
+            bool busy = !g_queue.empty();
+            for (const auto& j : g_rec_jobs)
+                if (j && j->state == 1) { busy = true; break; }
+            if (!busy) break;
+        }
+        const auto settle = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        g_cv.wait_until(lk, settle, [] { return g_stop; });
+        if (g_stop) return;
+    }
+    const PipelineCacheOrigin origin = pipeline_cache_open();
+    const std::string identity = pipeline_cache_identity();
+    std::vector<std::shared_ptr<Job>> todo;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        g_rw_identity = identity;
+        load_rewarm_locked(identity);
+        if (origin != PipelineCacheOrigin::loaded && !g_rw_done.empty()) {   // the file was not used: nothing listed is in the cache now
+            NXLOG_I(kTag, "cache rewarm: the pipeline cache file was not used this time: the list of %zu keys starts over", g_rw_done.size());
+            g_rw_done.clear();
+            g_rw_dirty = true;
+        }
+        // most recently used first, as the boot queue
+        auto last = [](const std::shared_ptr<Job>& j) {
+            auto it = g_seen.find(j->digest);
+            return it == g_seen.end() ? 0u : it->second;
+        };
+        for (const auto& j : g_rec_jobs) {
+            if (!j || j->in_queue || j->state != 0) continue;   // queued or built this session: in the cache already
+            if (g_rw_done.count(j->digest)) { ++g_rw.skipped; continue; }
+            todo.push_back(j);
+        }
+        std::stable_sort(todo.begin(), todo.end(), [&](const auto& a, const auto& b) { return last(a) > last(b); });
+        g_rw.todo = todo.size();
+        NXLOG_I(kTag, "cache rewarm: %zu keys left out of the boot queue go into the pipeline cache in the background (%llu already there from earlier sessions; "
+                      "cache file %s; [nvn] cache_rewarm)",
+                todo.size(), static_cast<unsigned long long>(g_rw.skipped),
+                origin == PipelineCacheOrigin::loaded ? "loaded" : origin == PipelineCacheOrigin::stale ? "out of date" : origin == PipelineCacheOrigin::none ? "new" : "unreadable");
+    }
+    const auto t_start = std::chrono::steady_clock::now();
+    for (const auto& j : todo) {
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            if (g_stop) return;
+            if (j->in_queue || j->state != 0) continue;            // the game set its program meanwhile: a prewarm worker has it
+        }
+        GraphicsKey k;
+        const ProgLayout* pl = nullptr;
+        VkPipeline p = VK_NULL_HANDLE;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (stub_key(j->rec, k, pl)) {
+            NXFT("prewarm.rewarm");
+            p = build_graphics_pipeline(k, *pl);
+        }
+        const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (p) vkDestroyPipeline(vkdev(), p, nullptr);              // the cache keeps the code; the pipeline itself is not wanted yet
+        {
+            std::lock_guard<std::mutex> lk(g_mu);
+            if (p) {
+                ++g_rw.built;
+                g_rw.ms += ms;
+                if (g_rw.each.size() < 4096) g_rw.each.push_back(ms);
+                g_rw_pending.push_back(j->digest);
+            } else {
+                ++g_rw.failed;
+            }
+        }
+        pace_shader_work();
+        if (g_rw.built && g_rw.built % 1000 == 0) save_rewarm_progress();   // a big cache file is otherwise rewritten only after 3,000 new pipelines
+    }
+    save_rewarm_progress();
+    std::lock_guard<std::mutex> lk(g_mu);
+    g_rw.finished = true;
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    const float med = median_of(g_rw.each);
+    NXLOG_I(kTag, "cache rewarm: done, %llu keys built into the pipeline cache (%llu failed) in %.1f s, %.1f ms of building each (median, %s)",
+            static_cast<unsigned long long>(g_rw.built), static_cast<unsigned long long>(g_rw.failed), s, med,
+            med < 2.5f ? "they were in the driver's cache" : "compiled from scratch");
 }
 
 // The summary line every 30 s: what was deferred, built at the draw and built in the background since the last one (session totals in brackets).
@@ -373,9 +584,19 @@ void saver_main() {
             if (g_seen_dirty) save_seen_locked();
         }
         if (pipeline_cache_dirty()) {
+            const size_t pending = g_rw_pending.size();
             lk.unlock();
-            pipeline_cache_save();
+            const bool saved = pipeline_cache_save();
             lk.lock();
+            if (saved && pending) {
+                // only what was pending before the write is surely in the file
+                std::vector<uint64_t> rest(g_rw_pending.begin() + static_cast<std::ptrdiff_t>(pending), g_rw_pending.end());
+                g_rw_pending.resize(pending);
+                rewarm_note_saved_locked();
+                g_rw_pending = std::move(rest);
+            }
+        } else if (g_rw_dirty && !g_rw_identity.empty()) {
+            save_rewarm_locked();
         }
     }
 }
@@ -437,6 +658,8 @@ void prewarm_init() {
         const int64_t want = config_get_int("nvn", "prewarm_threads", std::clamp<int64_t>(hw / 4, 1, 6));   // was hw / 6, 1 to 4 (2 on 16 threads)
         for (int64_t i = 0; i < want; ++i) g_workers.emplace_back(worker_main);
         g_saver = std::thread(saver_main);
+        g_rewarm_on = boot && rewarm_from_config(g_deferred);
+        if (g_rewarm_on) g_rewarm = std::thread(rewarm_main);
         if (!boot)
             NXLOG_I(kTag, "prewarm: %zu recorded pipelines from %s, %zu worker threads; each queued when the game sets one of its shaders ([nvn] prewarm_boot is false)",
                     g_recs.size(), g_path.c_str(), g_workers.size());
@@ -568,6 +791,7 @@ void prewarm_shutdown() {
         g_stop = true;
         workers.swap(g_workers);
         saver = std::move(g_saver);
+        if (g_rewarm.joinable()) workers.push_back(std::move(g_rewarm));
         g_queue.clear();
     }
     g_cv.notify_all();
@@ -594,6 +818,12 @@ void prewarm_shutdown() {
     g_seen.clear();
     g_session = 1;
     g_deferred = 0;
+    g_rewarm_on = false;
+    g_rw_done.clear();
+    g_rw_pending.clear();
+    g_rw = RewarmStats{};
+    g_boot_ms.clear();
+    g_boot_ms_logged = false;
 }
 
 PrewarmStats prewarm_stats() {

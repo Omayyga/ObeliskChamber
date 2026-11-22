@@ -106,6 +106,32 @@ VkShaderStageFlagBits stage_bit(ShaderStage s) {
 
 std::mutex g_cache_mu;
 std::atomic<bool> g_cache_ready{false};
+PipelineCacheOrigin g_cache_origin = PipelineCacheOrigin::none;
+
+std::string cache_identity() {
+    const VkPhysicalDeviceProperties& p = device().properties();
+    std::string s;
+    char b[32];
+    std::snprintf(b, sizeof b, "%04x:%04x:", p.vendorID, p.deviceID);
+    s = b;
+    for (uint8_t c : p.pipelineCacheUUID) {
+        std::snprintf(b, sizeof b, "%02x", c);
+        s += b;
+    }
+    return s;
+}
+
+// The file's header (VkPipelineCacheHeaderVersionOne): length 32 or more, version 1, then vendor, device and the driver's cache UUID.
+PipelineCacheOrigin check_header(const std::vector<char>& data, std::string* why) {
+    struct Hdr { uint32_t len, ver, vendor, device; uint8_t uuid[VK_UUID_SIZE]; } h;
+    if (data.size() < sizeof h) { *why = "shorter than its header"; return PipelineCacheOrigin::unreadable; }
+    std::memcpy(&h, data.data(), sizeof h);
+    if (h.len < sizeof h || h.ver != VK_PIPELINE_CACHE_HEADER_VERSION_ONE) { *why = "not a pipeline cache header"; return PipelineCacheOrigin::unreadable; }
+    const VkPhysicalDeviceProperties& p = device().properties();
+    if (h.vendor != p.vendorID || h.device != p.deviceID) { *why = "made on another GPU"; return PipelineCacheOrigin::stale; }
+    if (std::memcmp(h.uuid, p.pipelineCacheUUID, VK_UUID_SIZE) != 0) { *why = "made by another driver build (a driver update)"; return PipelineCacheOrigin::stale; }
+    return PipelineCacheOrigin::loaded;
+}
 
 void ensure_cache() {
     if (g_cache_ready.load(std::memory_order_acquire)) return;
@@ -126,6 +152,18 @@ void ensure_cache() {
             std::fclose(f);
         }
     }
+    if (!data.empty()) {
+        std::string why;
+        g_cache_origin = check_header(data, &why);
+        if (g_cache_origin != PipelineCacheOrigin::loaded) {
+            NXLOG_W(kTag, "pipeline cache %s (%zu bytes) is %s: not used, pipelines build again from scratch this time (%s)", g_cache_path.c_str(), data.size(),
+                    g_cache_origin == PipelineCacheOrigin::stale ? "out of date" : "unreadable", why.c_str());
+            data.clear();
+            data.shrink_to_fit();
+        }
+    } else if (!g_cache_path.empty()) {
+        NXLOG_I(kTag, "pipeline cache: no file yet (%s): every pipeline builds from scratch once", g_cache_path.c_str());
+    }
     g_cache_big = data.size() >= (64u << 20);
     VkPipelineCacheCreateInfo ci = {VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
@@ -140,8 +178,10 @@ void ensure_cache() {
     g_cache_ready.store(true, std::memory_order_release);
 }
 
-void save_cache() {
-    if (!g_cache || g_cache_path.empty()) return;
+bool save_cache() {
+    if (!g_cache || g_cache_path.empty()) return false;
+    static std::mutex save_mu;                    // the cache-save thread and the rewarm thread both write it, and share the .tmp name
+    std::lock_guard<std::mutex> save_lk(save_mu);
     NXFT("pipe.cache.save");
     g_cache_dirty.store(false);
     g_new_since_save.store(0);
@@ -151,17 +191,17 @@ void save_cache() {
         // no compile into the cache while the driver reads it out (Intel only by default: pipeline_cache_locked, #124)
         std::unique_lock<std::shared_mutex> lk;
         if (pipeline_cache_locked()) lk = std::unique_lock<std::shared_mutex>(pipeline_cache_mutex());
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return;
+        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return false;
         data.resize(n);
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return;
+        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return false;
     }
     // written to a temporary file and renamed, so a process that ends in the middle of it leaves the old cache intact
     const std::string tmp = g_cache_path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return;
+        if (!f) return false;
         f.write(data.data(), static_cast<std::streamsize>(n));
-        if (!f) return;
+        if (!f) return false;
     }
     std::error_code ec;
     std::filesystem::rename(tmp, g_cache_path, ec);
@@ -169,6 +209,7 @@ void save_cache() {
         std::filesystem::remove(g_cache_path, ec);
         std::filesystem::rename(tmp, g_cache_path, ec);
     }
+    return !ec;
 }
 
 }  // namespace
@@ -194,7 +235,12 @@ bool pipeline_cache_dirty() {
     if (!g_cache_dirty.load(std::memory_order_relaxed)) return false;
     return !g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= 3000;
 }
-void pipeline_cache_save() { save_cache(); }
+bool pipeline_cache_save() { return save_cache(); }
+PipelineCacheOrigin pipeline_cache_open() {
+    ensure_cache();
+    return g_cache_origin;
+}
+std::string pipeline_cache_identity() { return cache_identity(); }
 // The write at the end of a session: skipped when the cache is the big one of a preparation and little was added.
 void pipeline_cache_flush() {
     if (!g_cache_big || g_new_since_save.load(std::memory_order_relaxed) >= 300) save_cache();
