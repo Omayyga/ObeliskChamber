@@ -24,6 +24,7 @@
 #include "nxrt/platform.h"
 #include "vk_gauges.h"
 #include "vk_layer_filter.h"
+#include "video_alloc_stats.h"
 #include <unordered_map>
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
@@ -328,6 +329,8 @@ void video_for_guard(nxrt::MemGuardVideo* out) {
     out->heap = mp ? mp->memoryHeaps[g_video_heap].size : 0;
     out->driver_bytes = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::vk_gauge_memory_bytes().get()));
     out->exact = g_budget_exact;
+    out->alloc_taken = b[g_video_heap].statistics.blockBytes;
+    out->alloc_used = b[g_video_heap].statistics.allocationBytes;
 }
 
 void register_vma_gauges(VmaAllocator a, VkPhysicalDeviceType type) {
@@ -1114,6 +1117,42 @@ ValidationStats Device::validation_stats() const {
     std::lock_guard<std::mutex> lk(impl_->first_error_mu);
     s.first_error = impl_->first_error;
     return s;
+}
+
+void Device::alloc_stats(VideoAllocStats* out) const {
+    *out = VideoAllocStats{};
+    if (!vma_) return;
+    VmaTotalStatistics t{};
+    vmaCalculateStatistics(vma_, &t);
+    const uint32_t video = device_local_heap(vma_);
+    const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+    vmaGetMemoryProperties(vma_, &mp);
+    for (uint32_t h = 0; mp && h < mp->memoryHeapCount; ++h) {
+        const VmaDetailedStatistics& d = t.memoryHeap[h];
+        VideoAllocGroup& g = h == video ? out->video : out->other;
+        g.block_bytes += d.statistics.blockBytes;
+        g.alloc_bytes += d.statistics.allocationBytes;
+        g.blocks += d.statistics.blockCount;
+        g.allocs += d.statistics.allocationCount;
+        if (h == video) {
+            out->video_free_ranges = d.unusedRangeCount;
+            out->video_largest_free = d.unusedRangeCount ? d.unusedRangeSizeMax : 0;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->small_pools_mu);
+        for (const auto& [mt, pool] : impl_->small_pools) {
+            if (!pool) continue;
+            VmaStatistics ps{};
+            vmaGetPoolStatistics(vma_, pool, &ps);
+            out->small.block_bytes += ps.blockBytes;
+            out->small.alloc_bytes += ps.allocationBytes;
+            out->small.blocks += ps.blockCount;
+            out->small.allocs += ps.allocationCount;
+        }
+    }
+    out->driver_bytes = static_cast<uint64_t>(std::max<int64_t>(0, vk_gauge_memory_bytes().get()));
+    out->valid = true;
 }
 
 void Device::validation_reset() {

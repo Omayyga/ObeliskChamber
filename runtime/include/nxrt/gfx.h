@@ -60,6 +60,8 @@ struct DeviceDesc {
     int headless = -1;                    // 1 no window/surface, 0 use the platform window, -1: [gfx] headless (env NXRT_GFX_HEADLESS)
 };
 
+struct VideoAllocStats;   // src/gfx/video_alloc_stats.h
+
 struct ValidationStats {
     uint64_t errors = 0, warnings = 0, infos = 0, verbose = 0;
     std::string first_error;              // text of the first error since the last reset
@@ -217,6 +219,8 @@ public:
     // Validation (debug builds, or [gfx] validation). The counters cover everything the layer reported since create/reset.
     bool validation_enabled() const { return validation_; }
     ValidationStats validation_stats() const;
+    // What the allocator holds and has handed out (video_alloc_stats.h). Walks the allocator: a few ms, once per load census.
+    void alloc_stats(VideoAllocStats* out) const;
     void validation_reset();
 
     // Image formats: every image is checked with vkGetPhysicalDeviceImageFormatProperties2 (format, type, tiling, usage,
