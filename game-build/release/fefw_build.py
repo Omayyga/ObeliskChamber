@@ -1300,6 +1300,8 @@ def link(runner, obj, game, env, variant):
                '-DZSTD_LEGACY_SUPPORT=0', '-I', zdir, '-I', os.path.join(RECOMP, 'include')]
         if lang == 'c++':
             cmd += ['-std=c++20', '-fno-exceptions', '-fno-rtti']
+            if variant == 'compat' and TUNE['fast_fma'] and not TUNE['cpu']:
+                cmd += ['-DNX_FAST_FMA']   # fefw_hle.cpp's culling tests: fused multiply-adds as the lifted code of this build does them
         rc, tail = runner.run(cmd + ['-c', src, '-o', o], env=env)
         if rc != 0:
             raise Fail('Compiling %s failed (exit %d):\n%s' % (os.path.basename(src), rc, tail))
