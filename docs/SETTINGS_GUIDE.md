@@ -137,6 +137,21 @@ are tuned; change them only if you know what you're testing.
 | `compile_eco` | `auto` | Shader build threads go to the efficiency cores on Intel 12th gen+ style CPUs | Leave it |
 | `compile_pace_ms` / `compile_pace_after_ms` | `8` / `20` | When a frame runs late, background shader work steps aside so the game gets the cores. Never for work a draw waits for | A small CPU with load stutter: raise `compile_pace_ms`. `0` turns it off |
 
+**Experimental: decompiled lighting shader (launcher > Set up).** A box on the Set up page, off by default. When it is ticked, Set up
+takes your translated copy of the game's lighting shader (the most expensive single draw of a frame), decompiles it, removes work that
+does not change the picture, and compiles it again:
+
+- reflection probes that do not reach a pixel are skipped (the result is the same);
+- the soft sun shadow is sampled in full (25 samples) only at shadow edges; elsewhere 5 samples decide. A shadow thinner than the
+  filter could change.
+
+Measured on an RTX 3090 Ti at 4K DLAA: the lighting pass went from about 1.85 ms to about 1.3 ms, and a walk through the town gained
+2 to 3% in frames per second with no visible difference. It has been tested on one graphics card and one area of the game, so treat it
+as a test. Ticking or clearing the box takes effect the next time you press Set up (a few seconds; nothing else is rebuilt). The edited
+shader is written to `shader_cache/edited` beside the translated ones, which stay as they are. To compare without running Set up, set
+`[nvn] edited_shaders = false` in `ObeliskChamber.ini`. If the option does nothing, the Set up log says why: the tool leaves alone a
+shader it was not written for (another game version, or `[setup] intel_shaders`).
+
 **NVIDIA: the driver's shader cache size.** Besides the game's own caches (`pipeline_cache.bin` and the shader pack), NVIDIA's driver keeps
 compiled shaders on disk, up to a size you choose in the **NVIDIA app > Graphics > Global Settings > Shader Cache Size** (older drivers:
 NVIDIA Control Panel > Manage 3D settings). Leave it at **Driver Default** or larger. **Disabled** or a small size makes the driver throw

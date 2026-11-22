@@ -390,6 +390,8 @@ private:
 
     mutable std::mutex lock_;
     std::string dir_;
+    std::string edited_dir_;                                                // [nvn] edited_shaders: the folder of edited modules (open)
+    std::unordered_set<std::string> edited_;                                // hashes that have <edited_dir_>/<hash>.spv (set in open, then read only)
     bool open_ = false;
     std::string results_;                                                   // results.tsv, read once
     int resources_col_ = -1;                                                // column index of "resources"

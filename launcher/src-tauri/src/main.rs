@@ -45,6 +45,8 @@ struct Config {
     lang: String,
     /// Draw the launcher with the game's own menu art, read from the dump when the launcher starts (read_game_layout).
     game_art: bool,
+    /// Set up's "Experimental: decompiled lighting shader" box (setup.rs lighting_step). Off unless the player ticks it.
+    lighting_edit: bool,
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -120,6 +122,7 @@ fn paths(cfg: &Config) -> Result<setup::Paths, String> {
         dlc: report.dlc_dir.map(PathBuf::from),
         game_dir,
         package: package_tools(),
+        lighting_edit: cfg.lighting_edit,
     })
 }
 

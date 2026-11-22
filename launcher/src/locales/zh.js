@@ -129,6 +129,8 @@ export const zh = {
     'setup.setUp': '开始构建',
     'setup.progressDone': '{done} / {total}。',
     'setup.pauseHint': '暂停会停止工具进程；已完成的工作会保留，再次按「开始构建」会从那里继续。',
+    'setup.lightingEdit': '实验性：反编译光照着色器',
+    'setup.lightingEditNote': '默认关闭。勾选后，构建会取出你已转译的游戏光照着色器，将其反编译，去掉不影响画面的计算，再重新编译：跳过照不到当前像素的反射探针，太阳软阴影只在阴影边缘做完整采样。测试中（RTX 3090 Ti，4K）帧率提高 2% 到 3%，画面看不出差别。目前只在一款显卡和游戏的一个区域测试过。如果光照或阴影看起来不对，取消勾选并再次按「开始构建」：游戏会恢复使用转译的着色器。勾选或取消后，下次构建时生效，只需几秒。',
     'setup.pause': '暂停',
     'setup.goToPlay': '去游玩',
     'setup.openFullLog': '打开完整日志',

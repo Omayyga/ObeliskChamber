@@ -131,6 +131,8 @@ export const en = {
     'setup.setUp': 'Set up',
     'setup.progressDone': '{done} of {total}. ',
     'setup.pauseHint': 'Pause stops the tools; finished work is kept and Set up continues from there.',
+    'setup.lightingEdit': 'Experimental: decompiled lighting shader',
+    'setup.lightingEditNote': 'Off by default. When ticked, Set up takes your translated copy of the game\'s lighting shader, decompiles it, removes work that does not change the picture, and compiles it again: reflection probes that do not reach a pixel are skipped, and soft sun shadows are sampled in full only at shadow edges. In testing it gave 2 to 3% more frames per second at 4K on an RTX 3090 Ti, with no visible difference. It has been tested on one graphics card and one area of the game. If lighting or shadows look wrong, clear the box and press Set up again: the game goes back to the translated shader. Ticking or clearing the box takes effect the next time Set up runs, which takes a few seconds.',
     'setup.pause': 'Pause',
     'setup.cpuProblem': "This processor cannot run the game.",
     'setup.cpuCompat': 'Compatible build for this processor.',

@@ -136,6 +136,19 @@ Mirror "$root\recomp\nxrecomp" 'tools\build\recomp\nxrecomp' @('*__pycache__*', 
 Mirror "$root\recomp\include\nxrecomp" 'tools\build\recomp\include\nxrecomp'
 foreach ($f in 'CMakeLists.txt', 'config.py', 'main.sites', 'hot.txt', 'inline.txt') { Put "$root\recomp\games\fefw\$f" "tools\build\recomp\games\fefw\$f" }
 Put "$root\tools\shaders\ampere\extract_corpus.py" 'tools\shaders\extract_corpus.py'
+# Set up's optional "decompiled lighting shader" step (experimental, off unless the player ticks the box): the tool, and
+# spirv-cross and glslang from the Vulkan SDK on this PC. Without the SDK the package is made without the two programs and the
+# step then says it cannot run; nothing else depends on them.
+Put "$root\tools\shaders\lighting_edit.py" 'tools\shaders\lighting_edit.py'
+$sdkBin = if ($env:VULKAN_SDK) { Join-Path $env:VULKAN_SDK 'Bin' } else { '' }
+if ($sdkBin -and (Test-Path (Join-Path $sdkBin 'spirv-cross.exe')) -and (Test-Path (Join-Path $sdkBin 'glslang.exe'))) {
+    Put (Join-Path $sdkBin 'spirv-cross.exe') 'tools\shaders\bin\spirv-cross.exe'
+    Put (Join-Path $sdkBin 'glslang.exe') 'tools\shaders\bin\glslang.exe'
+    Put "$root\tools\shaders\licenses\LICENSE.SPIRV-Cross.Apache-2.0" 'licenses\LICENSE.SPIRV-Cross.Apache-2.0.txt'
+    Put "$root\tools\shaders\licenses\LICENSE.glslang.txt" 'licenses\LICENSE.glslang.txt'
+} else {
+    Write-Warning "VULKAN_SDK has no Bin\spirv-cross.exe and Bin\glslang.exe: the package is made without them, so Set up's decompiled lighting shader option will do nothing"
+}
 (Get-Content -Raw "$root\game-build\release\README.txt").Replace('@VERSION@', $Version) | Set-Content -NoNewline (Join-Path $pkg 'README.txt')
 Put "$root\LICENSE" 'LICENSE.txt'
 Put "$root\LEGAL.md" 'LEGAL.txt'

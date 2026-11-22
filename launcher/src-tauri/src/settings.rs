@@ -219,6 +219,7 @@ mod tests {
             dlc: None,
             game_dir: game.to_path_buf(),
             package: None,
+            lighting_edit: false,
         }
     }
 
