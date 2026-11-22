@@ -24,7 +24,8 @@
 // Cloth gravity and wind ([fefw] cloth_gravity): each cloth point is moved by (velocity kept + gravity + wind) and then turned a share k
 // of the way back to its parent bone's direction. That turn acts on the position, so where a point settles is about gravity x (1 - k) / k.
 // With k -> 1 - (1 - k)^s (about k x s) and gravity x s^2 (`accel`, the first rule), a point settles s times as far from its rest pose as
-// at 30 fps: half the sag at 60, a quarter at 120. Hair whose rest pose points up (a high ponytail) then stands up (#160). `match` scales
+// at 30 fps: half the sag at 60, a quarter at 120. Hair whose rest pose points up (a high ponytail) then stands up (#160). `match` (the
+// default; checked in game at 120 fps, where the step's own factor at sp + 0x90 stays 1) scales
 // gravity and wind by F = Q (1 - Q^s) / ((1 - Q) Q^s), Q = 1 - k, which keeps the settled position of the 30 fps step for every k (F is
 // about s for a weak turn and tends to s^2 only as k -> 0, where nothing holds the point and gravity is a plain acceleration).
 //
@@ -117,7 +118,7 @@ struct State {
     std::atomic<float> s{1.0f};                 // the frame's share of a 1/30 s step
     std::atomic<float> s_count{1.0f};           // native / target, for frame counts
     std::atomic<bool> tick{true};               // a 30 Hz step falls in this frame
-    std::atomic<bool> cloth_match{false};       // [fefw] cloth_gravity = match
+    std::atomic<bool> cloth_match{true};        // [fefw] cloth_gravity = match (default)
     std::atomic<bool> cloth_logged{false};
     float tick_acc = 0.0f;                      // main thread (frame_step)
     // on a cache line of its own, apart from the read-mostly per-frame fields above, so the worker threads' counter adds do not
@@ -414,9 +415,9 @@ void frame_install(uint64_t base) {
     s.on.store(config_get_bool("fefw", "frame_fixes", true));
     s.skip = parse_skip(config_get_str("fefw", "frame_fixes_skip", ""));
     {
-        const std::string g = config_get_str("fefw", "cloth_gravity", "accel");
-        if (g != "accel" && g != "match") NXLOG_W(kTag, "[fefw] cloth_gravity = %s: not accel or match, accel is used", g.c_str());
-        s.cloth_match.store(g == "match");
+        const std::string g = config_get_str("fefw", "cloth_gravity", "match");
+        if (g != "accel" && g != "match") NXLOG_W(kTag, "[fefw] cloth_gravity = %s: not match or accel, match is used", g.c_str());
+        s.cloth_match.store(g != "accel");
     }
     size_t n = 0;
     for (const MovkSite& m : kMovk) n += hook_add_inline(base + m.off + 4, &hook_movk, const_cast<MovkSite*>(&m)) ? 1 : 0;
