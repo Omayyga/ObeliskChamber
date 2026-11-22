@@ -25,7 +25,8 @@
 //   markers      world-to-screen into 1920x1080 UI units (x * 960 + 960) at 13 sites: x * k, as the camera is k times wider. The
 //                off-screen indicator (0x18f3760, x * 960 against its box; not in Kompas9's patch) gets the same. The world map's spots
 //                (0x156bf44) are skipped outside 0..1920 plus a margin: those bounds move out by 960 (k - 1) a side; a second test
-//                (0x156c0fc, x within -100..2020) gets x moved toward the centre by 1/k for its compares (#156).
+//                (0x156c0fc, x within -100..2020) and the 13 of the route drawing (x within 0..1920) get x moved toward the centre by
+//                1/k for their compares (#156).
 //   2D effects   the effect draw (0xb76680) builds its own ortho from the effect's screen size: a 16:9 one gets 1/k, and the two full-
 //                target scissors of the call are cut to the centred 16:9 part (particles off the 16:9 screen stay hidden, as on the
 //                console); the scissor is put back to the whole target at its end.
@@ -83,6 +84,9 @@ constexpr uint64_t kMarkerS2 = 0xa7f148;          // `fmadd s2, s2, s3, s3` (s3 
 constexpr uint64_t kEdgeMarker = 0x18f38c0;       // `fmul s3, s2, s1` (s2 = 960) in the off-screen indicator 0x18f3760
 constexpr uint64_t kSpotCull = 0x156bf44;         // world map spots: `fcmp s1, s0` of the on-screen test, s1 / s2 = left / right bound (0 / 1920 +- margin)
 constexpr uint64_t kSpotCull2 = 0x156c0fc;        // the same spot's second test: `fcmp s0, s1`, s0 = x against -100, then against 2020
+// the route drawing's on-screen tests: `fcmp s0, #0.0`, then s0 against 1920, then `mov s0, v0.s[1]` (x is not read again)
+constexpr uint64_t kRouteXTests[] = {0x156df34, 0x156e674, 0x156f37c, 0x156f3b4, 0x156f3ec, 0x156f424, 0x156f45c,
+                                     0x156f494, 0x156f4cc, 0x156f504, 0x156f89c, 0x156ffbc, 0x1570a98};
 constexpr uint64_t kFxOrtho = 0xb768d4;           // in 0xb76680: x22 = the effect's screen size (s32 w, h), the ortho at sp + 0x80
 constexpr uint64_t kFxScissor1 = 0xb76bb0;        // `blr x8`: SetScissor(x0 = command wrapper, 0, 0, w, h) (vtable + 0x58)
 constexpr uint64_t kFxScissor2 = 0xb76cfc;
@@ -635,6 +639,7 @@ void wide_install(uint64_t base, int out_w, int out_h) {
         add(kEdgeMarker, &hook_edge_marker);
         add(kSpotCull, &hook_spot_cull);
         add(kSpotCull2, &hook_spot_cull2);
+        for (uint64_t off : kRouteXTests) add(off, &hook_spot_cull2);   // the same squeeze of s0 for the two compares
     }
     if (on("statgraph")) add(kStatGraph, &hook_stat_graph);
     w.map_diag = config_get_bool("fefw", "ultrawide_map_diag", false);

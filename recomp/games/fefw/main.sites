@@ -56,6 +56,21 @@ inline 0x710156bf44
 # ... and a second test further on, after the spot's icon position is converted again: x within -100..2020 (`fcmp s0, s1` at 0x156c0fc,
 # s0 = x, used for both bounds)
 inline 0x710156c0fc
+# ... and the on-screen tests of the world map's route drawing (0x156d680 and the code after it): `fcmp s0, #0.0` before x is
+# compared with 0 and 1920; s0 is overwritten with y right after
+inline 0x710156df34
+inline 0x710156e674
+inline 0x710156f37c
+inline 0x710156f3b4
+inline 0x710156f3ec
+inline 0x710156f424
+inline 0x710156f45c
+inline 0x710156f494
+inline 0x710156f4cc
+inline 0x710156f504
+inline 0x710156f89c
+inline 0x710156ffbc
+inline 0x7101570a98
 # 2D effects (0xb76680): the ortho built from the effect's screen size (x22) on the stack at sp + 0x80 before `movi d0, #0`; the two
 # full-target scissors (`blr x8`, vtable + 0x58); the epilogue
 inline 0x7100b768d4
