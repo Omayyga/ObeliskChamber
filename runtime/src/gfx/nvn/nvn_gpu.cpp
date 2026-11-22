@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/memory.h"
 #include "nxrt/diag.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
@@ -753,7 +754,7 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
     StagingRing& r = g->ring;
     if (!r.tried) {
         r.tried = true;
-        const int64_t mb = config_get_int("nvn", "staging_ring_mb", 256);
+        const int64_t mb = config_get_int("nvn", "staging_ring_mb", nxrt::mem::limit_by_ram(256, 128, 64));   // [memory] scale_limits
         if (mb > 0) {
             const VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
@@ -761,7 +762,7 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
             if (g->dev->create_buffer(bytes, usage, gfx::MemoryUse::Staging, &r.buf, "nvn staging ring") == VK_SUCCESS && r.buf.mapped) {
                 std::memset(r.buf.mapped, 0, static_cast<size_t>(bytes));   // the pages are touched now, not by the first big upload
                 r.size = bytes;
-                NXLOG_I(kTag, "staging ring: %llu MB of host memory for texture uploads ([nvn] staging_ring_mb)", static_cast<unsigned long long>(bytes >> 20));
+                NXLOG_I(kTag, "staging ring: %llu MB of host memory for texture uploads ([nvn] staging_ring_mb), mapped at %p", static_cast<unsigned long long>(bytes >> 20), r.buf.mapped);
             } else {
                 if (r.buf.buffer) g->dev->destroy_buffer(r.buf);
                 r.buf = gfx::Buffer{};
@@ -807,6 +808,10 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
     }
     return {};
 }
+
+// Host memory the staging ring holds (0 before the first upload or without a ring): the RAM census (nvn_objects.cpp).
+uint64_t staging_ring_size() { return g ? static_cast<uint64_t>(g->ring.size) : 0; }
+uint64_t staging_fallback_bytes() { return g_ring_fallback_bytes.load(std::memory_order_relaxed); }
 
 UploadAlloc Frame::staging(VkDeviceSize size) {
     Slot& s = *static_cast<Slot*>(slot);

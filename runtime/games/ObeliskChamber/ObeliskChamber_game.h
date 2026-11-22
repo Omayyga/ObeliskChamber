@@ -86,6 +86,10 @@ bool res_rt_pool_extended();
 // ObeliskChamber_crowd.cpp: [fefw] npc_distance scales the hub crowd's NPC model limit, display distance and draw budget (1 = the game's own:
 // nothing installed). Installed from play_install, removed from play_remove.
 void crowd_install(uint64_t base);
+// The game's file cache (ObeliskChamber_filecache.cpp): a "file cache" line every [fefw] file_cache_log seconds, and [fefw] file_cache_mb.
+void filecache_install(uint64_t base);
+uint64_t filecache_used_bytes();     // 0 before the game's set-up or when the build does not match
+uint64_t filecache_budget_bytes();
 void crowd_remove();
 
 // ObeliskChamber_wide.cpp: outputs wider than 16:9 ([fefw] ultrawide; hooks after Kompas9's ultrawide patch). res_install calls wide_install with
