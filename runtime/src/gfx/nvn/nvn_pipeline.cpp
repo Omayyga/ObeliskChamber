@@ -218,7 +218,52 @@ uint64_t GraphicsKey::hash() const {
 
 // A module for SPIR-V words. The translator declares OpCapability Float64 in every module although no module uses a 64-bit float;
 // devices without shaderFloat64 (Intel iGPUs) reject that, so the capability is dropped when no OpTypeFloat 64 exists.
-static VkShaderModule create_module(const std::vector<uint32_t>& words, const char* what) {
+static VkShaderModule create_module(const std::vector<uint32_t>& words_in, const char* what) {
+    // [nvn] shader_replace_dir (measurement, default empty): a folder of replacement modules. A file named <hash>_<words>.spv, the shader's
+    // 16-digit hash and the word count of the module being made, takes that module's place before any of the changes below. The word
+    // count keeps a replacement for the translated shader away from the variants made from it (private outputs, HDR). It is for testing
+    // whether the same shader built another way (optimised, or decompiled and compiled again) runs faster; nothing ships such a file.
+    static const std::string replace_dir = config_get_str("nvn", "shader_replace_dir", "");
+    std::vector<uint32_t> replaced;
+    if (!replace_dir.empty() && what) {
+        const std::filesystem::path f = std::filesystem::path(replace_dir) / (std::string(what) + "_" + std::to_string(words_in.size()) + ".spv");
+        std::error_code ec;
+        const uintmax_t bytes = std::filesystem::file_size(f, ec);
+        if (!ec && bytes >= 20 && bytes % 4 == 0) {
+            std::vector<uint32_t> w(bytes / 4);
+            std::ifstream in(f, std::ios::binary);
+            if (in.read(reinterpret_cast<char*>(w.data()), static_cast<std::streamsize>(bytes)) && w[0] == 0x07230203u) {
+                replaced = std::move(w);
+                NXLOG_I(kTag, "%s: module of %zu words replaced by %s (%zu words; [nvn] shader_replace_dir)", what, words_in.size(),
+                        f.filename().string().c_str(), replaced.size());
+            } else {
+                NXLOG_W(kTag, "%s: %s is not a SPIR-V module, not used ([nvn] shader_replace_dir)", what, f.filename().string().c_str());
+            }
+        } else {
+            // A file for this hash under another word count: say which count this module has, so the file can be named for it.
+            static const std::unordered_set<std::string> hashes = [] {
+                std::unordered_set<std::string> v;
+                std::error_code e;
+                for (const auto& d : std::filesystem::directory_iterator(replace_dir, e)) {
+                    const std::string n = d.path().filename().string();
+                    const size_t u = n.find('_');
+                    if (u != std::string::npos) v.insert(n.substr(0, u));
+                }
+                NXLOG_I(kTag, "[nvn] shader_replace_dir = %s: files for %zu shader(s)", replace_dir.c_str(), v.size());
+                return v;
+            }();
+            static std::atomic<int> noted{0};
+            if (hashes.count(what) && noted.fetch_add(1, std::memory_order_relaxed) < 16) {
+                // The module as it is made is written beside the file as <hash>_<words>.orig.spv, to build the replacement from.
+                std::filesystem::path o = f;
+                o.replace_extension(".orig.spv");
+                if (!std::filesystem::exists(o, ec)) std::ofstream(o, std::ios::binary).write(reinterpret_cast<const char*>(words_in.data()), static_cast<std::streamsize>(words_in.size() * 4));
+                NXLOG_W(kTag, "%s: this module has %zu words and the folder has no %s; written as %s ([nvn] shader_replace_dir)", what, words_in.size(),
+                        f.filename().string().c_str(), o.filename().string().c_str());
+            }
+        }
+    }
+    const std::vector<uint32_t>& words = replaced.empty() ? words_in : replaced;
     std::vector<uint32_t> fixed;
     const std::vector<uint32_t>* code = &words;
     {
@@ -278,6 +323,52 @@ static VkShaderModule create_module(const std::vector<uint32_t>& words, const ch
             static std::atomic<int> logged{0};
             if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
                 NXLOG_I(kTag, "%s: %d float add loop(s) to a buffer are native atomic adds", what ? what : "shader", n);
+        }
+    }
+    // [nvn] relax_exact (measurement, default empty): shader hash prefixes, separated by commas or spaces, or `all`. Those modules lose
+    // their NoContraction decorations (spirv_relax_exact), so the driver's compiler may fuse and reorder their float maths. The Nsight
+    // trace of 0.3.1 shows the lighting shader 6385c299 holding 165 live registers; this tests whether the exact marks cost registers.
+    static const auto hash_list = [](const char* key) {
+        std::vector<std::string> v;
+        std::string cur;
+        for (const char c : config_get_str("nvn", key, "") + " ") {
+            if (c == ',' || c == ' ' || c == ';') {
+                if (!cur.empty()) v.push_back(cur);
+                cur.clear();
+            } else {
+                cur.push_back(c);
+            }
+        }
+        return v;
+    };
+    static const auto listed = [](const std::vector<std::string>& list, const char* hash) {
+        if (list.empty() || !hash) return false;
+        const std::string h = hash;
+        for (const std::string& r : list)
+            if (r == "all" || h.compare(0, r.size(), r) == 0) return true;
+        return false;
+    };
+    static const std::vector<std::string> relax = hash_list("relax_exact");
+    std::vector<uint32_t> relaxed;
+    if (listed(relax, what)) {
+        const int n = spirv_relax_exact(*code, relaxed);
+        if (n > 0) {
+            code = &relaxed;
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d exact-maths marks dropped ([nvn] relax_exact)", what, n);
+        }
+    }
+    // [nvn] no_unroll (measurement, default empty): the same kind of list. Every loop of those modules gets the DontUnroll loop control
+    // (spirv_no_unroll). Nsight shows the driver turning the lighting shader's 18,000 instructions into about 60,600 machine instructions,
+    // most likely by unrolling its 7 loops; this tests whether the hint is honoured and what it does to registers and time.
+    static const std::vector<std::string> no_unroll = hash_list("no_unroll");
+    std::vector<uint32_t> hinted;
+    if (listed(no_unroll, what)) {
+        const int n = spirv_no_unroll(*code, hinted);
+        if (n > 0) {
+            code = &hinted;
+            static std::atomic<int> logged{0};
+            if (logged.fetch_add(1, std::memory_order_relaxed) < 8) NXLOG_I(kTag, "%s: %d loop(s) marked DontUnroll ([nvn] no_unroll)", what, n);
         }
     }
     // [nvn] spirv_salt (measurement only): an OpSourceExtension with the salt in every module gives the driver a new shader hash, so a run
