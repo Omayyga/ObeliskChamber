@@ -30,6 +30,7 @@ namespace {
 
 constexpr const char* kTag = "fefw.filecache";
 constexpr uint64_t kFileBudget = 0x21a67a8;     // u64: the File entry's size in the heap table, written by the set-up
+constexpr uint64_t kTableDefault = 4000ull << 20;   // the File entry in the file, before the set-up
 constexpr uint64_t kFileUsed = 0x2206790;       // u64: bytes the file cache holds (GetSizeOf of each block)
 constexpr uint64_t kBudgetStore = 0x651fcc;     // `str x8, [x21, #0x28]` (x21 = table + 8): the computed File budget is stored
 constexpr uint32_t kBudgetStoreWord = 0xf90016a8u;   // checked: the table and the code are this build's
@@ -38,9 +39,9 @@ constexpr uint32_t kUsedAddWord = 0xf8e00109u;
 
 struct State {
     uint64_t base = 0;
+    std::atomic<bool> ok{false};                // main's words checked: the counter and the table can be read
     int64_t cap_mb = 0;
     std::atomic<uint64_t> game_budget{0};       // what the set-up computed (before a cap)
-    uint64_t initial = 0;                       // the entry before the set-up (the table's default)
     std::atomic<bool> run{false};
 };
 State& st() {
@@ -66,9 +67,20 @@ uint64_t rd64(uint64_t a) {
 void cache_thread(int period_s) {
     State& s = st();
     const double mib = 1048576.0;
+    // play mode starts before the game's modules are mapped: wait for main's code, then check this build's words
+    for (int i = 0; i < 20 * 60 && !mem::is_mapped(s.base + kUsedAdd, 4); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!word_is(s.base + kUsedAdd, kUsedAddWord) || !word_is(s.base + kBudgetStore, kBudgetStoreWord)) {
+        uint32_t a = 0, b = 0;
+        if (mem::is_mapped(s.base + kUsedAdd, 4)) std::memcpy(&a, reinterpret_cast<const void*>(s.base + kUsedAdd), 4);
+        if (mem::is_mapped(s.base + kBudgetStore, 4)) std::memcpy(&b, reinterpret_cast<const void*>(s.base + kBudgetStore), 4);
+        NXLOG_W(kTag, "main's code is not update 131072's at the file cache counter (0x%08x) or the budget store (0x%08x): no file cache lines, "
+                "[fefw] file_cache_mb ignored", a, b);
+        return;
+    }
+    s.ok.store(true);
     // The entry holds the table's default (4000 MiB) until the set-up replaces it with the computed budget; after a minute with no change the
     // default is taken as the budget
-    const uint64_t initial = s.initial;
+    const uint64_t initial = kTableDefault;
     uint64_t budget = initial;
     for (int i = 0; i < 20 * 60 && (budget = rd64(s.base + kFileBudget)) == initial; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (!budget) {
@@ -100,30 +112,20 @@ void cache_thread(int period_s) {
 
 uint64_t filecache_used_bytes() {
     const State& s = st();
-    return s.base ? rd64(s.base + kFileUsed) : 0;
+    return s.ok.load() ? rd64(s.base + kFileUsed) : 0;
 }
 uint64_t filecache_budget_bytes() {
     const State& s = st();
-    return s.base ? rd64(s.base + kFileBudget) : 0;
+    return s.ok.load() ? rd64(s.base + kFileBudget) : 0;
 }
 
 void filecache_install(uint64_t base) {
     State& s = st();
     if (s.base) return;
-    if (!word_is(base + kUsedAdd, kUsedAddWord)) {
-        NXLOG_W(kTag, "the file cache counter is not where update 131072 has it: no file cache lines, [fefw] file_cache_mb ignored");
-        return;
-    }
     s.base = base;
-    s.initial = rd64(base + kFileBudget);
     s.cap_mb = config_get_int("fefw", "file_cache_mb", 0);
     if (s.cap_mb > 0 && s.cap_mb < 512) s.cap_mb = 512;
     if (s.cap_mb < 0) s.cap_mb = 0;
-    if (!word_is(base + kBudgetStore, kBudgetStoreWord)) {
-        NXLOG_W(kTag, "the File budget store is not where update 131072 has it: no file cache lines, [fefw] file_cache_mb ignored");
-        s.base = 0;
-        return;
-    }
     const int period = static_cast<int>(config_get_int("fefw", "file_cache_log", 30));
     if ((period > 0 || s.cap_mb) && !s.run.exchange(true)) std::thread(cache_thread, period).detach();
 }
