@@ -808,6 +808,10 @@ UploadAlloc ring_alloc(VkDeviceSize size, uint64_t serial) {
     return {};
 }
 
+// Host memory the staging ring holds (0 before the first upload or without a ring): the RAM census (nvn_objects.cpp).
+uint64_t staging_ring_size() { return g ? static_cast<uint64_t>(g->ring.size) : 0; }
+uint64_t staging_fallback_bytes() { return g_ring_fallback_bytes.load(std::memory_order_relaxed); }
+
 UploadAlloc Frame::staging(VkDeviceSize size) {
     Slot& s = *static_cast<Slot*>(slot);
     if (UploadAlloc a = ring_alloc(size, serial)) return a;

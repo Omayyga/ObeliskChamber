@@ -44,6 +44,8 @@
 #include "nvn_astc_gpu.h"
 #include "nvn_texdata.h"
 #include "nvn_texprep.h"
+#include <windows.h>
+#include <psapi.h>
 #include "nvn_texup.h"
 #include "nvn_texture_layout.h"
 #include "tegra_tiling.h"
@@ -3786,6 +3788,90 @@ void buffer_views_forget(VkBuffer buffer) {
 }
 
 }  // namespace gpu
+
+// The RAM census. The memory line's footprint is private commit, and the game's heap is a pagefile-backed section, so it is not in it: the
+// heap pages the game has touched are RAM the log never showed (#126: 0.1 GB free of 7.9 GB with a 3.1 GB footprint). One QueryWorkingSetEx
+// over the heap, one address every 64 KiB, says which parts of it are in RAM; the game's pools and the texture storage are counted against it.
+void log_ram_census(const char* why) {
+    const auto t0 = std::chrono::steady_clock::now();
+    constexpr uint64_t kStep = 64ull << 10;
+    struct Map {
+        uint64_t hb, hs;
+        size_t n;
+        std::vector<uint8_t> in, owner;   // owner: 0 none, else 1 + pool kind (first claim wins)
+        uint64_t kind_size[4] = {}, outside = 0;
+        bool span(uint64_t lo, uint64_t hi, size_t* a, size_t* b) const {
+            if (hi <= hb || lo >= hb + hs || lo >= hi) return false;
+            lo = std::max(lo, hb);
+            hi = std::min(hi, hb + hs);
+            *a = static_cast<size_t>((lo - hb) / kStep);
+            *b = std::min(n, static_cast<size_t>((hi - hb + kStep - 1) / kStep));
+            return true;
+        }
+    } m;
+    m.hb = mem::kHeapBase;
+    m.hs = mem::heap_reserved();
+    m.n = static_cast<size_t>(m.hs / kStep);
+    m.in.assign(m.n, 0);
+    m.owner.assign(m.n, 0);
+    bool sampled = false;
+    if (m.n) {
+        std::vector<PSAPI_WORKING_SET_EX_INFORMATION> v(m.n);
+        for (size_t i = 0; i < m.n; ++i) v[i].VirtualAddress = reinterpret_cast<void*>(m.hb + i * kStep);
+        if (QueryWorkingSetEx(GetCurrentProcess(), v.data(), static_cast<DWORD>(m.n * sizeof v[0]))) {
+            sampled = true;
+            for (size_t i = 0; i < m.n; ++i) m.in[i] = v[i].VirtualAttributes.Valid ? 1 : 0;
+        }
+    }
+    for_each_pool_range([](uint64_t lo, uint64_t size, int kind, void* u) {
+        Map& mm = *static_cast<Map*>(u);
+        mm.kind_size[kind] += size;
+        size_t a, b;
+        if (!mm.span(lo, lo + size, &a, &b)) { mm.outside += size; return; }
+        for (size_t i = a; i < b; ++i) if (!mm.owner[i]) mm.owner[i] = static_cast<uint8_t>(1 + kind);
+    }, &m);
+    // texture storage: 1 any texture, 2 a texture whose image holds an upload of it (the RAM copy is then the source the image can be made from again)
+    std::vector<uint8_t> tex(m.n, 0);
+    uint64_t tex_size = 0;
+    for (const Ref<Texture>& r : texture_registry_all()) {
+        const Texture* t = r.get();
+        if (!t->mem || !t->storage_size) continue;
+        tex_size += t->storage_size;
+        size_t a, b;
+        const uint64_t lo = reinterpret_cast<uint64_t>(t->mem);
+        if (!m.span(lo, lo + t->storage_size, &a, &b)) continue;
+        const TexGpu* g = t->gpu;
+        const uint8_t mark = (g && !g->failed && g->img && g->uploaded) ? 2 : 1;
+        for (size_t i = a; i < b; ++i) tex[i] = std::max(tex[i], mark);
+    }
+    uint64_t heap_ram = 0, pooled = 0, kind_ram[4] = {}, tex_ram = 0, tex_up = 0;
+    for (size_t i = 0; i < m.n; ++i) {
+        if (!m.in[i]) continue;
+        heap_ram += kStep;
+        if (m.owner[i]) { kind_ram[m.owner[i] - 1] += kStep; pooled += kStep; }
+        if (tex[i]) { tex_ram += kStep; if (tex[i] == 2) tex_up += kStep; }
+    }
+    PROCESS_MEMORY_COUNTERS_EX pmc{};
+    pmc.cb = sizeof pmc;
+    GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof pmc);
+    static const char* const names[4] = {"gpu only", "cpu cached", "cpu uncached", "shader code"};
+    const double mib = 1048576.0;
+    std::string kinds;
+    char buf[160];
+    for (int k = 0; k < 4; ++k) {
+        std::snprintf(buf, sizeof buf, "%s%s %.0f of %.0f", k ? ", " : "", names[k], kind_ram[k] / mib, m.kind_size[k] / mib);
+        kinds += buf;
+    }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    NXLOG_I("nvn.census",
+            "%s: RAM: process working set %.0f MiB, private %.0f MiB; game heap %.0f MiB committed, %s%.0f MiB in RAM; of it under the game's GPU "
+            "pools %.0f MiB (in RAM / pool size, MiB: %s; pools outside the heap %.0f), texture storage %.0f MiB (of %.0f; of textures whose image "
+            "is uploaded %.0f), the rest of the heap %.0f MiB; ours: texture preparation %.0f MiB, staging ring %.0f MiB, staging past the ring so "
+            "far %.0f MiB; %.1f ms",
+            why, pmc.WorkingSetSize / mib, pmc.PrivateUsage / mib, mem::heap_committed() / mib, sampled ? "" : "(not sampled) ", heap_ram / mib,
+            pooled / mib, kinds.c_str(), m.outside / mib, tex_ram / mib, tex_size / mib, tex_up / mib, (heap_ram - pooled) / mib,
+            texprep::held_bytes() / mib, gpu::staging_ring_size() / mib, gpu::staging_fallback_bytes() / mib, ms);
+}
 
 bool astc_bc1_active() { return gpu::astc_bc1_active_impl(); }
 }  // namespace nxrt::nvn::be
