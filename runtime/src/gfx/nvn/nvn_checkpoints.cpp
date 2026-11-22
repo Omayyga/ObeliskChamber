@@ -184,7 +184,8 @@ bool amd_buffer() {
         return false;
     }
     g_mmap = static_cast<volatile uint32_t*>(p);
-    g_mmap[0] = g_mmap[1] = 0;
+    g_mmap[0] = 0;   // two stores: a chained assignment reads the volatile back (deprecated in C++20)
+    g_mmap[1] = 0;
     return true;
 }
 
