@@ -120,7 +120,7 @@ std::unordered_set<uint64_t> g_rw_done;                       // keys in the cac
 std::vector<uint64_t> g_rw_pending;                           // keys built into the cache since the last save of the file
 bool g_rw_dirty = false;
 struct RewarmStats { uint64_t todo = 0, built = 0, failed = 0, skipped = 0; double ms = 0; std::vector<float> each; bool finished = false; } g_rw;
-// Build times of the first boot prewarm builds (FR4: a cold driver cache shows as builds of tens of milliseconds).
+// Build times of the first boot prewarm builds (FR4). RTX 3070 Laptop, 2026-11-22: 0.7-0.9 ms each from a warm cache, 8.7-10.3 ms cold.
 std::vector<float> g_boot_ms;
 bool g_boot_ms_logged = false;
 
@@ -170,7 +170,9 @@ void save_rewarm_locked() {
 
 // The cache file was just written: what was built into the cache until then is in it.
 void rewarm_note_saved_locked() {
-    if (!g_rewarm_on || g_rw_pending.empty()) return;
+    // before the rewarm thread has read the list and set the identity, the list is not written: it would go out with no identity and be
+    // thrown away as "another driver" when the thread reads it (the pending keys wait for the next save)
+    if (!g_rewarm_on || g_rw_pending.empty() || g_rw_identity.empty()) return;
     for (uint64_t d : g_rw_pending) g_rw_done.insert(d);
     g_rw_pending.clear();
     save_rewarm_locked();
@@ -399,7 +401,7 @@ void worker_main() {
                     g_boot_ms_logged = true;
                     const float med = median_of(g_boot_ms);
                     NXLOG_I(kTag, "prewarm: the first 64 builds took %.1f ms each (median): the driver's cache %s", med,
-                            med < 4.0f ? "has them (warm)" : med < 15.0f ? "has some of them" : "is cold (a new driver, a new GPU or a cleared cache)");
+                            med < 2.5f ? "has them (warm)" : med < 5.0f ? "has some of them" : "is cold (a new driver, a new GPU or a cleared cache)");
                 }
             }
             for (const auto& n : g_queue) {    // the next job this thread would take: no sleep before one a draw is near
@@ -525,7 +527,7 @@ void rewarm_main() {
     const float med = median_of(g_rw.each);
     NXLOG_I(kTag, "cache rewarm: done, %llu keys built into the pipeline cache (%llu failed) in %.1f s, %.1f ms of building each (median, %s)",
             static_cast<unsigned long long>(g_rw.built), static_cast<unsigned long long>(g_rw.failed), s, med,
-            med < 4.0f ? "they were in the driver's cache" : "compiled from scratch");
+            med < 2.5f ? "they were in the driver's cache" : "compiled from scratch");
 }
 
 // The summary line every 30 s: what was deferred, built at the draw and built in the background since the last one (session totals in brackets).
@@ -593,7 +595,7 @@ void saver_main() {
                 rewarm_note_saved_locked();
                 g_rw_pending = std::move(rest);
             }
-        } else if (g_rw_dirty) {
+        } else if (g_rw_dirty && !g_rw_identity.empty()) {
             save_rewarm_locked();
         }
     }
