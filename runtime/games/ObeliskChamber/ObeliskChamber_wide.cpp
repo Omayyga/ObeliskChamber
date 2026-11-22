@@ -88,6 +88,9 @@ constexpr uint64_t kSpotCull2 = 0x156c0fc;        // the same spot's second test
 constexpr uint64_t kRouteXTests[] = {0x156df34, 0x156e674, 0x156f37c, 0x156f3b4, 0x156f3ec, 0x156f424, 0x156f45c,
                                      0x156f494, 0x156f4cc, 0x156f504, 0x156f89c, 0x156ffbc, 0x1570a98,
                                      0x1383588};   // the on-screen test (0x13834b0) the route drawing calls: `fcmp s2, s0`, s0 = x
+// the route line builder's point test: s0 = x squeezed at 0x1575610 for the compares and put back at 0x1575644, where it is used as the
+// point's x (v0 is not reloaded in between)
+constexpr uint64_t kRoutePointTest = 0x1575610, kRoutePointUse = 0x1575644;
 constexpr uint64_t kFxOrtho = 0xb768d4;           // in 0xb76680: x22 = the effect's screen size (s32 w, h), the ortho at sp + 0x80
 constexpr uint64_t kFxScissor1 = 0xb76bb0;        // `blr x8`: SetScissor(x0 = command wrapper, 0, 0, w, h) (vtable + 0x58)
 constexpr uint64_t kFxScissor2 = 0xb76cfc;
@@ -491,6 +494,9 @@ void hook_spot_cull(::Ctx* c, uint64_t, void*) {
 void hook_spot_cull2(::Ctx* c, uint64_t, void*) {
     c->v[0].f[0] = 960.0f + (c->v[0].f[0] - 960.0f) / ws().k;
 }
+void hook_route_point_use(::Ctx* c, uint64_t, void*) {
+    c->v[0].f[0] = 960.0f + (c->v[0].f[0] - 960.0f) * ws().k;
+}
 
 // ---- 2D effects -----------------------------------------------------------------------------------------------------------------------------
 struct FxCall {
@@ -641,6 +647,8 @@ void wide_install(uint64_t base, int out_w, int out_h) {
         add(kSpotCull, &hook_spot_cull);
         add(kSpotCull2, &hook_spot_cull2);
         for (uint64_t off : kRouteXTests) add(off, &hook_spot_cull2);   // the same squeeze of s0 for the two compares
+        add(kRoutePointTest, &hook_spot_cull2);
+        add(kRoutePointUse, &hook_route_point_use);
     }
     if (on("statgraph")) add(kStatGraph, &hook_stat_graph);
     w.map_diag = config_get_bool("fefw", "ultrawide_map_diag", false);
