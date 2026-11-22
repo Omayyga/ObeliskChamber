@@ -117,6 +117,17 @@ double hitch_phase_total_ms(int phase);
 // Frames presented so far and the ms since the last one (the frame in progress is number *frames + 1, as the hitch line counts). Lock-free.
 // False before the first frame.
 bool hitch_frame_age(uint64_t* frames, double* age_ms);
+// Loading screens, as the NVN replay sees them (presented frames with almost no draws while the game stalls: nvn_replay.cpp
+// note_frame_for_pacing, [display] unpaced_loading). The replay reports each change; a scripted run's `@loaded` waits on it. Times are
+// GetTickCount64 ms (0 = never). Any thread, lock-free.
+struct LoadInfo {
+    bool loading = false;
+    uint64_t starts = 0;            // loads seen so far
+    uint64_t last_start_ms = 0;
+    uint64_t last_end_ms = 0;
+};
+void note_loading(bool loading);
+LoadInfo load_info();
 // A measurement window ("scene") over the presented frames: begin notes where it starts, end logs one line for exactly the frames between
 // (hitch: scene '<label>': frames, seconds, mean fps, 1% low, worst, frames over 25 and 50 ms, over 2x the median; render thread ms per
 // frame: replay, present, idle), for A/B runs (tools/perf/perf_report.py, docs/PERF_ROUTES.md). A scripted run's `@log SCENE start <name>` /

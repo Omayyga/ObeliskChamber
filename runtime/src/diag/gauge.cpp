@@ -580,6 +580,29 @@ double hitch_phase_total_ms(int phase) {
     return static_cast<double>(g_phase[phase].load(std::memory_order_relaxed)) * 1000.0 / qpc_freq();
 }
 
+namespace {
+std::atomic<bool> g_loading{false};
+std::atomic<uint64_t> g_load_starts{0}, g_load_start_ms{0}, g_load_end_ms{0};
+}  // namespace
+void note_loading(bool loading) {
+    const uint64_t now = GetTickCount64();
+    if (loading) {
+        g_load_start_ms.store(now, std::memory_order_relaxed);
+        g_load_starts.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_load_end_ms.store(now, std::memory_order_relaxed);
+    }
+    g_loading.store(loading, std::memory_order_release);
+}
+LoadInfo load_info() {
+    LoadInfo li;
+    li.loading = g_loading.load(std::memory_order_acquire);
+    li.starts = g_load_starts.load(std::memory_order_relaxed);
+    li.last_start_ms = g_load_start_ms.load(std::memory_order_relaxed);
+    li.last_end_ms = g_load_end_ms.load(std::memory_order_relaxed);
+    return li;
+}
+
 bool hitch_frame_age(uint64_t* frames, double* age_ms) {
     const uint64_t n = g_ring_n.load(std::memory_order_acquire);
     if (n == 0) return false;

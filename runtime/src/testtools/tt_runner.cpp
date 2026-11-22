@@ -362,6 +362,31 @@ void Runner::frame(uint64_t k, const GameState& s, bool valid, ::Ctx* c) {
                 if (!detail::give_item(static_cast<int>(st.x), static_cast<int>(st.y))) { fail(st, "@give: the player state is not readable yet"); return; }
                 advance();
                 continue;
+            case StepKind::WaitLoaded: {
+                const uint64_t now_ms = GetTickCount64();
+                if (first) start_ms_ = now_ms;
+                const nxrt::LoadInfo li = nxrt::load_info();
+                const uint64_t since = start_ms_ > 5000 ? start_ms_ - 5000 : 0;   // the press before this step may have started the load
+                const bool began = li.starts && li.last_start_ms >= since;
+                const bool met = began && !li.loading && li.last_end_ms && static_cast<double>(now_ms - li.last_end_ms) >= st.x;
+                if (met) {
+                    NXLOG_I("script", "line %d: loaded (%llu ms after this step began, quiet for %.0f ms)", st.line,
+                            static_cast<unsigned long long>(now_ms - start_ms_), st.x);
+                    advance();
+                    continue;
+                }
+                const int64_t to_ms = st.timeout < 0 ? 180000 : st.timeout;
+                if (to_ms > 0 && static_cast<int64_t>(now_ms - start_ms_) >= to_ms) {
+                    fail(st, began ? "timeout: the load did not settle" : "timeout: no load began (is [display] unpaced_loading off?)");
+                    return;
+                }
+                return;
+            }
+            case StepKind::Origin:
+                run_t0_ms_ = GetTickCount64();
+                NXLOG_I("script", "line %d: @at times count from here", st.line);
+                advance();
+                continue;
             case StepKind::WaitAt:
                 if (static_cast<double>(GetTickCount64() - run_t0_ms_) >= st.x) { advance(); continue; }
                 return;
