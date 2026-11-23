@@ -16,6 +16,7 @@
 #include <sstream>
 
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "nxrt/write_watch.h"
 
 namespace stdfs = std::filesystem;
@@ -51,6 +52,7 @@ public:
         if (offset < 0) return rc::kOutOfRange;
         if (!(mode_ & kModeRead)) return rc::kReadNotPermitted;
         uint8_t* d = static_cast<uint8_t*>(dst);
+        mem::heap_touch(reinterpret_cast<uint64_t>(d), size);   // [memory] heap_lazy_commit: ReadFile fails on uncommitted pages
         const mem::ww::OsWriteScope ws(d, size);   // ReadFile fails on a page the write tracker made read-only
         while (size) {
             const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(size, 0x40000000));
@@ -78,6 +80,7 @@ public:
         get_size(&cur);
         if (static_cast<uint64_t>(offset) + size > static_cast<uint64_t>(cur) && !(mode_ & kModeAppend)) return rc::kNoAppend;
         const uint8_t* s = static_cast<const uint8_t*>(src);
+        mem::heap_touch(reinterpret_cast<uint64_t>(s), size);   // [memory] heap_lazy_commit: WriteFile fails on uncommitted pages
         const mem::ww::OsReadScope rs(s, size);   // WriteFile fails on a page the write tracker guarded (a deferred GPU result)
         while (size) {
             const DWORD chunk = static_cast<DWORD>(std::min<uint64_t>(size, 0x40000000));
