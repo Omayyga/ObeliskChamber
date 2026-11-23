@@ -21,6 +21,7 @@
 #include <unordered_set>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
@@ -73,8 +74,16 @@ struct GfxEntry {
     VkPipeline second = VK_NULL_HANDLE;
     VkPipeline alt = VK_NULL_HANDLE;                 // measurement only ([nvn] gpl_ab): the optimised pipeline, kept next to the linked one
     std::shared_ptr<PipeUpgrade> up;
+    uint64_t retry_at = 0;                           // a build that ran out of memory: built again from this presented frame on (0: never)
 };
 std::unordered_map<uint64_t, std::vector<GfxEntry>> g_gfx;
+// Review item "failed pipelines cached as null": a pipeline whose build failed was kept as null for the session, so every draw or dispatch
+// with its key was skipped. A failure for lack of memory (VK_ERROR_OUT_OF_HOST_MEMORY / OUT_OF_DEVICE_MEMORY, more likely on 8 GB cards
+// near their limit) is tried again 600 presented frames later; other failures stay as they were.
+constexpr uint64_t kPipeRetryFrames = 600;
+thread_local VkResult t_build_result = VK_SUCCESS;  // the last build_graphics_pipeline / create_compute result of this thread
+bool out_of_memory(VkResult r) { return r == VK_ERROR_OUT_OF_HOST_MEMORY || r == VK_ERROR_OUT_OF_DEVICE_MEMORY; }
+std::map<std::tuple<const ShaderInfo*, VkPipelineLayout, std::vector<uint32_t>>, uint64_t> g_compute_retry;   // g_compute keys: retry frame
 // Compute pipelines by (shader, layout, integer samplers: set << 17 | binding << 1 | signed, see spirv_int_samplers; empty for the translated module).
 std::map<std::tuple<const ShaderInfo*, VkPipelineLayout, std::vector<uint32_t>>, VkPipeline> g_compute;
 std::map<std::pair<const ShaderInfo*, std::vector<uint32_t>>, VkShaderModule> g_int_samplers;   // their modules (null: could not be made)
@@ -142,9 +151,9 @@ void ensure_cache() {
     std::vector<char> data;
     if (!g_cache_path.empty()) {
         if (FILE* f = std::fopen(g_cache_path.c_str(), "rb")) {          // one read: the file can be hundreds of MB after a shader preparation
-            std::fseek(f, 0, SEEK_END);
-            const long len = std::ftell(f);
-            std::fseek(f, 0, SEEK_SET);
+            _fseeki64(f, 0, SEEK_END);                                   // 64-bit: std::ftell is a long, 32 bits on Windows
+            const int64_t len = _ftelli64(f);
+            _fseeki64(f, 0, SEEK_SET);
             if (len > 0) {
                 data.resize(static_cast<size_t>(len));
                 if (std::fread(data.data(), 1, data.size(), f) != data.size()) data.clear();
@@ -178,30 +187,47 @@ void ensure_cache() {
     g_cache_ready.store(true, std::memory_order_release);
 }
 
+// The cache's data is read out in two calls (size, then data); compiles go on between them unless pipeline_cache_lock is on, so the second
+// call can answer VK_INCOMPLETE when the cache grew meanwhile: then it asks again with room to spare (review item 5). The "dirty" flag and
+// the count of new pipelines are cleared only once the file is in place; a save that fails puts them back, so the next save comes as it
+// would have (before, a failed save cleared them and the new pipelines waited for the next new one, or were lost at the end).
 bool save_cache() {
     if (!g_cache || g_cache_path.empty()) return false;
     static std::mutex save_mu;                    // the cache-save thread and the rewarm thread both write it, and share the .tmp name
     std::lock_guard<std::mutex> save_lk(save_mu);
     NXFT("pipe.cache.save");
-    g_cache_dirty.store(false);
-    g_new_since_save.store(0);
+    const bool was_dirty = g_cache_dirty.exchange(false);
+    const uint32_t was_new = g_new_since_save.exchange(0);
+    auto failed = [&] {
+        if (was_dirty) g_cache_dirty.store(true);
+        g_new_since_save.fetch_add(was_new);
+        return false;
+    };
     size_t n = 0;
     std::vector<char> data;
     {
         // no compile into the cache while the driver reads it out (Intel only by default: pipeline_cache_locked, #124)
         std::unique_lock<std::shared_mutex> lk;
         if (pipeline_cache_locked()) lk = std::unique_lock<std::shared_mutex>(pipeline_cache_mutex());
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return false;
-        data.resize(n);
-        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data()) != VK_SUCCESS) return false;
+        if (vkGetPipelineCacheData(vkdev(), g_cache, &n, nullptr) != VK_SUCCESS || !n) return failed();
+        VkResult r = VK_INCOMPLETE;
+        for (int attempt = 0; attempt < 4 && r == VK_INCOMPLETE; ++attempt) {
+            n += n / 4 + 4096;                    // room for what compiles add meanwhile
+            data.resize(n);
+            r = vkGetPipelineCacheData(vkdev(), g_cache, &n, data.data());   // n becomes the size written
+        }
+        if (r != VK_SUCCESS) {
+            NXLOG_W(kTag, "pipeline cache: reading it out for the save failed (%d); the next save tries again", static_cast<int>(r));
+            return failed();
+        }
     }
     // written to a temporary file and renamed, so a process that ends in the middle of it leaves the old cache intact
     const std::string tmp = g_cache_path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
+        if (!f) return failed();
         f.write(data.data(), static_cast<std::streamsize>(n));
-        if (!f) return false;
+        if (!f) return failed();
     }
     std::error_code ec;
     std::filesystem::rename(tmp, g_cache_path, ec);
@@ -209,7 +235,7 @@ bool save_cache() {
         std::filesystem::remove(g_cache_path, ec);
         std::filesystem::rename(tmp, g_cache_path, ec);
     }
-    return !ec;
+    return ec ? failed() : true;
 }
 
 }  // namespace
@@ -749,7 +775,9 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
             ci.bindingCount = static_cast<uint32_t>(lbs[set].size());
             ci.pBindings = lbs[set].data();
             if (vkCreateDescriptorSetLayout(vkdev(), &ci, nullptr, &nl.sets[set]) != VK_SUCCESS) {
-                NXLOG_E(kTag, "descriptor set layout %d failed", set);
+                static int logged = 0;
+                if (logged++ < 8) NXLOG_E(kTag, "descriptor set layout %d failed", set);
+                for (int k = 0; k < set; ++k) vkDestroyDescriptorSetLayout(vkdev(), nl.sets[k], nullptr);   // asked again next time: none left behind
                 return nullptr;
             }
         }
@@ -760,7 +788,9 @@ const ProgLayout* prog_layout(const ShaderInfo* const stages[6]) {
         pci.pushConstantRangeCount = pcr.size ? 1 : 0;
         pci.pPushConstantRanges = pcr.size ? &pcr : nullptr;
         if (vkCreatePipelineLayout(vkdev(), &pci, nullptr, &nl.layout) != VK_SUCCESS) {
-            NXLOG_E(kTag, "pipeline layout failed");
+            static int logged = 0;
+            if (logged++ < 8) NXLOG_E(kTag, "pipeline layout failed");
+            for (int k = 0; k < 4; ++k) vkDestroyDescriptorSetLayout(vkdev(), nl.sets[k], nullptr);
             return nullptr;
         }
         sh = g_shared_layouts.emplace(sig, nl).first;
@@ -930,6 +960,7 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     ensure_cache();
     const auto t0 = std::chrono::steady_clock::now();
 
+    t_build_result = VK_ERROR_UNKNOWN;
     VkPipelineShaderStageCreateInfo stages[5] = {};
     uint32_t ns = 0;
     const VkShaderStageFlagBits bits[5] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_GEOMETRY_BIT,
@@ -1029,6 +1060,7 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     gi.layout = layout.layout;
     VkPipeline pipe = VK_NULL_HANDLE;
     const VkResult r = create_graphics_pipeline_tracked(vkdev(), g_cache, &gi, &pipe);
+    t_build_result = r;
     const double ms_taken = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "graphics pipeline failed (%d): vs %s fs %s, %u colour targets", static_cast<int>(r), key.stage[0] ? key.stage[0]->hash.c_str() : "-",
@@ -1049,6 +1081,12 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     ensure_cache();
     const uint64_t h = key.hash();
     auto& bucket = g_gfx[h];
+    for (auto it = bucket.begin(); it != bucket.end(); ++it)
+        if (it->first == key && it->retry_at && !it->second && nxrt::diag_frame_count() >= it->retry_at) {
+            bucket.erase(it);                    // its build ran out of memory a while ago: built again below
+            g_gfx_keys.sub(1);
+            break;
+        }
     for (auto& e : bucket)
         if (e.first == key) {
             counters().pipeline_cache_hits.fetch_add(1, std::memory_order_relaxed);
@@ -1089,11 +1127,16 @@ VkPipeline graphics_pipeline(const GraphicsKey& key, const ProgLayout& layout) {
     }
     NXFT("pipe.create");
     pipe = build_graphics_pipeline(key, layout);
+    uint64_t retry_at = 0;
     if (pipe) {
         ++g_pipeline_count;
         g_built_at_draw.fetch_add(1, std::memory_order_relaxed);
+    } else if (!up && out_of_memory(t_build_result)) {   // (with the key file's build under way, that one replaces it anyway)
+        retry_at = nxrt::diag_frame_count() + kPipeRetryFrames;
+        NXLOG_W(kTag, "graphics pipeline: out of memory (%d); its draws are skipped and it is built again in %llu frames",
+                static_cast<int>(t_build_result), static_cast<unsigned long long>(kPipeRetryFrames));
     }
-    bucket.push_back({key, pipe, VK_NULL_HANDLE, up});   // up: the key file's build, when one is under way, replaces this one (same pipeline)
+    bucket.push_back({key, pipe, VK_NULL_HANDLE, up, retry_at});   // up: the key file's build, when one is under way, replaces this one (same pipeline)
     return pipe;
 }
 
@@ -1134,6 +1177,7 @@ static VkPipeline create_compute(const ShaderInfo* cs, VkPipelineLayout layout, 
     std::shared_lock<std::shared_mutex> cache_lk;   // pipeline_cache_locked (#124)
     if (g_cache && pipeline_cache_locked()) cache_lk = std::shared_lock<std::shared_mutex>(pipeline_cache_mutex());
     const VkResult cr = vkCreateComputePipelines(vkdev(), g_cache, 1, &ci, nullptr, &pipe);
+    t_build_result = cr;
     if (cache_lk.owns_lock()) cache_lk.unlock();
     if (nxrt::hitch_on_render_thread()) nxrt::hitch_phase_add(nxrt::kHpRenderPipeline, nxrt::hitch_ticks() - tp0);
     compiles_in_flight().fetch_sub(1, std::memory_order_relaxed);
@@ -1231,7 +1275,13 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, cons
     for (const SpvIntSampler& s : ints) ikey.push_back(s.set << 17 | s.binding << 1 | (s.is_signed ? 1u : 0u));
     const auto k = std::make_tuple(cs, layout.layout, ikey);
     auto it = g_compute.find(k);
-    if (it != g_compute.end()) return it->second;
+    if (it != g_compute.end()) {
+        const auto rt = it->second ? g_compute_retry.end() : g_compute_retry.find(k);
+        if (rt == g_compute_retry.end() || nxrt::diag_frame_count() < rt->second) return it->second;
+        g_compute_retry.erase(rt);               // its build ran out of memory a while ago: built again below
+        g_compute.erase(it);
+        g_compute_keys.sub(1);
+    }
     if (ints.empty() && compute_async_mode()) {  // built ahead (compute_prebuild)?
         std::unique_lock<std::mutex> lk(g_comp_mu);
         auto jt = g_comp_jobs.find(cs);
@@ -1272,8 +1322,14 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout, cons
         }
     }
     VkShaderModule m = ints.empty() ? shader_module(cs) : int_sampler_module(cs, ints, ikey);
+    t_build_result = VK_ERROR_UNKNOWN;
     VkPipeline pipe = m ? create_compute(cs, layout.layout, m) : VK_NULL_HANDLE;
     if (pipe) ++g_pipeline_count;
+    else if (out_of_memory(t_build_result)) {
+        g_compute_retry[k] = nxrt::diag_frame_count() + kPipeRetryFrames;
+        NXLOG_W(kTag, "compute pipeline for %s: out of memory (%d); its dispatches are skipped and it is built again in %llu frames", cs->hash.c_str(),
+                static_cast<int>(t_build_result), static_cast<unsigned long long>(kPipeRetryFrames));
+    }
     g_compute[k] = pipe;                         // new key: the lookup above missed
     g_compute_keys.add(1);
     return pipe;
@@ -2136,6 +2192,7 @@ void pipeline_shutdown() {
     for (auto& [k, p] : g_compute)
         if (p) vkDestroyPipeline(d, p, nullptr);
     g_compute.clear();
+    g_compute_retry.clear();
     for (auto& [k, m] : g_int_samplers)
         if (m) vkDestroyShaderModule(d, m, nullptr);
     g_int_samplers.clear();

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -501,4 +502,32 @@ NXTEST(import_freeze_holds_writes_until_it_ends) {
     teardown(r);
   }
   nxrt::config_set("memory", "freeze_table", "1");
+}
+
+// Lock order (review item 12): a heap commit over a range an import has frozen waits for the freeze without holding the heap's lock, so the
+// freeze's own reads of the heap's page table (heap_rw_pages) and every other thread's go on meanwhile. Before, heap_commit held the lock
+// while its OsWriteScope waited for the freeze, and a freeze that then read the page table never ended.
+NXTEST(heap_commit_waits_for_an_import_freeze_without_the_heap_lock) {
+    ww::Region* r = setup();
+    REQUIRE(r != nullptr);
+    std::atomic<bool> committed{false};
+    std::thread committer;
+    bool table_answered = false;
+    std::future<int> f;   // outside the freeze's scope: with the old lock order it can only finish once the freeze ends
+    {
+        const ww::ImportFreeze fz(reinterpret_cast<void*>(mem::kHeapBase + 4 * kPg), 4 * kPg);
+        committer = std::thread([&] {
+            committed.store(mem::heap_commit(0, 16 * kPg));   // committed pages: the MEM_COMMIT path, with its OsWriteScope
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        CHECK(!committed.load());                              // waits for the freeze
+        f = std::async(std::launch::async, [] { return mem::heap_rw_pages(mem::kHeapBase + 4 * kPg, 4 * kPg); });
+        table_answered = f.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        CHECK_MSG(table_answered, "the page table was locked while the commit waited for the freeze");
+    }   // the freeze ends
+    committer.join();
+    f.wait();
+    CHECK(committed.load());
+    CHECK(mem::is_mapped(mem::kHeapBase, 16 * kPg));
+    teardown(r);
 }

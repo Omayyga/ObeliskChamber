@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "nxrt/cpu_info.h"
+#include "nxrt/memguard.h"
 #include "nxrt/diag.h"
 
 namespace nxrt::cpu {
@@ -248,7 +249,7 @@ Load sample() {
     PROCESS_MEMORY_COUNTERS_EX pm{};
     if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pm), sizeof pm)) {
         l.working_set = pm.WorkingSetSize;
-        l.committed = pm.PrivateUsage;
+        l.committed = memguard_commit_bytes(pm.PrivateUsage, pm.PagefileUsage);
     }
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;
