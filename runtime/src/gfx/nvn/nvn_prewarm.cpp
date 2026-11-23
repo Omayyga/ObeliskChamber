@@ -701,7 +701,7 @@ uint32_t promote_sessions() {
         const bool autom = v == "auto" || v.empty();
         const int64_t r = autom ? (mem::limits_scaled() ? 3 : 0) : std::max<int64_t>(0, config_get_int("nvn", "prewarm_promote_sessions", 0));
         NXLOG_I(kTag, "prewarm: when the game sets a program, %s go first ([nvn] prewarm_promote_sessions = %s%s)",
-                r ? ("its keys drawn in the last " + std::to_string(r) + " sessions").c_str() : "all its recorded keys", v.c_str(),
+                r ? ("its keys drawn in the last " + std::to_string(r) + " sessions").c_str() : "all its recorded keys", autom ? "auto" : v.c_str(),
                 autom ? (mem::limits_scaled() ? ", limits scaled" : ", limits not scaled") : "");
         return static_cast<uint32_t>(r);
     }();
