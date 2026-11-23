@@ -479,6 +479,18 @@ NXTEST(binding_keys_equals_and_semicolon) {
     CHECK(act_at(s, semi_name, Ctx::Menu) == Act::Back);
 }
 
+NXTEST(binding_key_left_bracket) {
+    // "[" is a real SDL key name; in a bindings section its line is a binding, not a section header without ']'.
+    const char* name = SDL_GetScancodeName(SDL_SCANCODE_LEFTBRACKET);
+    Settings s;
+    std::string err;
+    const std::string text = std::string("[bindings.menu]\n") + name + " = confirm\n[bindings.play]\n";
+    REQUIRE_MSG(parse_settings(text, &s, &err), err);
+    CHECK(act_at(s, name, Ctx::Menu) == Act::Confirm);
+    Settings bad;
+    CHECK(!parse_settings("[mouse\n", &bad, &err));   // a real header without ']' still fails
+}
+
 NXTEST(inline_comments_and_case) {
     nxtest_play::SampleGame game;
     Settings s;
