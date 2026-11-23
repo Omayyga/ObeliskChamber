@@ -19,7 +19,7 @@
 //
 // [nvn] cache_rewarm (0.3.2): the keys the budget leaves out are built into the pipeline cache anyway, one at a time on a background thread at
 // the lowest priority once the boot queue is done, and each pipeline is destroyed as soon as it is made: the cache keeps the compiled code,
-// the driver frees the ~1 MB it holds per pipeline. A key the game later asks for then builds from the cache in a millisecond or two instead
+// the driver no longer holds the pipeline itself (on NVIDIA the RAM of its arena stays committed and is reused for later pipelines). A key the game later asks for then builds from the cache in a millisecond or two instead
 // of compiling. A side file, <keys>.rewarm, lists the keys known to be in the cache file under this GPU and driver build (the cache's
 // identity); after a driver update the identity changes, the list starts over and the work resumes across sessions until it is done.
 //
@@ -100,6 +100,7 @@ std::unordered_map<uint64_t, std::vector<std::shared_ptr<Job>>> g_jobs;   // by 
 std::vector<std::thread> g_workers;
 std::thread g_saver;
 PrewarmStats g_stats;
+uint64_t g_promote_skipped = 0;   // keys prewarm_promote_sessions left for their draw; guarded by g_mu
 
 // <keys>.seen: the session each key was last used in by a draw (prewarm_budget orders the boot queue by it). Guarded by g_mu.
 constexpr char kSeenMagic[8] = {'N', 'X', 'P', 'K', 'S', 'E', 'E', 'N'};
@@ -565,16 +566,17 @@ void saver_main() {
         g_cv.wait_for(lk, std::chrono::seconds(2), [] { return g_stop; });
         if (g_stop) break;
         const uint64_t sig = g_stats.recorded + g_stats.queued * 3 + g_stats.built * 5 + g_stats.taken * 7 + g_stats.waited * 11 + g_stats.claimed * 13 +
-                             g_stats.linked_meanwhile * 17 + g_stats.promoted * 19 + g_stats.skipped_busy * 23;
+                             g_stats.linked_meanwhile * 17 + g_stats.promoted * 19 + g_stats.skipped_busy * 23 + g_promote_skipped * 29;
         if (sig != logged) {                       // the process may end without a shutdown: say what the prewarm did while it runs
             logged = sig;
             NXLOG_I(kTag, "prewarm so far: %llu recorded, %llu loaded, %llu queued (%llu moved ahead), %llu built ahead (%llu failed), %llu taken by draws (%llu waited %.1f ms), "
-                          "%llu linked from parts while building, %llu built by the draw itself, %llu draws skipped while their build ran",
+                          "%llu linked from parts while building, %llu built by the draw itself, %llu draws skipped while their build ran, "
+                          "%llu not moved ahead (not drawn lately)",
                     static_cast<unsigned long long>(g_stats.recorded), static_cast<unsigned long long>(g_stats.loaded), static_cast<unsigned long long>(g_stats.queued),
                     static_cast<unsigned long long>(g_stats.promoted), static_cast<unsigned long long>(g_stats.built), static_cast<unsigned long long>(g_stats.failed),
                     static_cast<unsigned long long>(g_stats.taken), static_cast<unsigned long long>(g_stats.waited), g_stats.wait_ms,
                     static_cast<unsigned long long>(g_stats.linked_meanwhile), static_cast<unsigned long long>(g_stats.claimed),
-                    static_cast<unsigned long long>(g_stats.skipped_busy));
+                    static_cast<unsigned long long>(g_stats.skipped_busy), static_cast<unsigned long long>(g_promote_skipped));
         }
         gpl_progress_log();
         compute_progress_log();
@@ -688,6 +690,24 @@ void prewarm_record(const GraphicsKey& key) {
     append_record(r);
 }
 
+// [nvn] prewarm_promote_sessions: when the game sets a program, only the recorded keys a draw used in the last this-many sessions go
+// first in line (0 = every key with one of its shaders; auto: 3 with memory limits scaled to the PC, else 0). A shared vertex shader can
+// bring hundreds of keys forward: on the RTX 3070 laptop 2040 keys were moved ahead and ~650 drawn, and NVIDIA keeps the RAM of every
+// pipeline it built in its own arenas even after the pipeline is destroyed (a 1 GiB arena stayed ~990 MiB in RAM after 2347 releases).
+// A key left behind is built or linked from its parts at its first draw, as one the budget left out (warm caches: well under a ms).
+uint32_t promote_sessions() {
+    static const uint32_t n = [] {
+        const std::string v = config_get_str("nvn", "prewarm_promote_sessions", "auto");
+        const bool autom = v == "auto" || v.empty();
+        const int64_t r = autom ? (mem::limits_scaled() ? 3 : 0) : std::max<int64_t>(0, config_get_int("nvn", "prewarm_promote_sessions", 0));
+        NXLOG_I(kTag, "prewarm: when the game sets a program, %s go first ([nvn] prewarm_promote_sessions = %s%s)",
+                r ? ("its keys drawn in the last " + std::to_string(r) + " sessions").c_str() : "all its recorded keys", autom ? "auto" : v.c_str(),
+                autom ? (mem::limits_scaled() ? ", limits scaled" : ", limits not scaled") : "");
+        return static_cast<uint32_t>(r);
+    }();
+    return n;
+}
+
 size_t prewarm_program(const ShaderInfo* const stages[6]) {
     if (!stages || stages[3] || stages[4]) return 0;            // tessellated programs are not recorded
     prewarm_init();
@@ -702,6 +722,13 @@ size_t prewarm_program(const ShaderInfo* const stages[6]) {
             for (auto it = range.first; it != range.second; ++it) {
                 const std::shared_ptr<Job>& j = g_rec_jobs[it->second];
                 if (!j || j->state != 0 || j->promoted) continue;
+                if (const uint32_t keep = promote_sessions()) {
+                    auto seen = g_seen.find(j->digest);
+                    if (seen == g_seen.end() || seen->second + keep < g_session) {   // not drawn lately: its draw builds it
+                        if (!j->in_queue) { j->promoted = true; ++g_promote_skipped; }
+                        continue;
+                    }
+                }
                 j->promoted = true;
                 if (!j->in_queue) {
                     j->in_queue = true;
@@ -811,6 +838,7 @@ void prewarm_shutdown() {
             static_cast<unsigned long long>(g_stats.claimed));
     g_inited = false;
     g_stats = PrewarmStats{};
+    g_promote_skipped = 0;
     g_recs.clear();
     g_rec_jobs.clear();
     g_by_any.clear();
