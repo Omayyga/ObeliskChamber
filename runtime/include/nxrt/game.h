@@ -52,6 +52,8 @@ struct Info {
                                             // the runtime's temporal [upscale] modes (fsr3, dlss, dlaa, xess) would only add work on top of it,
                                             // so they count as off (extras_state.cpp); the file keeps what was written
     bool vi_hdr_status_sdr = false;         // Switch 2: nn::vi::QueryDisplayHdrStatus answers an SDR display on the host (core/switch2.cpp)
+    uint64_t switch2_memory = 0;            // Switch 2: the memory GetInfo TotalMemorySize reports when [memory] app_memory_mb is 0 (0 = 10.5 GiB).
+                                            // The game's heap is committed whole (SetHeapSize), so what it is told it has is commit charge
     int present_interval_hz = 0;            // the game paces itself by the console's vsync and steps its logic by a fixed amount per frame:
                                             // the frame limiter holds it to this rate / the NVN window's present interval (60: interval 2 is
                                             // 30 fps), as the console's display does ([nvn] present_interval_hz, gfx/nvn/nvn_present.cpp). 0 = off
