@@ -117,6 +117,7 @@ struct TexGpu {
     // tex_demote shrank it (0: whole)
     std::atomic<uint32_t> seen_ms{0};
     uint32_t demoted_ms = 0;
+    uint32_t promoted_ms = 0;                           // tex_promote made it whole again then (resid_ms; 0: never)
 };
 
 // A virtual-pool texture too big to back fully (Mario Kart World's terrain virtual texture caches: 8192x8192 arrays of 68 layers, 1.4 to
@@ -2031,6 +2032,7 @@ nxrt::GaugeCounter g_gauge_demoted("nvn.resid.demoted");          // textures he
 nxrt::GaugeCounter g_gauge_demoted_mb("nvn.resid.demoted_mb");    // estimated video memory those gave back
 nxrt::GaugeCounter g_gauge_demotions("nvn.resid.demotions");      // cumulative
 nxrt::GaugeCounter g_gauge_promotions("nvn.resid.promotions");    // cumulative
+nxrt::GaugeCounter g_gauge_restore_paced("nvn.resid.restore_paced");   // presents whose restores residency_pressure_pacing slowed (cumulative)
 struct Demoted {
     Ref<Texture> t;
     const TexGpu* g;      // the image demoted (a texture remade since, by a release or a retry, is no longer ours to promote)
@@ -2144,9 +2146,67 @@ bool tex_promote(Texture* t, Frame& f) {
     tex_ensure_current(t, f);
     pool_texture_remade(t);
     destroy_texture_gpu(old);
+    ng->promoted_ms = std::max<uint32_t>(resid_ms(), 1);
     return true;
 }
 }  // namespace
+
+// The figure residency acts on, in percent of the budget, and the budget (*budget_out; the test aid's when set); -1 when not known.
+// The live figure: the room free inside VMA's blocks is not pressure, the next images go there.
+// [gfx] residency_os_pressure (default off; FEFW-recomp ebdb5a1): the OS figure counts too while it is at max(residency_percent + 5, 85)% or
+// more. Freed room inside VMA's blocks keeps the live figure low while the OS (and pool_mirror_pressure_percent, which then refuses new pool
+// copy chunks) still sees the blocks as used. [memory] scale_limits makes it the default on cards with a video memory budget of 8 GiB or
+// less: there the live figure stayed at 70% while the OS counted 96% (#126), and demotion never ran.
+int resid_pressure(uint64_t* budget_out) {
+    const ResidCfg& cfg = resid_cfg();
+    static const uint64_t test_mb = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0)));
+    static const bool os_on = [] {
+        uint64_t b = nxrt::gfx::video_budget_bytes();
+        if (test_mb && (test_mb << 20) < b) b = test_mb << 20;   // the test aid's smaller card counts here too
+        const bool small_card = b && b <= (8ull << 30);
+        const bool v = nxrt::config_get_bool("gfx", "residency_os_pressure", nxrt::mem::limits_scaled() && small_card);
+        NXLOG_I(kTag, "residency: the OS figure %s ([gfx] residency_os_pressure; budget %.2f GiB)", v ? "counts too" : "is not used", b / 1073741824.0);
+        return v;
+    }();
+    int pct = nxrt::gfx::video_live_percent();
+    int os_pct = os_on ? nxrt::gfx::video_usage_percent() : -1;
+    uint64_t budget = nxrt::gfx::video_budget_bytes();
+    if (budget_out) *budget_out = budget;
+    if (pct < 0 || !budget) return -1;
+    if (test_mb && (test_mb << 20) < budget) {   // test aid: a smaller card's budget (the use stays this process' real one)
+        pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(pct) / ((test_mb << 20) / 100));
+        if (os_pct >= 0) os_pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
+        budget = test_mb << 20;
+        if (budget_out) *budget_out = budget;
+    }
+    if (os_pct >= std::min(100, std::max(cfg.percent + 5, 85))) {
+        static bool noted = false;
+        if (!noted && pct < cfg.percent) {
+            noted = true;
+            NXLOG_I(kTag, "residency: the OS counts %d%% of the video memory budget in use (live %d%%): demoting ([gfx] residency_os_pressure)", os_pct, pct);
+        }
+        pct = std::max(pct, os_pct);
+    }
+    return pct;
+}
+int resid_pressure_percent() { return residency_on() ? resid_pressure(nullptr) : -1; }
+
+// [gfx] residency_pressure_pacing (auto: on with memory limits scaled to the PC, else off), technique from fefw-recomp #117 (metrist38):
+// - a texture made whole again is not demoted for 30 s unless video memory is at 96% or more (demote, restore, demote again in a row
+//   uploaded the same image three times);
+// - restores slow down as video memory fills: from 85% no four-fold catch-up and at most 2 textures / 4 MiB a present, from 92% 1 texture /
+//   2 MiB, from 96% none for a second (a restore that takes room makes the next demotion pass give it back).
+bool resid_pressure_pacing() {
+    static const bool on = [] {
+        const std::string v = nxrt::config_get_str("gfx", "residency_pressure_pacing", "auto");
+        const bool b = (v == "auto" || v.empty()) ? nxrt::mem::limits_scaled() : nxrt::config_get_bool("gfx", "residency_pressure_pacing", false);
+        NXLOG_I(kTag, "residency: restores paced by video memory use, no demotion for 30 s after a restore: %s ([gfx] residency_pressure_pacing%s)",
+                b ? "on" : "off", (v == "auto" || v.empty()) ? ", auto" : "");
+        return b;
+    }();
+    return on;
+}
+constexpr uint32_t kPromoteCooldownMs = 30000;
 
 void tex_mark_seen(Texture* t) {
     if (t && t->gpu && !t->gpu->failed) t->gpu->seen_ms.store(resid_ms(), std::memory_order_relaxed);
@@ -2175,38 +2235,9 @@ void tex_residency_tick(Frame& f) {
     if (!residency_marks_complete()) return;
     // demotions: over residency_percent of the OS budget, the textures no draw used for residency_idle_s, the longest unused first, until
     // the use is 5 points under it (at most 512 MiB a look); over 92%, ten seconds unused is enough
-    int pct = nxrt::gfx::video_live_percent();   // the room free inside VMA's blocks is not pressure: the next images go there
-    // [gfx] residency_os_pressure (default off; FEFW-recomp ebdb5a1): demote also while the OS counts this process at max(residency_percent
-    // + 5, 85)% or more of the budget. Freed room inside VMA's blocks keeps the live figure low while the OS (and pool_mirror_pressure_percent,
-    // which then refuses new pool copy chunks) still sees the blocks as used.
-    // [memory] scale_limits makes it the default on cards with a video memory budget of 8 GiB or less: there the live figure stayed at 70% while
-    // the OS counted 96% (#126), and demotion never ran
-    static const bool os_on = [] {
-        uint64_t b = nxrt::gfx::video_budget_bytes();
-        const uint64_t t = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0))) << 20;
-        if (t && t < b) b = t;   // the test aid's smaller card counts here too
-        const bool small_card = b && b <= (8ull << 30);
-        const bool v = nxrt::config_get_bool("gfx", "residency_os_pressure", nxrt::mem::limits_scaled() && small_card);
-        NXLOG_I(kTag, "residency: the OS figure %s ([gfx] residency_os_pressure; budget %.2f GiB)", v ? "counts too" : "is not used", b / 1073741824.0);
-        return v;
-    }();
-    int os_pct = os_on ? nxrt::gfx::video_usage_percent() : -1;
-    uint64_t budget = nxrt::gfx::video_budget_bytes();
+    uint64_t budget = 0;
+    const int pct = resid_pressure(&budget);
     if (pct < 0 || !budget) return;
-    static const uint64_t test_mb = static_cast<uint64_t>(std::max<int64_t>(0, nxrt::config_get_int("gfx", "residency_test_budget_mb", 0)));
-    if (test_mb && (test_mb << 20) < budget) {   // test aid: a smaller card's budget (the use stays this process' real one)
-        pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(pct) / ((test_mb << 20) / 100));
-        if (os_pct >= 0) os_pct = static_cast<int>(budget / 100 * static_cast<uint64_t>(os_pct) / ((test_mb << 20) / 100));
-        budget = test_mb << 20;
-    }
-    if (os_pct >= std::min(100, std::max(cfg.percent + 5, 85))) {
-        static bool noted = false;
-        if (!noted && pct < cfg.percent) {
-            noted = true;
-            NXLOG_I(kTag, "residency: the OS counts %d%% of the video memory budget in use (live %d%%): demoting ([gfx] residency_os_pressure)", os_pct, pct);
-        }
-        pct = std::max(pct, os_pct);
-    }
     // [gfx] residency_trim_idle_s (auto: 300 with memory limits scaled to the PC, else 0 = off): below residency_percent, textures no draw used
     // for this long are demoted too, at most 128 MiB and 64 textures every 5 s. The game keeps the files (and textures) of the areas it
     // visited in its cache; on the laptop 1.4-1.6 GB of our images were unused after a few minutes. Without it they stay until video memory
@@ -2230,6 +2261,7 @@ void tex_residency_tick(Frame& f) {
     const uint32_t idle_ms = trim ? trim_ms : static_cast<uint32_t>(urgent ? cfg.urgent_idle_s : cfg.idle_s) * 1000u;
     const uint64_t want = trim ? (128ull << 20) : std::min<uint64_t>(budget / 100 * static_cast<uint64_t>(pct - cfg.percent + 5), 512ull << 20);
     const int max_n = trim ? 64 : 400;
+    const bool cooldown = resid_pressure_pacing() && pct < 96;
     std::unordered_set<const Texture*> reg;
     pool_registered_textures(reg);
     std::vector<std::pair<uint32_t, Texture*>> cand;
@@ -2237,6 +2269,7 @@ void tex_residency_tick(Frame& f) {
         Texture* t = const_cast<Texture*>(ct);
         const TexGpu* g = t->gpu;
         if (!demotable(t, g)) continue;
+        if (cooldown && g->promoted_ms && now - g->promoted_ms < kPromoteCooldownMs) continue;   // made whole again a moment ago
         const uint32_t age = now - g->seen_ms.load(std::memory_order_relaxed);
         if (age < idle_ms || age > 0x80000000u) continue;
         cand.emplace_back(age, t);
@@ -2300,9 +2333,20 @@ void tex_residency_restore(Frame& f) {
     size_t waiting = want.size();
     if (!want.empty() && static_cast<int32_t>(now - hold_until) >= 0) {
         std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return static_cast<int32_t>(a.first - b.first) > 0; });
-        const bool catchup = longest >= static_cast<uint32_t>(cfg.catchup_ms);
-        const int max_n = cfg.restore_max * (catchup ? 4 : 1);
-        const uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
+        bool catchup = longest >= static_cast<uint32_t>(cfg.catchup_ms);
+        int max_n = cfg.restore_max * (catchup ? 4 : 1);
+        uint64_t max_bytes = (static_cast<uint64_t>(cfg.restore_mb) << 20) * (catchup ? 4 : 1);
+        const int press = resid_pressure_pacing() ? resid_pressure(nullptr) : -1;
+        if (press >= 85) {      // residency_pressure_pacing: slower as video memory fills
+            catchup = false;
+            max_n = std::min(cfg.restore_max, press >= 92 ? 1 : 2);
+            max_bytes = std::min<uint64_t>(static_cast<uint64_t>(cfg.restore_mb) << 20, press >= 92 ? (2ull << 20) : (4ull << 20));
+            g_gauge_restore_paced.add(1);
+        }
+        if (press >= 96) {
+            hold_until = now + 1000;
+            max_n = 0;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         std::vector<size_t> done;
         uint64_t bytes = 0;

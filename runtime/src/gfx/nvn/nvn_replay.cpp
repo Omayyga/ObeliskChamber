@@ -1650,6 +1650,16 @@ void vol3d_prepare(const ProgLayout& pl) {
 
 std::atomic<uint64_t> g_pool_uploads_deferred{0};
 std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which pacing last came back on after a load (note_frame_for_pacing)
+}  // namespace
+// Play, not a load: the frame limiter paces, and at least `grace` presents have gone by since the last load ended (the scene streams in over
+// its first seconds, and that burst stays as fast as before).
+bool paced_play(uint64_t grace) {
+    if (nxrt::frame_limiter_unpaced()) return false;
+    const uint64_t on_at = g_pacing_on_present.load(std::memory_order_relaxed);
+    const uint64_t p = counters().presents.load(std::memory_order_relaxed);
+    return !on_at || p < on_at || p - on_at >= grace;
+}
+namespace {
 const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
 
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
