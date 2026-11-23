@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -270,6 +271,33 @@ bool save_png_rgba(const std::string& path, const uint8_t* rgba, uint32_t w, uin
     SDL_DestroySurface(s);
     if (!ok) NXLOG_E(kTag, "could not write %s: %s", path.c_str(), SDL_GetError());
     return ok;
+}
+
+// [gfx] screenshot_thumb (default false; tools/perf/ab_run.ps1 sets it): next to a screenshot, <file>.thumb: the picture box-averaged
+// down to 320 pixels wide, as "NXTHUMB1", width, height (u32) and RGB bytes. tools/perf/shot_diff.py compares the A/B runs' pictures
+// from these without a PNG decoder (Python's standard library has none); averaging also evens out the temporal upscaler's jitter.
+static void save_screenshot_thumb(const std::string& png_path, const uint8_t* rgba, uint32_t w, uint32_t h) {
+    static const bool on = config_get_bool("gfx", "screenshot_thumb", false);
+    if (!on || !w || !h) return;
+    const uint32_t f = std::max(1u, w / 320u);
+    const uint32_t tw = w / f, th = h / f;
+    if (!tw || !th) return;
+    std::vector<uint8_t> t(static_cast<size_t>(tw) * th * 3);
+    for (uint32_t y = 0; y < th; ++y)
+        for (uint32_t x = 0; x < tw; ++x) {
+            uint32_t sum[3] = {0, 0, 0};
+            for (uint32_t dy = 0; dy < f; ++dy) {
+                const uint8_t* row = rgba + (static_cast<size_t>(y * f + dy) * w + static_cast<size_t>(x) * f) * 4;
+                for (uint32_t dx = 0; dx < f; ++dx)
+                    for (int c = 0; c < 3; ++c) sum[c] += row[dx * 4 + c];
+            }
+            for (int c = 0; c < 3; ++c) t[(static_cast<size_t>(y) * tw + x) * 3 + c] = static_cast<uint8_t>(sum[c] / (f * f));
+        }
+    std::ofstream o(png_path + ".thumb", std::ios::binary | std::ios::trunc);
+    o.write("NXTHUMB1", 8);
+    o.write(reinterpret_cast<const char*>(&tw), 4);
+    o.write(reinterpret_cast<const char*>(&th), 4);
+    o.write(reinterpret_cast<const char*>(t.data()), static_cast<std::streamsize>(t.size()));
 }
 
 bool load_png_rgba(const std::string& path, std::vector<uint8_t>* rgba, uint32_t* w, uint32_t* h) {
@@ -1166,6 +1194,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
             // the PNG encode takes seconds: write it on a worker so the frame is not held up (wait_screenshot_writes before exit)
             std::thread([path = s.cap_path, data = s.cap_out ? px : std::move(px), w, h]() {
                 if (save_png_rgba(path, data.data(), w, h)) NXLOG_I(kTag, "screenshot %ux%u written to %s", w, h, path.c_str());
+                save_screenshot_thumb(path, data.data(), w, h);
                 g_png_writes.fetch_sub(1);
             }).detach();
         }

@@ -207,6 +207,13 @@ def compare(a_paths, b_paths, names, md):
     ma = [measures(r) for r in A]
     mb = [measures(r) for r in B]
     scenes = sorted({s for m in ma + mb for s in m})
+    # every run should have measured every scene: a missing one means the route went somewhere else (or stopped) in that run
+    for r, m in zip(A + B, ma + mb):
+        missing = [sc for sc in scenes if sc not in m]
+        if missing:
+            print(f"WARNING: {r['path']} has no scene {', '.join(missing)}: the route did not get there in that run (its numbers are left out)")
+    if any(sc not in m for sc in scenes for m in ma + mb):
+        print()
     for sc in scenes:
         rows = [[f'scene {sc}', f'{names[0]} (n={sum(sc in m for m in ma)})', f'{names[1]} (n={sum(sc in m for m in mb)})', 'change']]
         for k, label, better, _ in METRICS:

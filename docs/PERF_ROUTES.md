@@ -109,8 +109,18 @@ pwsh -File tools\perf\ab_run.ps1 -B "NXRT_NVN_REAPER=false" -Names on,off
 - `{run}` in a value becomes a text new to every run. `NXRT_NVN_SPIRV_SALT={run}` on both sides makes every run compile its
   shaders from scratch, as on a player's first start, without deleting any cache (the way to test shader compile stutter).
 - `-Runs 3` (default) runs each side three times, alternating A B, B A, A B, so slow drift over the session falls on both.
-- Logs, screenshots and `report.md` go to `work\perf\<date-time>`. Each run takes about two minutes; don't use the PC meanwhile.
+- Logs, screenshots and `report.md` go to `work\perf\<date-time>`. Each run takes about two minutes (plus one warm-up run); don't use the PC meanwhile.
 - `-Exe`, `-Ini`, `-Route`, `-Out` point elsewhere; `-TimeoutS` (600) stops a run whose route got stuck.
+- `-Warmup 1` (default) runs side A once before the measured runs and leaves it out: the first start after a build or a reboot finds
+  the files, the driver's caches and the CPU clocks cold, and it was the outlier of nearly every A/B. `-Warmup 0` turns it off.
+- A run whose route did not pass (it failed, or `-TimeoutS` stopped it) is left out of the comparison, and the report names it. A
+  run that passed but has no line for one of the scenes is named with a warning: the route went somewhere else in that run.
+- The report compares each side's numbers as the median of its runs, with the range in brackets.
+- Pictures: the game writes a small copy of every screenshot next to it (`<shot>.png.thumb`, `[gfx] screenshot_thumb`, set by the
+  script), and `tools/perf/shot_diff.py` compares them, A against B and each side's two runs against each other (the run-to-run
+  noise: people, the clock, particles). The report's "Pictures" table marks a screenshot that differs by more than twice the noise,
+  and `diffs\<shot>.png` shows A, B and the difference side by side. A route with `@shot` lines during the walk (`sync_route.py
+  --shots`) checks both the picture and that every run went the same way.
 - `-ExeB` runs side B with another build, to compare two builds with the same settings (for example master against a pull
   request). Copy the whole `game-build\fefw\build\release` folder of the first build somewhere else before building the second:
   `-Exe C:\ab\master\ObeliskChamber.exe -ExeB game-build\fefw\build\release\ObeliskChamber.exe -Names master,pr`.
