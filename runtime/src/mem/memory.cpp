@@ -90,6 +90,7 @@ std::vector<uint8_t> g_heap_cls;
 constexpr uint8_t kLazy = 4;
 bool g_lazy = false;                      // set by heap_create
 std::atomic<uint64_t> g_lazy_faults{0}, g_lazy_bytes{0};
+std::atomic<uint64_t> g_lazy_raced{0};   // lazy faults whose page another thread committed first (retried)
 std::atomic<uint64_t> g_heap_epoch{0};    // bumped by every change of the table, inside the change's OsWriteScope
 struct Alias {
     uint64_t size;
@@ -185,15 +186,47 @@ bool lazy_try(uint64_t a) {
     std::lock_guard lk(g_heap_mu);
     if (a - kHeapBase >= g_heap_size) return false;
     const uint64_t p = (a - kHeapBase) / kPage;
+    // Another thread's first touch of the same granule committed it while this one waited for the lock: the access can run again. (Once
+    // only: the retried access finds the page committed, and a fault on it after that is not a lazy one.)
+    if (g_heap_cls[p] == 3 && bit_test(p)) {
+        g_lazy_raced.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     if (g_heap_cls[p] != kLazy) return false;   // a real fault (or the write tracker's): not ours
     if (!lazy_commit_granules_locked(p, p + 1)) return false;
     g_lazy_faults.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
+// The vectored handler. Until the write tracker installs its own handler (the first pool copy or the texture heap's region; that one
+// asks lazy_try first and then handles a page that became read-write meanwhile itself), this is the only one: a thread that faulted on a
+// page another thread's first touch committed before this thread's quick look found the page no longer lazy, and the fault went on to the
+// crash handler (seen once at boot on the laptop, 2026-11-23: a write by the game's allocator to a page that was read-write and committed
+// in the crash report, no write-tracker owner). So a fault on a committed heap page whose protection now allows the access runs again.
 LONG CALLBACK lazy_fault(EXCEPTION_POINTERS* ep) {
     if (!g_lazy || ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || ep->ExceptionRecord->NumberParameters < 2)
         return EXCEPTION_CONTINUE_SEARCH;
-    return lazy_try(ep->ExceptionRecord->ExceptionInformation[1]) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+    const ULONG_PTR kind = ep->ExceptionRecord->ExceptionInformation[0];
+    const uint64_t a = ep->ExceptionRecord->ExceptionInformation[1];
+    if (lazy_try(a)) return EXCEPTION_CONTINUE_EXECUTION;
+    if ((kind != 0 && kind != 1) || a < kHeapBase || a - kHeapBase >= kHeapMax) return EXCEPTION_CONTINUE_SEARCH;
+    {
+        std::lock_guard lk(g_heap_mu);
+        const uint64_t p = (a - kHeapBase) / kPage;
+        if (a - kHeapBase >= g_heap_size || g_heap_cls[p] != 3 || !bit_test(p)) return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // Bounded per thread and page, as the write tracker's late-write retry: a fault that keeps coming back still reaches the crash handler.
+    thread_local uint64_t t_page = 0;
+    thread_local int t_count = 0;
+    const uint64_t pg = a & ~(kPage - 1);
+    if (pg != t_page) t_page = pg, t_count = 0;
+    if (++t_count > 8) return EXCEPTION_CONTINUE_SEARCH;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof mbi) != sizeof mbi || mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_GUARD))
+        return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD pr = mbi.Protect & 0xff;
+    const bool ok = pr == PAGE_READWRITE || pr == PAGE_EXECUTE_READWRITE || (kind == 0 && (pr == PAGE_READONLY || pr == PAGE_EXECUTE_READ));
+    if (ok) g_lazy_raced.fetch_add(1, std::memory_order_relaxed);
+    return ok ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
 
 // First address >= from at which `size` bytes are free in the alias region; 0 when there is none.
@@ -789,6 +822,7 @@ bool heap_touch(uint64_t addr, uint64_t size) {
 }
 
 GaugeHook gauge_lazy_faults("mem.lazy_faults", [] { return static_cast<int64_t>(g_lazy_faults.load(std::memory_order_relaxed)); });
+GaugeHook gauge_lazy_raced("mem.lazy_raced", [] { return static_cast<int64_t>(g_lazy_raced.load(std::memory_order_relaxed)); });
 GaugeHook gauge_lazy_mb("mem.lazy_committed_mb", [] { return static_cast<int64_t>(g_lazy_bytes.load(std::memory_order_relaxed) >> 20); });
 
 uint64_t heap_committed() {
