@@ -180,3 +180,13 @@ midhook 0x71011eb084
 # spoken text (ObeliskChamber_frame.cpp, [fefw] frame_fixes): the talk sequence asks the text step 0x115d330 (x0 = the window's text, w1 =
 # letters to add, 3 a frame from 0x1154754) -> w0 finished; the entry hook skips it off the 30 Hz ticks (after Fortune's Eden v1.6.8.6)
 entryhook 0x710115d330
+# Sites fefw-recomp and EmblemWeave lift with, kept here so code mods made for them find the same sites (no hook of this port uses them;
+# a site with no hook attached only passes through).
+# EmblemWeave's npc_log: the update's reference position (v2) and the character show / hide call (x0 chara, w1 mode)
+inline 0x7101041d7c
+entryhook 0x7100d039e0
+# unit detail page crash (0x1702420, the page builder): for a unit with a mount whose class has no dismounted class (e.g. Io), the
+# class's exclusive-item count was read through a null class pointer (address 0x80). `csel x8, xzr, x22, eq` -> `mov x8, x22`: x8 is
+# never null. Built in by fefw-recomp and EmblemWeave; the same change as patches/unitinfo_animal_crashfix, which still installs (the
+# same bytes at a patch site are not a clash: fefw_build.py site_patch_words).
+patch 0x7101703498 9a9603e8 aa1603e8

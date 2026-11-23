@@ -294,15 +294,17 @@ RomFS mods go in the `mods\` folder next to the launcher (**Play** > **Open mods
 `mods\<mod name>\romfs\...`. Files in a mod replace the game's files at the same path. If two mods change the same file, the mod
 whose name sorts last wins, so you can name them `01-...` and `02-...`. Rename a mod to start with `-` or `_` to turn it off.
 
-Code mods (exefs patches) go in `mods\<mod name>\exefs\`: an `.ips` / IPS32 file named after main's build ID
-(`DB93B0125F4850601D61C3EDDE012F8EB2ECFE77.ips`) or a `.pchtxt` with that `@nsobid`. Because the game code is compiled ahead of
+Code mods (exefs patches) go in `mods\<mod name>\exefs\` or a folder inside it: an `.ips` / `.ips32` file named after main's
+build ID (`DB93B0125F4850601D61C3EDDE012F8EB2ECFE77.ips`) or a `.pchtxt` with that `@nsobid`. Because the game code is compiled ahead of
 time, they are applied when the game is built, not when it starts: after adding, changing or removing one, press **Set up** again
 (the Play page says the build is out of date). Patches for the other modules (sdk, subsdk*) are not used. A mod whose patches
 cannot be applied (a patch on an instruction this port hooks, outside main, or a file Set up cannot read) is left out with a note
 naming it, and the other mods are still applied; the game's log says at each start which mods' patches are in the build and which
-were left out. Patch lines in a `.pchtxt` need an 8-digit offset, as in IPSwitch. A patch may also add code in the padding right
+were left out. A `.pchtxt` is read as EmblemWeave reads it: lines before the first `@enabled` / `@disabled` apply, offsets may
+have any number of digits and a `0x`, and bytes may be run together or two digits apart. A patch may also add code in the padding right
 after main's code or rodata (a "code cave", up to the next 4 KiB page): Set up then grows that segment so the code is built in.
-Removing or switching off a mod that only adds hook sites (`.sites`) does not build the game again: the build already has its sites.
+Removing a mod that only adds hook sites (`.sites`) builds the game again; switching it off (in the Mods menu, or with a `-` or `_`
+at the start of its folder name) does not: the build keeps its sites.
 
 Code mods made for this port can also be DLLs in the mod's `exefs\` folder (`mods\<mod name>\exefs\<mod>.dll`), so one mod folder can
 carry an emulator's patches and this port's DLL side by side. They load when the game starts and can hook the game at the sites it was

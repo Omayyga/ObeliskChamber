@@ -70,12 +70,13 @@ class Base(unittest.TestCase):
         with open(self.main, 'wb') as f:
             f.write(make_nso())
         self.notes = []
-        self._say, self._sites = fb.say, fb.site_addresses
+        self._say, self._sites, self._words = fb.say, fb.site_addresses, fb.site_patch_words
         fb.say = lambda kind, *parts: self.notes.append(' '.join(str(p) for p in parts))
         fb.site_addresses = lambda: {}
+        fb.site_patch_words = lambda: {}
 
     def tearDown(self):
-        fb.say, fb.site_addresses = self._say, self._sites
+        fb.say, fb.site_addresses, fb.site_patch_words = self._say, self._sites, self._words
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def apply(self, patches, mod_sites=()):
@@ -142,6 +143,16 @@ class Segments(Base):
         self.assertEqual(applied, ['n'])
         self.assertIn('main.sites', left['m'])
 
+    def test_same_bytes_as_a_patch_site_apply(self):
+        # a mod that ships the fix main.sites builds in (patches/unitinfo_animal_crashfix) still installs; other bytes there clash
+        fb.site_addresses = lambda: {0x40: 'patch'}
+        fb.site_patch_words = lambda: {0x40: bytes.fromhex('e80316aa')}
+        applied, left, _ = self.apply([('m', 'm/exefs/x.ips', [(0x40, bytes.fromhex('e80316aa'))]),
+                                       ('n', 'n/exefs/y.ips', [(0x42, b'\x16')]),
+                                       ('o', 'o/exefs/z.ips', [(0x40, bytes.fromhex('1f2003d5'))])])
+        self.assertEqual(applied, ['m', 'n'])
+        self.assertIn('main.sites', left['o'])
+
     def test_rodata_padding(self):
         applied, _, segs = self.apply([('r', 'r/exefs/x.ips', [(RO[0] + RO[1], b'\x99' * 4)])])
         self.assertEqual(applied, ['r'])
@@ -157,8 +168,33 @@ class Pchtxt(unittest.TestCase):
         recs = self.parse('@nsobid-%s\n\n@flag offset_shift 0x100\n\n// Add 60 FPS\n@enabled\nAdd 60 FPS\n00001000 1F2003D5\n@stop\n' % BID)
         self.assertEqual(recs, [(0x1100, bytes.fromhex('1F2003D5'))])
 
-    def test_short_offsets_are_not_patches(self):
-        self.assertEqual(self.parse('@nsobid-%s\n@enabled\n1000 1F2003D5\n' % BID), [])
+    def test_short_and_0x_offsets_apply(self):
+        # EmblemWeave (patches.rs parse_offset) takes an offset of any length, with or without 0x
+        self.assertEqual(self.parse('@nsobid-%s\n@enabled\n1000 1F2003D5\n0x2000 AA BB\n' % BID),
+                         [(0x1000, bytes.fromhex('1F2003D5')), (0x2000, b'\xAA\xBB')])
+
+    def test_lines_before_any_section_apply(self):
+        # EmblemWeave starts enabled; a file with no @enabled line is patches, not nothing
+        self.assertEqual(self.parse('@nsobid-%s\n00001000 00\n@disabled\n00002000 11\n@enabled\n00003000 22\n' % BID),
+                         [(0x1000, b'\x00'), (0x3000, b'\x22')])
+
+    def test_last_record_before_next_section_applies(self):
+        recs = self.parse('@nsobid-%s\n@enabled\n00001000 01\n00001004 02\n@disabled\n00002000 03\n' % BID)
+        self.assertEqual(recs, [(0x1000, b'\x01'), (0x1004, b'\x02')])
+
+    def test_offset_shift_is_hex(self):
+        self.assertEqual(self.parse('@nsobid-%s\n@flag offset_shift 100\n00001000 01\n' % BID), [(0x1100, b'\x01')])
+        self.assertEqual(self.parse('@nsobid-%s\n@flag offset_shift -0x100\n00001000 01\n' % BID), [(0xF00, b'\x01')])
+        self.assertEqual(self.parse('@nsobid-%s\n@flag offset_shift\n00001000 01\n' % BID), [(0x1000, b'\x01')])
+
+    def test_comments_and_strings(self):
+        recs = self.parse('@nsobid-%s\n; note\n# note\n00001000 "a//b\\n" // tail\n' % BID)
+        self.assertEqual(recs, [(0x1000, b'a//b\n')])
+
+    def test_bad_bytes_on_a_full_offset_name_the_line(self):
+        with self.assertRaises(fb.Fail) as e:
+            self.parse('@nsobid-%s\n00001000 1F2\n' % BID)
+        self.assertIn('p.pchtxt:2', str(e.exception))
 
     def test_bad_offset_shift_names_the_line(self):
         with self.assertRaises(fb.Fail) as e:
@@ -179,6 +215,19 @@ class Collect(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.game, ignore_errors=True)
+
+    def test_ips32_and_subfolders(self):
+        d = os.path.join(self.game, 'mods', 'd-deep', 'exefs', 'Sub', 'More')
+        os.makedirs(d)
+        with open(os.path.join(d, BID + '.ips32'), 'wb') as f:
+            f.write(b'IPS32\x00\x00\x01\x20\x00\x01\xBBEEOF')
+        h = os.path.join(self.game, 'mods', 'd-deep', 'exefs', '.git')
+        os.makedirs(h)
+        with open(os.path.join(h, BID + '.ips'), 'wb') as f:
+            f.write(b'not a patch')
+        found, left, _ = fb.collect_exefs_patches(self.game, BID)
+        self.assertIn(('d-deep', 'd-deep/exefs/Sub/More/%s.ips32' % BID, [(0x20, b'\xBB')]), found)
+        self.assertNotIn('d-deep', left)
 
     def test_left_out_used_and_unused(self):
         found, left, unused = fb.collect_exefs_patches(self.game, BID)
@@ -215,6 +264,24 @@ class LiftedSites(unittest.TestCase):
         self.assertFalse(fb.mod_sites_lifted(self.game, [], 'cd' * 20))
         os.remove(os.path.join(self.game, 'ObeliskChamber.sites'))
         self.assertFalse(fb.mod_sites_lifted(self.game, [], BID))
+
+
+class ModSites(unittest.TestCase):
+    def setUp(self):
+        self.game = tempfile.mkdtemp()
+        for name, addr in (('on', 0x7100002000), ('_off', 0x7100003000), ('.hidden', 0x7100004000)):
+            d = os.path.join(self.game, 'mods', name, 'exefs')
+            os.makedirs(d)
+            with open(os.path.join(d, 'm.sites'), 'w', encoding='utf-8') as f:
+                f.write('@nsobid %s\ninline 0x%x\n' % (BID, addr))
+
+    def tearDown(self):
+        shutil.rmtree(self.game, ignore_errors=True)
+
+    def test_switched_off_mods_keep_their_sites(self):
+        # as EmblemWeave's sites.rs: a switched-off mod's sites stay, so switching it back on needs no Set up
+        self.assertEqual(sorted(a for _, _, a in fb.collect_mod_sites(self.game, BID)), [0x7100002000, 0x7100003000])
+        self.assertEqual([n for n, _ in fb.find_mod_dirs(os.path.join(self.game, 'mods'))], ['on'])
 
 
 if __name__ == '__main__':
