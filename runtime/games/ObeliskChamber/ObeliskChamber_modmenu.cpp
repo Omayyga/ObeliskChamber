@@ -5,7 +5,7 @@
 // prompt, then the shop applet, which a PC has none of) reads "DLC / Mods" and opens a list of the mods folder made from the game's own
 // Options screen class (ObeliskChamber_optmenu.cpp's pick list), on two tabs:
 //   RomFS  the mods that have romfs/ (files laid over the game's)
-//   ExeFS  the mods that have exefs/ (code: this port's DLLs, and the .ips / .pchtxt patches Set up builds in)
+//   ExeFS  the mods that have exefs/ (code: this port's DLLs, and the .ips / .ips32 / .pchtxt patches Set up builds in)
 // A row is a mod, named by its folder; its value is On or Off and A flips it. The switch is the mod's own mod.ini
 // (services::mods_set: "romfs = on|off", "exefs = on|off"), read where mods are used: the RomFS overlay and the DLL loader at the next
 // start, Set up's exefs patches at the next Set up. A mod's hook sites (exefs/*.sites) are built in by Set up whether the mod is on or off,
@@ -79,12 +79,12 @@ void row_value(int i, char* out, size_t n) {
 void row_help(int i, char* out, size_t n) {
     const Row* r = row(i);
     if (!r) return;
-    if (r->mod < 0 && r->exefs) std::snprintf(out, n, "Code mods go in mods/<name>/exefs: DLLs made for this port, or .ips / .pchtxt patches.");
+    if (r->mod < 0 && r->exefs) std::snprintf(out, n, "Code mods go in mods/<name>/exefs: DLLs made for this port, or .ips / .ips32 / .pchtxt patches.");
     else if (r->mod < 0) std::snprintf(out, n, "File mods go in mods/<name>/romfs, next to the game.");
     else if (r->exefs && r->sites_missing > 0)
         std::snprintf(out, n, "This build lacks the mod's hook sites: run Set up on the Play page, or its code will not work.");
     else if (r->exefs && g_mods[static_cast<size_t>(r->mod)].exefs_patches)
-        std::snprintf(out, n, "A: on / off. Its .ips / .pchtxt patches need Set up to change; DLLs change at the next start.");
+        std::snprintf(out, n, "A: on / off. Its exefs patches need Set up to change; DLLs change at the next start.");
     else if (r->exefs) std::snprintf(out, n, "A: on / off. Applies at the next start.");
     else std::snprintf(out, n, "A: on / off. The mod's files replace the game's. Applies at the next start.");
 }

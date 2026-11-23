@@ -411,6 +411,10 @@ void read_mod_state(const std::filesystem::path& dir, bool* romfs_on, bool* exef
         if (k == "exefs") *exefs_on = !off;
     }
 }
+bool exefs_patch_file(const std::filesystem::path& p) {
+    const std::wstring ext = p.extension().wstring();
+    return _wcsicmp(ext.c_str(), L".ips") == 0 || _wcsicmp(ext.c_str(), L".ips32") == 0 || _wcsicmp(ext.c_str(), L".pchtxt") == 0;
+}
 void find_mods(const std::filesystem::path& dir, const std::string& name, int depth, std::vector<ModInfo>& out) {
     namespace stdfs = std::filesystem;
     std::error_code ec;
@@ -421,12 +425,7 @@ void find_mods(const std::filesystem::path& dir, const std::string& name, int de
         m.dir = u8str(dir);
         m.has_romfs = romfs;
         m.has_exefs = exefs;
-        if (exefs) {
-            for (const stdfs::directory_entry& e : stdfs::directory_iterator(dir / "exefs", ec)) {
-                const std::wstring ext = e.path().extension().wstring();
-                if (e.is_regular_file(ec) && (_wcsicmp(ext.c_str(), L".ips") == 0 || _wcsicmp(ext.c_str(), L".pchtxt") == 0)) m.exefs_patches = true;
-            }
-        }
+        if (exefs) m.exefs_patches = exefs_patch_files(u8str(dir / "exefs"));
         read_mod_state(dir, &m.romfs_on, &m.exefs_on);
         out.push_back(std::move(m));
         return;
@@ -444,6 +443,23 @@ void find_mods(const std::filesystem::path& dir, const std::string& name, int de
     }
 }
 }  // namespace
+
+bool exefs_patch_files(const std::string& exefs_dir) {
+    namespace stdfs = std::filesystem;
+    std::error_code ec;
+    try {
+        for (stdfs::recursive_directory_iterator it(stdfs::u8path(exefs_dir), ec), end; !ec && it != end; it.increment(ec)) {
+            const std::u8string leaf = it->path().filename().u8string();
+            if (it->is_directory(ec)) {
+                if (!leaf.empty() && leaf[0] == u8'.') it.disable_recursion_pending();
+                continue;
+            }
+            if (it->is_regular_file(ec) && exefs_patch_file(it->path())) return true;
+        }
+    } catch (const std::exception&) {   // the iterator's increment can throw on an I/O error despite ec
+    }
+    return false;
+}
 
 std::vector<ModInfo> mods_list() {
     std::vector<ModInfo> out;

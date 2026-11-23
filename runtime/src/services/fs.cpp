@@ -446,9 +446,10 @@ std::shared_ptr<Service> make_storage_rom(std::shared_ptr<fs::RomfsImage> img) {
     });
 }
 
-// An emulator's code patches in a mod's exefs/ (.ips, .pchtxt, ...): anything but the DLLs mods_dll.cpp loads and the hook
-// site lists (.sites) Set up reads for them
+// An emulator's code patches in a mod's exefs/ (.ips, .ips32, .pchtxt, also in a folder below exefs/, ...): anything but the DLLs
+// mods_dll.cpp loads and the hook site lists (.sites) Set up reads for them
 bool has_exefs_patches(const RomfsMod& m) {
+    if (exefs_patch_files(m.exefs)) return true;
     std::error_code ec;
     for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(m.exefs), ec)) {
         if (!e.is_regular_file(ec)) continue;
@@ -482,15 +483,10 @@ std::map<std::string, std::pair<std::string, std::string>> exefs_record() {
 // The start-up log line for a mod with exefs patches: what the last Set up did with them, not only that Set up applies them.
 void log_exefs_patches(const RomfsMod& m, const std::map<std::string, std::pair<std::string, std::string>>& rec) {
     const auto it = rec.find(m.name);
-    bool patches = false;   // .ips / .pchtxt: what Set up applies (other files in exefs/ are an emulator's and not used here)
-    std::error_code ec;
-    for (const stdfs::directory_entry& e : stdfs::directory_iterator(stdfs::u8path(m.exefs), ec)) {
-        std::wstring ext = e.path().extension().wstring();
-        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-        if (e.is_regular_file(ec) && (ext == L".ips" || ext == L".pchtxt")) patches = true;
-    }
+    // .ips / .ips32 / .pchtxt: what Set up applies (other files in exefs/ are an emulator's and not used here)
+    const bool patches = exefs_patch_files(m.exefs);
     if (it == rec.end() && !patches)
-        NXLOG_I("mods", "%s: exefs files other than .ips / .pchtxt patches and DLLs are not used", m.name.c_str());
+        NXLOG_I("mods", "%s: exefs files other than .ips / .ips32 / .pchtxt patches and DLLs are not used", m.name.c_str());
     else if (it == rec.end())
         NXLOG_W("mods", "%s: exefs patches are not in this build (Set up applies them, not the start-up): press Set up to apply them", m.name.c_str());
     else if (it->second.first == "applied")

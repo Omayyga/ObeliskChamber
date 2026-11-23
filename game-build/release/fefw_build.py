@@ -441,10 +441,11 @@ PROGRAM_ID = 0x04007EF01F8AE000
 NSO_HEADER = 0x100              # IPS offsets (and pchtxt addresses with @flag offset_shift 0x100) count from the NSO header
 
 
-def find_mod_dirs(root):
+def find_mod_dirs(root, include_off=False):
     """The mods as the runtime finds them (runtime/src/services/common.cpp find_mods): a folder below mods/ that has romfs/ or
-    exefs/ is a mod; names starting with -, _ or . are off; a 16-digit hex folder that is another title's program ID is skipped.
-    Returns [(name, path)] sorted by name, so the mod whose name sorts last wins where two patch the same bytes."""
+    exefs/ is a mod; names starting with -, _ or . are off (with include_off, those starting with - or _ are found too); a
+    16-digit hex folder that is another title's program ID is skipped. Returns [(name, path)] sorted by name, so the mod whose
+    name sorts last wins where two patch the same bytes."""
     out = []
 
     def walk(d, name, depth):
@@ -459,7 +460,7 @@ def find_mod_dirs(root):
             return
         for sub in subs:
             p = os.path.join(d, sub)
-            if not os.path.isdir(p) or not sub or sub[0] in '-_.':
+            if not os.path.isdir(p) or not sub or sub[0] in ('.' if include_off else '-_.'):
                 continue
             if len(sub) == 16 and all(c in '0123456789abcdefABCDEF' for c in sub) and int(sub, 16) != PROGRAM_ID:
                 continue
@@ -509,17 +510,59 @@ def parse_ips(data, where):
             p += size
 
 
+PCHTXT_LINE = re.compile(r'^(?:0[xX])?([0-9A-Fa-f]+)\s+(.+)$')
+
+
+def pchtxt_strip_comment(raw):
+    """The line without a // comment; a // inside a "string" (after a backslash-free quote) is part of the string."""
+    q = False
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c == '\\' and q:
+            i += 2
+            continue
+        if c == '"':
+            q = not q
+        elif c == '/' and not q and raw[i + 1:i + 2] == '/':
+            return raw[:i].strip()
+        i += 1
+    return raw.strip()
+
+
+def pchtxt_bytes(val, little):
+    """The value of a pchtxt patch line: "a string" (C escapes) or hex bytes, run together (IPSwitch) or two digits per token
+    (EmblemWeave's patches.rs) -> bytes, or None when it is neither."""
+    if val.startswith('"'):
+        if not val.endswith('"') or len(val) < 2:
+            return None
+        try:
+            return val[1:-1].encode('utf-8').decode('unicode_escape').encode('latin-1')
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return None
+    hx = re.sub(r'\s+', '', val)
+    if not hx or len(hx) % 2 or any(c not in '0123456789abcdefABCDEF' for c in hx):
+        return None
+    b = bytes.fromhex(hx)
+    return b[::-1] if little else b
+
+
 def parse_pchtxt(text, where, build_id):
     """IPSwitch .pchtxt: @nsobid-<id>, @flag offset_shift <n>, @enabled / @disabled blocks, @stop, @little-endian / @big-endian,
-    `ADDR HEXBYTES` and `ADDR "string"` lines, // comments. -> [(file offset, bytes)], or None when it is for another build."""
+    `ADDR HEXBYTES` and `ADDR "string"` lines, // ; # comments. -> [(file offset, bytes)], or None when it is for another build.
+
+    Read as EmblemWeave reads it (apps/emblemweave/src/patches.rs), so a mod made for either applies the same here: lines before
+    the first @enabled / @disabled apply, ADDR may have any number of digits and a 0x, and the offset shift is hexadecimal with
+    or without 0x. Beyond that, a block's title line that is not an address and bytes ("Add 60 FPS") is passed over, where
+    EmblemWeave refuses the file."""
     out = []
     shift = 0
-    enabled = False
+    enabled = True
     little = False
     bid = None
     for ln, raw in enumerate(text.splitlines(), 1):
-        line = raw.split('//', 1)[0].strip()
-        if not line:
+        line = pchtxt_strip_comment(raw)
+        if not line or line[0] in ';#':
             continue
         low = line.lower()
         if low.startswith('@nsobid-'):
@@ -543,34 +586,32 @@ def parse_pchtxt(text, where, build_id):
             continue
         if low.startswith('@flag'):
             parts = line.split()
-            if len(parts) >= 2 and parts[1].lower() == 'offset_shift':
+            if len(parts) >= 3 and parts[1].lower() == 'offset_shift':
+                v = parts[2]
+                neg = v.startswith('-')
+                body = v[1:] if neg else v
+                if body[:2].lower() == '0x':
+                    body = body[2:]
                 try:
-                    shift = int(parts[2], 0)
-                except (IndexError, ValueError):
-                    raise Fail('%s:%d: @flag offset_shift needs a number (such as 0x100), not "%s"'
+                    shift = int(body, 16) * (-1 if neg else 1)
+                except ValueError:
+                    raise Fail('%s:%d: @flag offset_shift needs a hexadecimal number (such as 0x100), not "%s"'
                                % (where, ln, ' '.join(parts[2:])))
-            continue
+            continue                     # "@flag offset_shift" with no number changes nothing, as in fefw-recomp
         if low.startswith('@'):
             continue                     # other @ lines (e.g. @flag print_values) change nothing here
-        m = re.match(r'^([0-9A-Fa-f]{8})\s+(.+)$', line)
+        m = PCHTXT_LINE.match(line)
         if not m:
-            continue                     # a title line between blocks ("Add 60 FPS"): patch lines have an 8-digit offset, as in IPSwitch
+            continue                     # a title line between blocks ("Add 60 FPS")
+        val = m.group(2).strip()
+        b = pchtxt_bytes(val, little)
+        if b is None:
+            if len(m.group(1)) == 8 and not line[:2].lower() == '0x' and enabled:
+                raise Fail('%s:%d: %s is not hex bytes or a closed "string"' % (where, ln, val))
+            continue                     # a title that starts with a hex-looking word ("Add 60 FPS", "Fade in")
         if not enabled:
             continue
-        addr = int(m.group(1), 16)
-        val = m.group(2).strip()
-        if val.startswith('"'):
-            if not val.endswith('"') or len(val) < 2:
-                raise Fail('%s:%d: the string is not closed' % (where, ln))
-            b = val[1:-1].encode('utf-8').decode('unicode_escape').encode('latin-1')
-        else:
-            hx = re.sub(r'\s+', '', val)
-            if len(hx) % 2 or any(c not in '0123456789abcdefABCDEF' for c in hx):
-                raise Fail('%s:%d: %s is not hex bytes' % (where, ln, val))
-            b = bytes.fromhex(hx)
-            if little:
-                b = b[::-1]
-        out.append((addr + shift, b))
+        out.append((int(m.group(1), 16) + shift, b))
     if bid is None:
         raise Fail('%s has no @nsobid line, so it cannot be matched to the game version' % where)
     return out
@@ -593,6 +634,19 @@ def mod_exefs_on(d):
     return True
 
 
+def exefs_files(ex):
+    """Every file in a mod's exefs/ and the folders in it (EmblemWeave's patches.rs walks them too), skipping folders whose name
+    starts with "." -> [(path relative to exefs/ with /, full path)], sorted by that relative path, case ignored."""
+    out = []
+    for root, dirs, files in os.walk(ex):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        for f in files:
+            full = os.path.join(root, f)
+            out.append((os.path.relpath(full, ex).replace(os.sep, '/'), full))
+    out.sort(key=lambda t: t[0].lower())
+    return out
+
+
 def collect_exefs_patches(game, build_id):
     """The exefs patches of the installed mods for main: ([(mod name, file, [(memory offset, bytes)])] in the order they apply,
     {mod name: why it is left out}, [mod names with patch files but none for this main]). IPS files count when their name is main's
@@ -605,12 +659,12 @@ def collect_exefs_patches(game, build_id):
             continue
         mine, any_file = [], False
         try:
-            for f in sorted(os.listdir(ex), key=str.lower):
-                p = os.path.join(ex, f)
+            for rel, p in exefs_files(ex):
+                f = os.path.basename(rel)
                 stem, ext = os.path.splitext(f)
                 ext = ext.lower()
-                where = '%s/exefs/%s' % (name, f)
-                if ext == '.ips':
+                where = '%s/exefs/%s' % (name, rel)
+                if ext in ('.ips', '.ips32'):
                     any_file = True
                     if not bid_matches(stem, build_id):
                         continue         # another module or another version
@@ -853,9 +907,10 @@ def write_exefs_record(exefs, applied, left_out, unused):
 # a call into the runtime (inline, midhook, entryhook: the instructions are lifted as before), plus one line
 #     @nsobid <main build ID>          (as in a .pchtxt)
 # so that sites for another version of the game are left out. Set up lifts main with main.sites plus these sites; they are part
-# of the build stamp, so installing, updating or removing such a mod lifts again. The sites of a mod with exefs = off in mod.ini
-# are kept: a site no hook is attached to only passes through, so switching the mod on or off (the game's Mods menu) needs no Set up,
-# only the next start, like any DLL mod. The list main was lifted with is written next to ObeliskChamber.exe (ObeliskChamber.sites,
+# of the build stamp, so installing, updating or removing such a mod lifts again. The sites of a mod with exefs = off in mod.ini,
+# or switched off by a - or _ at the start of its folder name, are kept (as EmblemWeave's sites.rs keeps them): a site no hook is
+# attached to only passes through, so switching the mod on or off (the game's Mods menu, or renaming it) needs no Set up, only the
+# next start, like any DLL mod. The list main was lifted with is written next to ObeliskChamber.exe (ObeliskChamber.sites,
 # write_lifted_sites), so the runtime can tell a mod whose sites are missing from this build.
 MOD_SITE_KINDS = ('inline', 'midhook', 'entryhook')
 
@@ -863,9 +918,9 @@ MOD_SITE_KINDS = ('inline', 'midhook', 'entryhook')
 def collect_mod_sites(game, build_id):
     """The hook sites the installed mods add to main: [(file:line, kind, guest address)], in mod order."""
     found = []
-    for name, d in find_mod_dirs(os.path.join(game, 'mods')):
+    for name, d in find_mod_dirs(os.path.join(game, 'mods'), include_off=True):
         ex = os.path.join(d, 'exefs')
-        if not os.path.isdir(ex):        # exefs = off does not count here (see above)
+        if not os.path.isdir(ex):        # exefs = off and a switched-off folder do not count here (see above)
             continue
         for f in sorted(os.listdir(ex), key=str.lower):
             if not f.lower().endswith('.sites') or not os.path.isfile(os.path.join(ex, f)):
