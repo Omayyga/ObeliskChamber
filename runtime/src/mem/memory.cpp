@@ -563,9 +563,9 @@ bool heap_create(uint64_t reserve_bytes) {
     }
     g_section = sec;
     g_heap_size = size;
-    // [memory] heap_lazy_commit (default off): SetHeapSize reserves its pages and they are committed at first use. Windows only (Wine's
+    // [memory] heap_lazy_commit (default on): SetHeapSize reserves its pages and they are committed at first use. Windows only (Wine's
     // handling of faults on uncommitted section pages is not tested), with the section.
-    g_lazy = !wine && config_get_bool("memory", "heap_lazy_commit", false);
+    g_lazy = !wine && config_get_bool("memory", "heap_lazy_commit", true);
     if (g_lazy) {
         static void* veh = AddVectoredExceptionHandler(1, lazy_fault);
         if (!veh) {
