@@ -159,6 +159,7 @@ const char* window_mode_name() {
         std::lock_guard<std::mutex> lk(g_lost_ctx_mu);
         if (!g_lost_ctx.empty()) text += g_lost_ctx;
     }
+    text += diag_vk_failure_text(true);   // the first failed Vulkan call, which may be earlier than this one (gpu_diag.cpp)
     text += gpu_timeout_hint();
     text += device_fault_report();
     if (auto* extra = g_lost_extra.load()) text += extra();
@@ -169,6 +170,7 @@ const char* window_mode_name() {
                   "or the texture quality. Please attach this file and ObeliskChamber.log to an issue.\n";
     text += "\n";
     text += diag_thread_dump();
+    text += diag_extra_reports();   // as in a freeze dump: the GPU state, frame times, the last compute dispatches
     for (size_t pos = 0; pos < text.size();) {
         size_t eol = text.find('\n', pos);
         if (eol == std::string::npos) eol = text.size();
@@ -932,6 +934,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
             s.stalled("the previous frame on this slot (GPU)");
             return false;
         }
+        if (fr != VK_SUCCESS && fr != VK_TIMEOUT) diag_vk_note(static_cast<int>(fr), "vkWaitForFences (frame slot)", __FILE__, __LINE__);
         if (fr == VK_ERROR_DEVICE_LOST) device_lost("vkWaitForFences (frame slot)", fr, s.st.frames);
         if (fr != VK_SUCCESS) NXLOG_E(kTag, "vkWaitForFences failed (%d)", static_cast<int>(fr));
         else g_last_frame_done_ns.store(steady_ns(), std::memory_order_relaxed);
@@ -947,6 +950,7 @@ bool Renderer::begin_frame(FrameInfo* out) {
             s.stalled("a swapchain image");
             return false;
         }
+        if (r != VK_SUCCESS) diag_vk_note(static_cast<int>(r), "vkAcquireNextImageKHR", __FILE__, __LINE__);
         if (r == VK_ERROR_DEVICE_LOST) device_lost("vkAcquireNextImageKHR", r, s.st.frames);
         if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
             s.dirty = true;
@@ -1089,6 +1093,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
         VkResult r = vkQueueSubmit2(s.dev->queue(), 1, &si, slot.fence);
         if (r != VK_SUCCESS) {
             NXLOG_E(kTag, "vkQueueSubmit2 failed (%d)", static_cast<int>(r));
+            diag_vk_note(static_cast<int>(r), "vkQueueSubmit2 (present)", __FILE__, __LINE__);
             if (r == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present)", r, s.st.frames);
             // The fence was reset in begin_frame and the present below waits for render_done: an empty submission stands in (it waits
             // for the acquire and signals both), so neither the next begin_frame nor the present hangs on something never signalled.
@@ -1100,6 +1105,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
                 stand.pSignalSemaphoreInfos = &signal;
             }
             const VkResult r2 = vkQueueSubmit2(s.dev->queue(), 1, &stand, slot.fence);
+            if (r2 != VK_SUCCESS) diag_vk_note(static_cast<int>(r2), "vkQueueSubmit2 (present stand-in)", __FILE__, __LINE__);
             if (r2 == VK_ERROR_DEVICE_LOST) device_lost("vkQueueSubmit2 (present stand-in)", r2, s.st.frames);
             if (r2 != VK_SUCCESS) {
                 NXLOG_E(kTag, "the stand-in submission failed too (%d): the frame is not presented, the slot's sync objects are made again",
@@ -1128,6 +1134,7 @@ void Renderer::end_frame(SubmitPrefix* prefix) {
             }
             r = vkQueuePresentKHR(s.dev->queue(), &pi);
             s.st.presents++;
+            if (r != VK_SUCCESS) diag_vk_note(static_cast<int>(r), "vkQueuePresentKHR", __FILE__, __LINE__);
             if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
                 s.dirty = true;
                 s.st.out_of_date++;
