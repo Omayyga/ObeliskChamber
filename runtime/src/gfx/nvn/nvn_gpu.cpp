@@ -285,9 +285,20 @@ std::atomic<uint64_t> g_copy_inflight{0};
 std::mutex g_copy_done_mu;
 std::condition_variable g_copy_done_cv;
 
+// The timeline's value, or false when it cannot be read. After a device loss NVIDIA's driver answers UINT64_MAX (or an error): taken as it
+// is, that marked every submission complete, and the device-lost report said none was still running (fefw-recomp #109, metrist38).
+bool timeline_value(uint64_t* v) {
+    *v = 0;
+    if (!g || !g->timeline) return false;
+    uint64_t t = 0;
+    if (vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &t) != VK_SUCCESS || t == UINT64_MAX) return false;
+    *v = t;
+    return true;
+}
+
 uint64_t read_completed() {
     uint64_t v = 0;
-    if (g && g->timeline) vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v);
+    timeline_value(&v);
     const uint64_t copying = g_copy_inflight.load();
     if (copying && v >= copying) v = copying - 1;
     if (v > g->completed.load()) g->completed.store(v);
@@ -1435,13 +1446,15 @@ std::atomic<uint64_t> g_wait_serial{0}, g_wait_timeout{0};   // the latest wait:
 std::string gpu_report() {
     if (!g) return {};
     uint64_t v = 0;
-    if (g->timeline) vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v);
+    const bool readable = timeline_value(&v);
+    if (!readable) v = g->completed.load();   // the last value read before it became unreadable
     char b[400];
     size_t q = 0;
     bool got = false;
     if (g->qmu.try_lock()) { q = g->queue.size(); got = true; g->qmu.unlock(); }
-    std::snprintf(b, sizeof b, "NVN back end: last submitted serial %llu, timeline value %llu, %d game thread(s) in a sync wait (latest wait: serial %llu, timeout %llu ns), sync waits begun %llu done %llu, submits %llu, presents %llu, render queue %s%zu\n",
-                  static_cast<unsigned long long>(g->last_submitted.load()), static_cast<unsigned long long>(v), g_waiters.load(),
+    std::snprintf(b, sizeof b, "NVN back end: last submitted serial %llu, timeline value %llu%s, %d game thread(s) in a sync wait (latest wait: serial %llu, timeout %llu ns), sync waits begun %llu done %llu, submits %llu, presents %llu, render queue %s%zu\n",
+                  static_cast<unsigned long long>(g->last_submitted.load()), static_cast<unsigned long long>(v),
+                  readable ? "" : " (unreadable, the last value read)", g_waiters.load(),
                   static_cast<unsigned long long>(g_wait_serial.load()), static_cast<unsigned long long>(g_wait_timeout.load()),
                   static_cast<unsigned long long>(g_waits_begun.load()), static_cast<unsigned long long>(g_waits_done.load()),
                   static_cast<unsigned long long>(g->ctr.submits.load()), static_cast<unsigned long long>(g->ctr.presents.load()), got ? "" : "(busy) ", q);
@@ -1749,7 +1762,7 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     if (ft::on()) extras::lowlat_set_backlog_fn([]() -> uint64_t {      // latency probe: submissions the GPU has not finished
         if (!g || !g->timeline) return 0;
         uint64_t v = 0;
-        vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v);
+        if (!timeline_value(&v)) return 0;
         const uint64_t sub = g->last_submitted.load();
         return sub > v ? sub - v : 0;
     });
