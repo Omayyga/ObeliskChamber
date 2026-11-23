@@ -949,17 +949,44 @@ bool range_valid(const Mirror& m, uint64_t first, uint64_t count) {
     return true;
 }
 
+// [nvn] mirror_new_per_present / mirror_chunks_per_present (auto: 4 each with memory limits scaled to the PC, else 0 = no cap): in play
+// (paced, and not in the first 180 presents after a load), at most this many pools get a new device-local copy, and at most this many new
+// copy chunks are made, a present. The rest wait for a later present and are read from the pools meanwhile. Turning the camera in a hub made
+// 15-30 copies (a buffer and a write-tracking region each) in one frame. Loads are not capped. Technique from fefw-recomp #119 (metrist38).
+struct PresentCap {
+    const char* key;
+    int64_t limit = -1;
+    uint32_t at = 0, n = 0;
+    uint64_t refused = 0;
+    // true: one more is allowed now (and counted)
+    bool take() {
+        if (limit < 0) {
+            const std::string v = config_get_str("nvn", key, "auto");
+            limit = (v == "auto" || v.empty()) ? (mem::limits_scaled() ? 4 : 0) : std::max<int64_t>(0, config_get_int("nvn", key, 0));
+            NXLOG_I(kTag, "pool copies: [nvn] %s = %lld%s", key, static_cast<long long>(limit), limit ? " in play" : " (no cap)");
+        }
+        if (limit == 0 || !paced_play(180)) return true;
+        const uint32_t now = presents_now();
+        if (now != at) at = now, n = 0;
+        if (n >= static_cast<uint64_t>(limit)) { ++refused; return false; }
+        ++n;
+        return true;
+    }
+};
+PresentCap g_cap_new{"mirror_new_per_present"}, g_cap_chunks{"mirror_chunks_per_present"};   // render thread
+
 Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     for (const PoolChunk& c : pg->chunks) if (c.copy.buffer) return nullptr;
     for (const PoolChunk& c : pg->spans) if (c.copy.buffer) return nullptr;
     if (pg->mirror || pg->mirror_tried) return pg->mirror;
-    pg->mirror_tried = true;
-    if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) return nullptr;
+    if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) { pg->mirror_tried = true; return nullptr; }
     // Tracked copies change the protection of the CPU's view of the pages. With [nvn] pool_view = false the GPU import is that same view;
     // that combination is not tried: no copy.
-    if (!pg->viewed) return nullptr;
+    if (!pg->viewed) { pg->mirror_tried = true; return nullptr; }
     const uint64_t budget = mirror_cap_bytes();
-    if (budget == 0) return nullptr;
+    if (budget == 0) { pg->mirror_tried = true; return nullptr; }
+    if (!g_cap_new.take()) return nullptr;     // a later present makes it
+    pg->mirror_tried = true;
 
     auto m = std::make_unique<Mirror>();
     // Without tracking of the CPU's writes there is no copy: a copy that misses a write serves old vertices and indices, and after an area
@@ -1056,11 +1083,12 @@ void log_summary(uint32_t now) {
             hot += m->hot_until[static_cast<size_t>(p)] > now ? 1 : 0;
         }
     }
-    NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu (pages released ahead %llu)",
+    NXLOG_I(kTag, "pool mirrors: %zu, %llu MiB, valid %llu MiB, hot %llu KiB; binds to mirrors %lld, to pools %lld; copied %lld MiB; write faults %llu (pages released ahead %llu); put off to a later present: new copies %llu, chunks %llu",
             g_mirrors.size(), static_cast<unsigned long long>(g_mirror_bytes >> 20), static_cast<unsigned long long>(valid * kPageBytes >> 20),
             static_cast<unsigned long long>(hot * kPageBytes >> 10), static_cast<long long>(g_st_dev_binds.load()), static_cast<long long>(g_st_host_binds.load()),
             static_cast<long long>(g_st_copied.load() >> 20), static_cast<unsigned long long>(mem::ww::faults()),
-            static_cast<unsigned long long>(mem::ww::coalesced_pages()));
+            static_cast<unsigned long long>(mem::ww::coalesced_pages()), static_cast<unsigned long long>(g_cap_new.refused),
+            static_cast<unsigned long long>(g_cap_chunks.refused));
     NXLOG_I(kTag, "pool mirror binds (copy/pool/not eligible): vertex %lld/%lld/%lld index %lld/%lld/%lld uniform %lld/%lld/%lld; GPU writes (calls/pages): storage %lld/%lld "
             "stream-out %lld/%lld image copy %lld/%lld update %lld/%lld fill %lld/%lld copy %lld/%lld",
             (long long)g_use_dev[0], (long long)g_use_host[0], (long long)g_use_skip[0], (long long)g_use_dev[1], (long long)g_use_host[1], (long long)g_use_skip[1],
@@ -1372,6 +1400,7 @@ VkBuffer mirror_chunk(Mirror& m, uint64_t page) {
         }
         refusing = false;
     }
+    if (!g_cap_chunks.take()) return VK_NULL_HANDLE;   // [nvn] mirror_chunks_per_present: a later present makes it
     // texel buffer and transfer source usage: compute dispatches bind the copy directly as storage and texel buffers, and their results go
     // back to the pool from it (nvn_replay.cpp, compute shadows)
     if (bytes == kChunkBytes) {

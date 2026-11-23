@@ -27,6 +27,7 @@
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
 #include "nxrt/log.h"
+#include "nxrt/memory.h"
 #include "astc2bc7.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_texdata.h"
@@ -158,6 +159,7 @@ struct State {
     double max_present_ms = 0.0;      // and its estimate
     uint64_t present_ns = 0;          // when that present was first seen
     double frame_ms = 1000.0 / 30.0;  // present interval, smoothed
+    uint64_t play_capped = 0;         // budget_now answers that astc_gpu_play_max_ms lowered (statistics)
     uint64_t load_until_ns = 0;       // the load floor applies until then (a present interval over kLoadFrameMs started it)
     uint64_t n_load_windows = 0;
     double rate = 150e3;              // texels per millisecond of GPU time (decode and encode), measured
@@ -979,12 +981,12 @@ void log_stats(bool force) {
     const double mt = static_cast<double>(s.timed_texels) / 1e6;
     NXLOG_I(kTag, "%llu textures (%.1f M texels) transcoded on the GPU, %.0f ms of render thread time for it (%.3f ms a texture): %.1f ms of GPU time over %llu timed passes (%.1f M texels, "
                   "%.2f ms per M texel, longest pass %.1f ms); %llu textures queued over the budget (their stand-ins on screen for %.0f ms on average, %.0f ms and %u presents at most; %zu "
-                  "waiting, %llu dropped as stale; %llu load windows); %llu stored in the cache (%llu not), %llu failed; most in one present: %.1f M texels "
+                  "waiting, %llu dropped as stale; %llu load windows; budget capped in play %llu times); %llu stored in the cache (%llu not), %llu failed; most in one present: %.1f M texels "
                   "(estimated %.0f ms); last %u passes: median %.2f ms per M texel, fastest quarter %.2f",
             static_cast<unsigned long long>(s.n_tex), static_cast<double>(s.n_texels) / 1e6, static_cast<double>(s.cpu_ns) * 1e-6,
             static_cast<double>(s.cpu_ns) * 1e-6 / static_cast<double>(s.n_tex), s.gpu_ms, static_cast<unsigned long long>(s.n_timed), mt, mt > 0 ? s.gpu_ms / mt : 0.0, s.max_ms,
             static_cast<unsigned long long>(s.n_deferred), s.n_waited ? s.sum_wait_ms / static_cast<double>(s.n_waited) : 0.0, s.max_wait_ms, s.max_wait_presents, s.q.size(),
-            static_cast<unsigned long long>(s.n_stale), static_cast<unsigned long long>(s.n_load_windows), static_cast<unsigned long long>(s.stored.load()), static_cast<unsigned long long>(s.store_failed.load()),
+            static_cast<unsigned long long>(s.n_stale), static_cast<unsigned long long>(s.n_load_windows), static_cast<unsigned long long>(s.play_capped), static_cast<unsigned long long>(s.stored.load()), static_cast<unsigned long long>(s.store_failed.load()),
             static_cast<unsigned long long>(s.n_failed), static_cast<double>(s.max_present_texels) / 1e6, s.max_present_ms, s.win.n,
             s.win.median() > 0.0 ? 1e6 / s.win.median() : 0.0, s.win.quarter_ms());
 }
@@ -1030,10 +1032,34 @@ void tick_present() {
     if (s.ticks.size() > 4096) s.ticks.pop_front();
 }
 
+// [gfx] astc_gpu_play_max_ms (auto: 4 with memory limits scaled to the PC, else 0 = no cap): in play (paced, and not in the first seconds
+// after a load) the budget is at most this, and at most half of it while video memory is at 92% or more. The budget grows with the present
+// interval, so one slow frame let the next ones transcode more, which made them slow too; and under memory pressure every transcode is a
+// new image. Loads keep astc_gpu_load_ms. Technique from fefw-recomp #117 / #119 (metrist38).
+double play_max_ms() {
+    static const double v = [] {
+        const std::string c = nxrt::config_get_str("gfx", "astc_gpu_play_max_ms", "auto");
+        const double ms = (c == "auto" || c.empty()) ? (nxrt::mem::limits_scaled() ? 4.0 : 0.0)
+                                                     : std::clamp(nxrt::config_get_double("gfx", "astc_gpu_play_max_ms", 0.0), 0.0, 1000.0);
+        NXLOG_I(kTag, "in play the transcode budget is at most %.1f ms a present%s ([gfx] astc_gpu_play_max_ms%s)", ms, ms > 0.0 ? "" : ": no cap",
+                (c == "auto" || c.empty()) ? ", auto" : "");
+        return ms;
+    }();
+    return v;
+}
+constexpr uint64_t kPlayGracePresents = 180;   // the scene's load-in: the first 180 presents after a load are not capped
+
 double budget_now() {
     State& s = S();
-    const double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
+    double b = s.budget_ms * s.frame_ms / (1000.0 / 30.0);
     if (s.load_until_ns && !s.q.empty() && s.present_ns < s.load_until_ns) return std::max(b, s.load_ms);   // [gfx] astc_gpu_load_ms
+    if (const double mx = play_max_ms(); mx > 0.0 && paced_play(kPlayGracePresents)) {
+        const double cap = resid_pressure_percent() >= 92 ? mx / 2.0 : mx;
+        if (b > cap) {
+            b = cap;
+            ++s.play_capped;
+        }
+    }
     return b;
 }
 
