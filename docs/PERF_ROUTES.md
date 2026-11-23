@@ -62,6 +62,22 @@ Free movement drifts a little between runs (a load half a second slower, frame t
 walking. For a scene in a particular place, save the game there and record only the menus, standing still and turning the camera;
 on a battle map, the tile cursor repeats exactly.
 
+**Start the walk when the save has loaded.** A recorded route plays each press at its time from the launch, so on another PC (or after
+a change that makes boot or the load slower) the first steps of the walk happen behind the loading screen and are lost: the character
+starts in the middle of the route and never reaches the places it was meant to measure. `tools/perf/sync_route.py` rewrites a recording
+so that its gameplay waits for the load instead (`@loaded`: a load began, ended and nothing loaded for 2 s), then plays the recorded
+times counted from there (`@origin`):
+
+```
+tools\.venv\Scripts\python.exe -I tools\perf\sync_route.py tools\perf\routes\my_route.tt -o tools\perf\routes\my_route_sync.tt
+```
+
+The walk starts at the recording's first stick step (half a second before it; `--from <s>` picks another point). `--menu <file>` replaces
+the recording's menu presses with your own steps, for a PC whose title needs other presses (with `[fefw] title_continue` on, the cursor
+already sits on Continue: no DOWN). `--shots 10` adds a screenshot every 10 s of the walk (`walk_000.png` ...) to check where the
+character went; leave it off for timing runs, since a screenshot costs a frame. `@loaded` needs `[display] unpaced_loading` on (the
+default): that is what tells a loading screen apart.
+
 The menus of a recorded route depend on load times staying about the same: keep the same save, cache and settings, and leave a few
 seconds of margin before each press in the recording (don't rush through the menus).
 

@@ -621,6 +621,26 @@ bool parse_stmt(const std::string& body, const std::vector<std::string>& t, cons
         return true;
     }
 
+    if (kw == "@loaded") {
+        std::vector<std::string> pos;
+        int64_t timeout = -1;
+        if (!take_timeout(t, 1, pos, &timeout, msg)) return false;
+        if (pos.size() > 1) return usage(msg, "@loaded [<quiet_ms>] [timeout=<ms>]");
+        Step s = make(StepKind::WaitLoaded);
+        s.x = 2000.0;
+        if (pos.size() == 1 && !real_arg(pos[0], &s.x, msg)) return false;
+        if (s.x < 0.0) return fail_with(msg, "@loaded quiet ms must be >= 0, got '" + pos[0] + "'");
+        s.timeout = timeout;
+        out.push_back(s);
+        return true;
+    }
+
+    if (kw == "@origin") {
+        if (n != 1) return usage(msg, "@origin");
+        out.push_back(make(StepKind::Origin));
+        return true;
+    }
+
     if (kw == "@sleep") {
         if (n != 2) return usage(msg, "@sleep <ms>");
         Step s = make(StepKind::WaitMs);
