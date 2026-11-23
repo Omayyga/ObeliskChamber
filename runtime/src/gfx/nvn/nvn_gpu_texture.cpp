@@ -2370,29 +2370,6 @@ struct Untiler {
 Untiler g_untile;
 std::atomic<uint64_t> g_untile_scratch_bytes{0};
 
-// [nvn] untile_scratch_idle (default on): a ring entry's scratch buffer grows to the largest level it untiled and was kept for the whole
-// session, so the 16 entries trended to 16 x the largest texture of video memory. Now one is released once its GPU work is done when it is
-// over 64 MiB, or after 600 presents without an untile. Render thread, start of a submission.
-void untile_scratch_tick(uint64_t presents) {
-    static const bool on = config_get_bool("nvn", "untile_scratch_idle", true);
-    static const bool gauged = (nxrt::gauge_register("nvn.untile.scratch_mb", [] { return static_cast<int64_t>(g_untile_scratch_bytes.load(std::memory_order_relaxed) >> 20); }), true);
-    (void)gauged;
-    Untiler& u = g_untile;
-    if (!u.ok) return;
-    uint64_t live = 0;
-    for (Untiler::Entry& e : u.ring) {
-        if (!e.scratch) continue;
-        const bool done = !e.serial || completed_serial() >= e.serial;
-        if (on && done && (e.scratch.size > (64ull << 20) || presents - e.used_at > 600)) {
-            gfx::Buffer old = e.scratch;
-            defer_destroy_vk([old]() mutable { device().destroy_buffer(old); });
-            e.scratch = gfx::Buffer{};
-            continue;
-        }
-        live += e.scratch.size;
-    }
-    g_untile_scratch_bytes.store(live, std::memory_order_relaxed);
-}
 
 bool untiler_init() {
     Untiler& u = g_untile;
@@ -2553,6 +2530,30 @@ bool gpu_untile_impl(Texture* t, TexGpu& g, Frame& f, const char** why, bool may
     return true;
 }
 }  // namespace
+
+// [nvn] untile_scratch_idle (default on): a ring entry's scratch buffer grows to the largest level it untiled and was kept for the whole
+// session, so the 16 entries trended to 16 x the largest texture of video memory. Now one is released once its GPU work is done when it is
+// over 64 MiB, or after 600 presents without an untile. Render thread, start of a submission.
+void untile_scratch_tick(uint64_t presents) {
+    static const bool on = config_get_bool("nvn", "untile_scratch_idle", true);
+    static const bool gauged = (nxrt::gauge_register("nvn.untile.scratch_mb", [] { return static_cast<int64_t>(g_untile_scratch_bytes.load(std::memory_order_relaxed) >> 20); }), true);
+    (void)gauged;
+    Untiler& u = g_untile;
+    if (!u.ok) return;
+    uint64_t live = 0;
+    for (Untiler::Entry& e : u.ring) {
+        if (!e.scratch) continue;
+        const bool done = !e.serial || completed_serial() >= e.serial;
+        if (on && done && (e.scratch.size > (64ull << 20) || presents - e.used_at > 600)) {
+            gfx::Buffer old = e.scratch;
+            defer_destroy_vk([old]() mutable { device().destroy_buffer(old); });
+            e.scratch = gfx::Buffer{};
+            continue;
+        }
+        live += e.scratch.size;
+    }
+    g_untile_scratch_bytes.store(live, std::memory_order_relaxed);
+}
 
 // The caller copies or clears the image, so it needs the real content now: a stand-in would end up in the copy ([nvn] tex_async).
 void tex_ensure_exact(Texture* t, Frame& f) {
