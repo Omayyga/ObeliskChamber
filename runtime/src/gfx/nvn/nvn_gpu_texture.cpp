@@ -3799,9 +3799,25 @@ void buffer_views_forget(VkBuffer buffer) {
 
 }  // namespace gpu
 
+// QueryWorkingSetEx in batches. One call over the whole list holds the process' working-set lock for all of it, and every thread of the process
+// that takes a page fault meanwhile waits: a call over a long session's 250,000 addresses stopped the game thread for 200-470 ms at every
+// loading screen and cutscene change (2026-11-22, 2.3 h on the desktop). Batches of 2048 let the faults through between them; `pause`
+// (off the render thread) also sleeps 1 ms between batches. False when a batch fails.
+static bool query_working_set_batched(PSAPI_WORKING_SET_EX_INFORMATION* q, size_t n, bool pause) {
+    constexpr size_t kBatch = 2048;
+    for (size_t i = 0; i < n; i += kBatch) {
+        const size_t k = std::min(kBatch, n - i);
+        if (!QueryWorkingSetEx(GetCurrentProcess(), q + i, static_cast<DWORD>(k * sizeof q[0]))) return false;
+        if (pause) Sleep(1);
+        else SwitchToThread();
+    }
+    return true;
+}
+
 // The working set outside the game's heap by kind of memory, the largest private allocations, and the process heaps (the C++ allocator's).
 // One VirtualQuery walk of the address space and a residency sample every 64 KiB of what is committed.
 void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
+    const auto t0 = std::chrono::steady_clock::now();
     constexpr uint64_t kStep = 64ull << 10;
     enum { kGuest, kImage, kMapped, kPrivate, kRegionKinds };
     uint64_t commit[kRegionKinds] = {}, ram[kRegionKinds] = {};
@@ -3840,21 +3856,26 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
         if (lo + sz < lo || lo + sz >= 0x800000000000ull) break;
         a = reinterpret_cast<uint8_t*>(lo + sz);
     }
-    if (!q.empty() && QueryWorkingSetEx(GetCurrentProcess(), q.data(), static_cast<DWORD>(q.size() * sizeof q[0])))
+    if (!q.empty() && query_working_set_batched(q.data(), q.size(), true))
         for (size_t i = 0; i < q.size(); ++i) {
             if (!q[i].VirtualAttributes.Valid) continue;
             ram[qi[i] >> 28] += kStep;
             if (const uint32_t pi = qi[i] & 0x0fffffffu) priv[pi - 1].ram += kStep;
         }
-    // the process heaps (malloc / new of the runtime, the driver's own heaps)
+    // the process heaps (malloc / new of the runtime, the driver's own heaps). HeapSummary walks a heap under its lock, and every new / malloc
+    // of another thread on that heap waits for it: only with [diag] census_heaps = true (measurement).
+    static const bool heaps_on = nxrt::config_get_bool("diag", "census_heaps", false);
     uint64_t heap_commit = 0, heap_alloc = 0;
-    DWORD nh = GetProcessHeaps(0, nullptr);
-    std::vector<HANDLE> heaps(nh + 8);
-    nh = GetProcessHeaps(static_cast<DWORD>(heaps.size()), heaps.data());
-    for (DWORD i = 0; i < nh && i < heaps.size(); ++i) {
-        HEAP_SUMMARY hsum{};
-        hsum.cb = sizeof hsum;
-        if (HeapSummary(heaps[i], 0, &hsum)) { heap_commit += hsum.cbCommitted; heap_alloc += hsum.cbAllocated; }
+    DWORD nh = 0;
+    if (heaps_on) {
+        nh = GetProcessHeaps(0, nullptr);
+        std::vector<HANDLE> heaps(nh + 8);
+        nh = GetProcessHeaps(static_cast<DWORD>(heaps.size()), heaps.data());
+        for (DWORD i = 0; i < nh && i < heaps.size(); ++i) {
+            HEAP_SUMMARY hsum{};
+            hsum.cb = sizeof hsum;
+            if (HeapSummary(heaps[i], 0, &hsum)) { heap_commit += hsum.cbCommitted; heap_alloc += hsum.cbAllocated; }
+        }
     }
     std::sort(priv.begin(), priv.end(), [](const Alloc& x, const Alloc& y) { return x.ram > y.ram; });
     const double mib = 1048576.0;
@@ -3874,10 +3895,15 @@ void log_ram_outside_heap(const char* why, uint64_t hb, uint64_t hs) {
     NXLOG_I("nvn.census",
             "%s: RAM outside the heap, in RAM / committed, MiB (sampled every 64 KiB): other guest memory (modules, stacks) %.0f / %.0f, "
             "images (the exe, DLLs) %.0f / %.0f, mapped sections (the heap's views for pool imports among them) %.0f / %.0f, private %.0f / %.0f "
-            "in %zu allocations (the largest in RAM, in RAM/committed of reserved at base: %s; under 1 MiB each: %llu, %.0f in RAM); process heaps %u: %.0f committed, %.0f allocated",
+            "in %zu allocations (the largest in RAM, in RAM/committed of reserved at base: %s; under 1 MiB each: %llu, %.0f in RAM); process heaps %s; "
+            "%zu addresses sampled in %.0f ms",
             why, ram[kGuest] / mib, commit[kGuest] / mib, ram[kImage] / mib, commit[kImage] / mib, ram[kMapped] / mib, commit[kMapped] / mib,
             ram[kPrivate] / mib, commit[kPrivate] / mib, priv.size(), top.empty() ? "none of 16 MiB" : top.c_str(), (unsigned long long)small_n,
-            small_ram / mib, static_cast<unsigned>(nh), heap_commit / mib, heap_alloc / mib);
+            small_ram / mib,
+            heaps_on ? (std::to_string(nh) + ": " + std::to_string(static_cast<long long>(heap_commit / mib)) + " MiB committed, " +
+                        std::to_string(static_cast<long long>(heap_alloc / mib)) + " MiB allocated").c_str()
+                     : "not counted ([diag] census_heaps)",
+            q.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
 
 // The RAM census. The memory line's footprint is private commit, and the game's heap is a pagefile-backed section, so it is not in it: the
@@ -3909,7 +3935,7 @@ void log_ram_census(const char* why) {
     if (m.n) {
         std::vector<PSAPI_WORKING_SET_EX_INFORMATION> v(m.n);
         for (size_t i = 0; i < m.n; ++i) v[i].VirtualAddress = reinterpret_cast<void*>(m.hb + i * kStep);
-        if (QueryWorkingSetEx(GetCurrentProcess(), v.data(), static_cast<DWORD>(m.n * sizeof v[0]))) {
+        if (query_working_set_batched(v.data(), m.n, false)) {
             sampled = true;
             for (size_t i = 0; i < m.n; ++i) m.in[i] = v[i].VirtualAttributes.Valid ? 1 : 0;
         }
