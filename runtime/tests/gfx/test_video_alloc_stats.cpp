@@ -27,12 +27,15 @@ NXTEST(free_inside_blocks_and_outside) {
     s.video_free_ranges = 1200;
     s.video_largest_free = 48ull << 20;
     s.driver_bytes = 9216ull << 20;
+    s.rt_images = 300; s.rt_prefer = 280; s.rt_dedicated = 270;
+    s.other_images = 7000; s.other_prefer = 0; s.other_dedicated = 12;
     CHECK(s.video.free_bytes() == (2048ull << 20));
     CHECK(nxrt::gfx::video_alloc_free_percent(s.video) == 33);
     CHECK(s.outside_bytes() == ((9216ull - 6144 - 512) << 20));
-    char t[512];
+    char t[1024];
     CHECK(nxrt::gfx::video_alloc_text(s, t, sizeof t) > 0);
     std::printf("    %s\n", t);
+    CHECK(std::strstr(t, "images made: render targets 300 (driver prefers memory of their own 280, given it 270), others 7000 (0, 12)"));
     CHECK(std::strstr(t, "video heap 90 blocks / 6144 MiB taken"));
     CHECK(std::strstr(t, "7000 allocations / 4096 MiB handed out"));
     CHECK(std::strstr(t, "2048 MiB free inside the blocks (33%, 1200 ranges, largest 48 MiB)"));

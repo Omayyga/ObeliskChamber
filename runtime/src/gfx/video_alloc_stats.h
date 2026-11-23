@@ -25,6 +25,12 @@ struct VideoAllocStats {
     uint32_t video_free_ranges = 0;       // free ranges inside the video heap's blocks
     uint64_t video_largest_free = 0;      // the largest of them
     uint64_t driver_bytes = 0;            // every vkAllocateMemory alive (the gauge), the allocator's and the others'
+    // Images made so far, by kind: render targets (colour or depth attachments) and the rest (sampled, storage). For each, how many the
+    // driver said it would rather have in memory of their own (VkMemoryDedicatedRequirements::prefersDedicatedAllocation) and how many
+    // the allocator gave memory of their own (that, or over half a block). #155: on NVIDIA most of the video heap is in such allocations,
+    // on the RX 6600 XT almost none; an allocation of its own goes back to the driver the moment its image goes.
+    uint64_t rt_images = 0, rt_prefer = 0, rt_dedicated = 0;
+    uint64_t other_images = 0, other_prefer = 0, other_dedicated = 0;
     // Not from the allocator: host-memory imports of the game's pools, sparse texture chunks, the upscalers' and the overlay's own.
     uint64_t outside_bytes() const {
         const uint64_t in = video.block_bytes + other.block_bytes;
@@ -45,10 +51,14 @@ inline int video_alloc_text(const VideoAllocStats& s, char* out, size_t n) {
     return std::snprintf(out, n,
                          "allocator: video heap %u blocks / %.0f MiB taken, %u allocations / %.0f MiB handed out, %.0f MiB free inside the blocks (%d%%, "
                          "%u ranges, largest %.0f MiB); of it small-texture pools %u blocks / %.0f MiB, %.0f MiB free; other heaps %.0f MiB taken, "
-                         "%.0f MiB free; outside the allocator %.0f MiB",
+                         "%.0f MiB free; outside the allocator %.0f MiB; images made: render targets %llu (driver prefers memory of their own %llu, "
+                         "given it %llu), others %llu (%llu, %llu)",
                          s.video.blocks, s.video.block_bytes / mib, s.video.allocs, s.video.alloc_bytes / mib, s.video.free_bytes() / mib,
                          video_alloc_free_percent(s.video), s.video_free_ranges, s.video_largest_free / mib, s.small.blocks, s.small.block_bytes / mib,
-                         s.small.free_bytes() / mib, s.other.block_bytes / mib, s.other.free_bytes() / mib, s.outside_bytes() / mib);
+                         s.small.free_bytes() / mib, s.other.block_bytes / mib, s.other.free_bytes() / mib, s.outside_bytes() / mib,
+                         static_cast<unsigned long long>(s.rt_images), static_cast<unsigned long long>(s.rt_prefer),
+                         static_cast<unsigned long long>(s.rt_dedicated), static_cast<unsigned long long>(s.other_images),
+                         static_cast<unsigned long long>(s.other_prefer), static_cast<unsigned long long>(s.other_dedicated));
 }
 
 }  // namespace nxrt::gfx

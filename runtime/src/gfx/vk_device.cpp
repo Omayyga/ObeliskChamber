@@ -206,6 +206,7 @@ size_t pick_gpu(const std::vector<GpuCandidate>& gpus, const char* want, bool* m
 
 // ---- private state ----------------------------------------------------------------------------------------------------
 struct Device::Impl {
+    std::atomic<uint64_t> rt_images{0}, rt_prefer{0}, rt_dedicated{0}, other_images{0}, other_prefer{0}, other_dedicated{0};   // alloc_stats
     std::mutex small_pools_mu;                       // ImageDesc::small_pool: one VMA pool of 16 MiB blocks per memory type
     std::map<uint32_t, VmaPool> small_pools;
     // validation counters (written from any thread by the layer callback)
@@ -1048,6 +1049,26 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     aci.pVulkanFunctions = &vf;
     if (x_membudget) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
     g_budget_exact = x_membudget;
+    // [gfx] video_block_mb (0.3.2, #155): the size of the blocks the allocator takes from the driver on the large heaps (VMA's
+    // preferredLargeHeapBlockSize; VMA's own default is 256 MiB). An image or buffer is placed inside a block, and a block goes back to
+    // the driver only when nothing is left in it. On an RX 6600 XT 8 GB the allocator held 33 blocks (5.2 GB) from the 4th minute on with
+    // only 2.1-4.1 GB in use: area changes left every block partly used, the free 1-3 GB could not be given back, and video memory sat at
+    // 94% of the budget while the frame rate fell. Smaller blocks empty out whole far more often (and images over half a block get memory of
+    // their own, returned when they go). auto = 64 MiB on cards whose largest video memory heap is 8.5 GiB or less, else VMA's default; a
+    // number of MiB (16 to 1024); 0 = VMA's default.
+    {
+        std::string v = config_get_str("gfx", "video_block_mb", "auto");
+        for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const uint64_t heap = nxrt::mem::limits_video_heap_bytes();
+        int64_t mb = 0;
+        if (v.empty() || v == "auto") mb = heap && heap <= (85ull << 30) / 10 ? 64 : 0;
+        else mb = std::clamp<int64_t>(config_get_int("gfx", "video_block_mb", 0), 0, 1024);
+        if (mb > 0 && mb < 16) mb = 16;
+        if (mb > 0) aci.preferredLargeHeapBlockSize = static_cast<VkDeviceSize>(mb) << 20;
+        NXLOG_I(kTag, "video memory blocks: %s ([gfx] video_block_mb = %s; largest video memory heap %.1f GiB)",
+                mb > 0 ? (std::to_string(mb) + " MiB").c_str() : "256 MiB (the allocator's default)", v.c_str(),
+                static_cast<double>(heap) / (1024.0 * 1024.0 * 1024.0));
+    }
     const bool mem_priority = x_mpri && ampri.memoryPriority;
     if (mem_priority) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
     NXLOG_I(kTag, "video memory over the budget: memory priority %d, pageable device-local memory %d ([gfx] pageable_memory = %d)",
@@ -1133,6 +1154,12 @@ ValidationStats Device::validation_stats() const {
 void Device::alloc_stats(VideoAllocStats* out) const {
     *out = VideoAllocStats{};
     if (!vma_) return;
+    out->rt_images = impl_->rt_images.load(std::memory_order_relaxed);
+    out->rt_prefer = impl_->rt_prefer.load(std::memory_order_relaxed);
+    out->rt_dedicated = impl_->rt_dedicated.load(std::memory_order_relaxed);
+    out->other_images = impl_->other_images.load(std::memory_order_relaxed);
+    out->other_prefer = impl_->other_prefer.load(std::memory_order_relaxed);
+    out->other_dedicated = impl_->other_dedicated.load(std::memory_order_relaxed);
     VmaTotalStatistics t{};
     vmaCalculateStatistics(vma_, &t);
     const uint32_t video = device_local_heap(vma_);
@@ -1287,6 +1314,19 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
         return r;
     }
     vk_gauge_images().add(1);
+    {   // #155: did the driver want this image in memory of its own, and did it get it (alloc_stats' "images made")
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        VkImageMemoryRequirementsInfo2 ri = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        ri.image = handle;
+        vkGetImageMemoryRequirements2(device_, &ri, &mr);
+        VmaAllocationInfo2 i2{};
+        vmaGetAllocationInfo2(vma_, alloc, &i2);
+        const bool rt = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+        (rt ? impl_->rt_images : impl_->other_images).fetch_add(1, std::memory_order_relaxed);
+        if (dr.prefersDedicatedAllocation) (rt ? impl_->rt_prefer : impl_->other_prefer).fetch_add(1, std::memory_order_relaxed);
+        if (i2.dedicatedMemory) (rt ? impl_->rt_dedicated : impl_->other_dedicated).fetch_add(1, std::memory_order_relaxed);
+    }
     {   // very large images are worth a line: they decide the process' memory footprint
         VmaAllocationInfo inf{};
         vmaGetAllocationInfo(vma_, alloc, &inf);
