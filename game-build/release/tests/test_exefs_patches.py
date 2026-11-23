@@ -70,13 +70,12 @@ class Base(unittest.TestCase):
         with open(self.main, 'wb') as f:
             f.write(make_nso())
         self.notes = []
-        self._say, self._sites, self._words = fb.say, fb.site_addresses, fb.site_patch_words
+        self._say, self._sites = fb.say, fb.site_addresses
         fb.say = lambda kind, *parts: self.notes.append(' '.join(str(p) for p in parts))
         fb.site_addresses = lambda: {}
-        fb.site_patch_words = lambda: {}
 
     def tearDown(self):
-        fb.say, fb.site_addresses, fb.site_patch_words = self._say, self._sites, self._words
+        fb.say, fb.site_addresses = self._say, self._sites
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def apply(self, patches, mod_sites=()):
@@ -142,16 +141,6 @@ class Segments(Base):
         applied, left, _ = self.apply([('m', 'm/exefs/x.ips', [(0x41, b'\x00')]), ('n', 'n/exefs/y.ips', [(0x80, b'\x00')])])
         self.assertEqual(applied, ['n'])
         self.assertIn('main.sites', left['m'])
-
-    def test_same_bytes_as_a_patch_site_apply(self):
-        # a mod that ships the fix main.sites builds in (patches/unitinfo_animal_crashfix) still installs; other bytes there clash
-        fb.site_addresses = lambda: {0x40: 'patch'}
-        fb.site_patch_words = lambda: {0x40: bytes.fromhex('e80316aa')}
-        applied, left, _ = self.apply([('m', 'm/exefs/x.ips', [(0x40, bytes.fromhex('e80316aa'))]),
-                                       ('n', 'n/exefs/y.ips', [(0x42, b'\x16')]),
-                                       ('o', 'o/exefs/z.ips', [(0x40, bytes.fromhex('1f2003d5'))])])
-        self.assertEqual(applied, ['m', 'n'])
-        self.assertIn('main.sites', left['o'])
 
     def test_rodata_padding(self):
         applied, _, segs = self.apply([('r', 'r/exefs/x.ips', [(RO[0] + RO[1], b'\x99' * 4)])])

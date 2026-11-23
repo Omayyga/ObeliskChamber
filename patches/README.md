@@ -7,7 +7,7 @@ emulators that load exefs patches.
 | Mod | Address | Change | Effect |
 |---|---|---|---|
 | `levelup_random_seed` | 0x8ce64c | `ldr w19, [x0, #0x1c0]` -> `mrs x19, cntpct_el0` | The random level-up roll is seeded from the system tick instead of the unit's saved seed, so reloading (or rewinding) before a level-up rolls new stats. Fixed growth and combat RNG are unchanged. |
-| `unitinfo_animal_crashfix` | 0x1703498 | `csel x8, xzr, x22, eq` -> `mov x8, x22` | The unit detail page no longer reads through a null class pointer for a unit that has a mount while its class has no dismounted class (crash reading address 0x80, e.g. Io). Built into main.sites now, as in fefw-recomp and EmblemWeave; the mod still installs and changes nothing more. |
+| `unitinfo_animal_crashfix` | 0x1703498 | `csel x8, xzr, x22, eq` -> `mov x8, x22` | The unit detail page no longer reads through a null class pointer for a unit that has a mount while its class has no dismounted class (crash reading address 0x80, e.g. Io). |
 
 The same changes as `recomp/games/fefw/main.sites` lines, for a build without exefs patch support:
 

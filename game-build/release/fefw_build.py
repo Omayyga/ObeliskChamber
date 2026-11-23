@@ -726,22 +726,6 @@ def site_addresses():
     return out
 
 
-def site_patch_words():
-    """main.sites' patch lines: {module offset: the new instruction word (little-endian bytes)}. A mod that writes the same bytes
-    there (one that ships the fix the site builds in, such as patches/unitinfo_animal_crashfix) is not a clash: the lifter takes
-    an address that already has the new word as patched (recomp/nxrecomp/program.py load_sites)."""
-    out = {}
-    try:
-        lines = open(os.path.join(RECOMP, *SITES.split('/')), encoding='utf-8').read().splitlines()
-    except OSError:
-        return out
-    for line in lines:
-        t = line.split('#', 1)[0].split()
-        if len(t) >= 4 and t[0] == 'patch':
-            out[int(t[1], 16) - MODULES[0][2]] = int(t[3], 16).to_bytes(4, 'little')
-    return out
-
-
 PAGE = 0x1000
 
 
@@ -791,7 +775,6 @@ def apply_exefs_patches(main_path, patches, mod_sites=()):
     segs = nso_segments(data)
     body = [bytearray(data[fo:fo + sz]) for fo, _, sz in segs]
     sites = site_addresses()
-    same_ok = site_patch_words()
     for where, kind, addr in mod_sites:
         sites.setdefault(addr - MODULES[0][2], '%s (%s)' % (kind, where))
     owner = {}                           # memory offset -> file, for bytes patched so far
@@ -813,9 +796,7 @@ def apply_exefs_patches(main_path, patches, mod_sites=()):
                     problem = ("%s: 0x%x..0x%x is outside main's text, rodata and data (and the padding after text or rodata, up to "
                                "the next page)" % (where, off, end))
                     break
-                a = next((a for a in range(off & ~3, end, 4) if a in sites
-                          and not (a in same_ok and all(b[i - off] == same_ok[a][i - a] for i in range(max(off, a), min(end, a + 4))))),
-                         None)
+                a = next((a for a in range(off & ~3, end, 4) if a in sites), None)
                 if a is not None:
                     problem = ('%s patches 0x%x, where this release has a main.sites %s site: the two cannot be combined. '
                                'Remove the patch or ask for the site to be moved.' % (where, a, sites[a]))

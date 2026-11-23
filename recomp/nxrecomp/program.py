@@ -60,8 +60,7 @@ def load_sites(path, env):
     """Site list: run-time code changes the runtime / mods make, compiled into the lifted code. One site per line, `#` starts a
     comment, addresses are full guest addresses in hex (after ssbu-recomp tools/lifter/relift_sites.py, GPL-3.0-or-later):
       patch    <addr> <orig word> <new word>   the instruction word is replaced before lifting (orig is checked; several
-                                               writes to one address chain: each orig = the previous new; a first write
-                                               whose new word is there already, from a mod's exefs patch, passes)
+                                               writes to one address chain: each orig = the previous new)
       inline   <addr>   `nx_site_inline(c, addr);` before the instruction (all registers are in c)
       midhook  <addr>   `if (nx_site_midhook(c, addr)) return;` before the instruction, and a new lifted function f_<addr>
                         starting there: the runtime's "original" to continue with
@@ -85,9 +84,7 @@ def load_sites(path, env):
             if kind == 'patch':
                 old, new = int(t[2], 16), int(t[3], 16)
                 have = chain.get(addr, env.img.word(addr))
-                if have == new and addr not in chain:
-                    pass                 # a mod's exefs patch already made this change (fefw_build.py site_patch_words): the same code
-                elif have != old:
+                if have != old:
                     raise ValueError('%s:%d: patch %x: the code has %08x, the patch expects %08x' % (path, ln, addr, have, old))
                 chain[addr] = new
                 env.patches[addr] = new
