@@ -83,6 +83,13 @@ uint64_t g_committed = 0;                 // bytes of pages whose bit is set
 // walks every page table entry of the run of identical pages (about 75 ms for a 3 GiB committed heap), so is_mapped, protect and the
 // write tracker's arm (heap_rw_pages) answer heap ranges from this table.
 std::vector<uint8_t> g_heap_cls;
+// [memory] heap_lazy_commit: 4 = reserved for the guest heap by SetHeapSize but not committed yet. It answers as read-write (3) everywhere
+// in this file; the pages are committed when first touched (lazy_fault, a vectored handler) or before anything that needs them committed
+// (protect, heap_rw_pages, alias and private views, heap_touch), in runs inside their 2 MiB granule. On the console the game's heap gets
+// pages as its allocator uses them; here SetHeapSize used to commit the whole 9 GiB at boot.
+constexpr uint8_t kLazy = 4;
+bool g_lazy = false;                      // set by heap_create
+std::atomic<uint64_t> g_lazy_faults{0}, g_lazy_bytes{0};
 std::atomic<uint64_t> g_heap_epoch{0};    // bumped by every change of the table, inside the change's OsWriteScope
 struct Alias {
     uint64_t size;
@@ -138,6 +145,56 @@ bool in_heap_view(uint64_t start, uint64_t end) {
 bool bit_test(uint64_t page) { return (g_commit_bits[page / 64] >> (page % 64)) & 1; }
 void bit_set(uint64_t page) { g_commit_bits[page / 64] |= uint64_t{1} << (page % 64); }
 void bit_clear(uint64_t page) { g_commit_bits[page / 64] &= ~(uint64_t{1} << (page % 64)); }
+
+// Commits the kLazy pages in [p0, p1) (page numbers of the section; g_heap_mu held). False if one could not be committed.
+bool lazy_commit_locked(uint64_t p0, uint64_t p1) {
+    if (!g_lazy) return true;
+    p1 = std::min<uint64_t>(p1, g_heap_cls.size());
+    for (uint64_t p = p0; p < p1;) {
+        if (g_heap_cls[p] != kLazy) { ++p; continue; }
+        uint64_t q = p;
+        while (q < p1 && g_heap_cls[q] == kLazy) ++q;
+        if (!VirtualAlloc(reinterpret_cast<void*>(kHeapBase + p * kPage), static_cast<SIZE_T>((q - p) * kPage), MEM_COMMIT, PAGE_READWRITE)) {
+            NXLOG_E(kTag, "lazy commit [%llx, +%llx): VirtualAlloc failed, error %lu", static_cast<unsigned long long>(p * kPage),
+                    static_cast<unsigned long long>((q - p) * kPage), static_cast<unsigned long>(GetLastError()));
+            return false;
+        }
+        for (uint64_t r = p; r < q; ++r) {
+            g_heap_cls[r] = 3;            // the same answer as kLazy: no epoch change
+            if (!bit_test(r)) { bit_set(r); g_committed += kPage; }
+        }
+        g_lazy_bytes.fetch_add((q - p) * kPage, std::memory_order_relaxed);
+        p = q;
+    }
+    return true;
+}
+// The whole 2 MiB granules around [p0, p1).
+bool lazy_commit_granules_locked(uint64_t p0, uint64_t p1) {
+    constexpr uint64_t kGranPages = (2ull << 20) / kPage;
+    return lazy_commit_locked(p0 & ~(kGranPages - 1), (p1 + kGranPages - 1) & ~(kGranPages - 1));
+}
+
+// First touch of a kLazy page from any thread: commit its granule and run the access again. Nothing in this file touches guest memory
+// while holding g_heap_mu, so taking it here cannot deadlock on this thread.
+bool lazy_try(uint64_t a) {
+    if (!g_lazy || a < kHeapBase || a - kHeapBase >= kHeapMax) return false;
+    {   // the write tracker's faults come here first: a quick look without the lock (the table is sized once, at heap_create)
+        const uint64_t p = (a - kHeapBase) / kPage;
+        if (p >= g_heap_cls.size() || reinterpret_cast<const volatile uint8_t*>(g_heap_cls.data())[p] != kLazy) return false;
+    }
+    std::lock_guard lk(g_heap_mu);
+    if (a - kHeapBase >= g_heap_size) return false;
+    const uint64_t p = (a - kHeapBase) / kPage;
+    if (g_heap_cls[p] != kLazy) return false;   // a real fault (or the write tracker's): not ours
+    if (!lazy_commit_granules_locked(p, p + 1)) return false;
+    g_lazy_faults.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+LONG CALLBACK lazy_fault(EXCEPTION_POINTERS* ep) {
+    if (!g_lazy || ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || ep->ExceptionRecord->NumberParameters < 2)
+        return EXCEPTION_CONTINUE_SEARCH;
+    return lazy_try(ep->ExceptionRecord->ExceptionInformation[1]) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
 
 // First address >= from at which `size` bytes are free in the alias region; 0 when there is none.
 uint64_t find_free_alias(uint64_t from, uint64_t size) {
@@ -348,6 +405,7 @@ bool protect(uint64_t addr, uint64_t size, Prot p) {
             const uint64_t p0 = (start - kHeapBase) / kPage, p1 = (end - kHeapBase) / kPage;
             bool all = true;
             for (uint64_t q = p0; q < p1 && all; ++q) all = g_heap_cls[q] != 0;
+            if (all) all = lazy_commit_locked(p0, p1);   // VirtualProtect refuses uncommitted pages
             DWORD old = 0;
             if (all && VirtualProtect(reinterpret_cast<void*>(start), static_cast<SIZE_T>(end - start), np, &old)) {
                 std::fill(g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p0), g_heap_cls.begin() + static_cast<std::ptrdiff_t>(p1),
@@ -505,6 +563,18 @@ bool heap_create(uint64_t reserve_bytes) {
     }
     g_section = sec;
     g_heap_size = size;
+    // [memory] heap_lazy_commit (default off): SetHeapSize reserves its pages and they are committed at first use. Windows only (Wine's
+    // handling of faults on uncommitted section pages is not tested), with the section.
+    g_lazy = !wine && config_get_bool("memory", "heap_lazy_commit", false);
+    if (g_lazy) {
+        static void* veh = AddVectoredExceptionHandler(1, lazy_fault);
+        if (!veh) {
+            g_lazy = false;
+            NXLOG_W(kTag, "heap_lazy_commit: AddVectoredExceptionHandler failed: the heap is committed whole");
+        } else {
+            NXLOG_I(kTag, "heap: pages are committed at their first use ([memory] heap_lazy_commit)");
+        }
+    }
     g_commit_bits.assign((size / kPage + 63) / 64, 0);
     g_heap_cls.assign(static_cast<size_t>(size / kPage), 0);
     g_committed = 0;
@@ -543,6 +613,22 @@ bool heap_commit(uint64_t offset, uint64_t size) {
     }
     const uint64_t start = offset & ~(kPage - 1);
     const uint64_t end = align_up(offset + size, kPage);
+    if (g_lazy) {
+        // pages never committed become kLazy (committed at their first touch); any other page of the range is committed now, as before
+        bool all_new = true;
+        for (uint64_t p = start / kPage; p < end / kPage && all_new; ++p) all_new = g_heap_cls[p] == 0 || g_heap_cls[p] == kLazy;
+        if (all_new) {
+            for (uint64_t p = start / kPage; p < end / kPage; ++p) g_heap_cls[p] = kLazy;
+            g_heap_epoch.fetch_add(1, std::memory_order_seq_cst);
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                NXLOG_I(kTag, "heap_commit [%llx, +%llx): pages committed at their first use ([memory] heap_lazy_commit)", static_cast<unsigned long long>(start),
+                        static_cast<unsigned long long>(end - start));
+            }
+            return true;
+        }
+    }
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);   // MEM_COMMIT makes committed pages read-write again
     // The game sets a heap of about 11 GB at boot and all of it is committed here. When the system's commit charge is near its limit (just after
     // the launcher's setup, or with a small page file) this fails, the game turns the result into nn::os OutOfMemory (0x1003) and calls svcBreak.
@@ -593,6 +679,7 @@ bool heap_decommit(uint64_t offset, uint64_t size) {
     const ww::OsWriteScope wws(reinterpret_cast<void*>(kHeapBase + start), end - start);
     for (uint64_t p = start / kPage; p < end / kPage;) {
         if (!bit_test(p)) {
+            if (g_heap_cls[p] == kLazy) g_heap_cls[p] = 0;   // never committed: back to reserved
             p++;
             continue;
         }
@@ -624,8 +711,12 @@ int heap_rw_pages(uint64_t addr, uint64_t size) {
     std::lock_guard lk(g_heap_mu);
     if (!in_heap_view(start, end)) return -1;
     const uint64_t p0 = (start - kHeapBase) / kPage, p1 = (end - kHeapBase) / kPage;
-    for (uint64_t q = p0; q < p1; ++q)
+    bool lazy = false;
+    for (uint64_t q = p0; q < p1; ++q) {
+        if (g_heap_cls[q] == kLazy) { lazy = true; continue; }
         if (g_heap_cls[q] != 3) return 0;
+    }
+    if (lazy && !lazy_commit_locked(p0, p1)) return 0;   // the callers import or protect the range: it must be committed
     return 1;
 }
 
@@ -685,6 +776,20 @@ int64_t limit_by_ram(int64_t over16, int64_t at16, int64_t at8) {
     return over16;
 }
 
+bool heap_lazy_fault(uint64_t addr) { return lazy_try(addr); }
+
+bool heap_touch(uint64_t addr, uint64_t size) {
+    if (!g_lazy) return true;
+    uint64_t start = 0, end = 0;
+    if (!page_span(addr, size, &start, &end)) return false;
+    std::lock_guard lk(g_heap_mu);
+    if (!in_heap_view(start, end)) return true;
+    return lazy_commit_locked((start - kHeapBase) / kPage, (end - kHeapBase) / kPage);
+}
+
+GaugeHook gauge_lazy_faults("mem.lazy_faults", [] { return static_cast<int64_t>(g_lazy_faults.load(std::memory_order_relaxed)); });
+GaugeHook gauge_lazy_mb("mem.lazy_committed_mb", [] { return static_cast<int64_t>(g_lazy_bytes.load(std::memory_order_relaxed) >> 20); });
+
 uint64_t heap_committed() {
     std::lock_guard lk(g_heap_mu);
     return g_committed;
@@ -706,6 +811,7 @@ uint64_t heap_alias(uint64_t offset, uint64_t size, uint64_t at, Prot p) {
         NXLOG_W(kTag, "heap_alias: target %llx is not 64 KiB aligned", static_cast<unsigned long long>(at));
         return 0;
     }
+    if (!lazy_commit_locked(offset / kPage, (offset + size) / kPage)) return 0;   // a view of uncommitted section pages would fault
     const DWORD access = (p == Prot::R) ? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
     const DWORD off_hi = static_cast<DWORD>(offset >> 32);
     const DWORD off_lo = static_cast<DWORD>(offset & 0xFFFFFFFFu);
@@ -756,6 +862,7 @@ uint64_t heap_alias(uint64_t offset, uint64_t size, uint64_t at, Prot p) {
 void* heap_private_view(uint64_t offset, uint64_t size) {
     std::lock_guard lk(g_heap_mu);
     if (!g_section || size == 0 || offset % kAllocGranularity || offset > g_heap_size || size > g_heap_size - offset) return nullptr;
+    if (!lazy_commit_locked(offset / kPage, (offset + size) / kPage)) return nullptr;
     return MapViewOfFile(g_section, FILE_MAP_ALL_ACCESS, static_cast<DWORD>(offset >> 32), static_cast<DWORD>(offset & 0xFFFFFFFFu), static_cast<SIZE_T>(size));
 }
 

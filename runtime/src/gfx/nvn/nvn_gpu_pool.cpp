@@ -195,6 +195,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     nxrt::HitchTimer ht(nxrt::kHpPoolImport);      // the hitch line: an import running beside a slow vkQueueSubmit2 shows here
     gfx::Device& dev = device();
     const uint64_t start = reinterpret_cast<uint64_t>(g->base) + off;
+    mem::heap_touch(start, size);   // [memory] heap_lazy_commit: the driver imports committed pages only
     if (!dev.features().external_memory_host) { c.failed = true; return false; }
 
     // Small pools share one import rather than consuming an allocation each. The weak
