@@ -815,6 +815,7 @@ struct Mirror {
     // compute out (below): pages where a compute result in the copy is newer than the pool, and pages the CPU has read compute results
     // from (any thread sets them; atomics)
     std::unique_ptr<std::atomic<uint64_t>[]> gpu_new, cpu_read;
+    std::atomic<uint32_t> cpu_faults{0};   // guard faults on held results of this pool (compute_out_fault_eager)
 };
 
 namespace {
@@ -1867,6 +1868,7 @@ void out_grew(uint64_t addr, uint64_t size) {
 std::atomic<uint64_t> g_ob_end{0}, g_ob_gpu{0}, g_ob_fault{0}, g_ob_inval{0};
 std::atomic<uint64_t> g_why_bytes[kOutWhyCount], g_why_n[kOutWhyCount];   // GPU-reader copy-backs by reason
 std::atomic<uint64_t> g_on_fault{0}, g_on_inval{0}, g_on_deferred{0}, g_on_eager_read{0}, g_on_eager_noguard{0}, g_on_gpu_flush{0};
+std::atomic<uint64_t> g_on_eager_small{0}, g_fault_us{0}, g_fault_us_max{0};   // compute_out_fault_eager; time in out_fetch for a guard fault
 
 // A word (64 pages) at a time: page by page, one locked RMW each, it was ~6 % of the render thread in Dagsion crowds (out_add on every
 // draw binding a storage buffer of hundreds of pages). A word already in the wanted state is left alone (no RMW, no cache-line write).
@@ -1996,6 +1998,17 @@ bool out_lazy() {
 }
 
 bool out_any() { return g_out_n.load(std::memory_order_acquire) != 0; }
+
+// [nvn] compute_out_fault_eager (default on): a guard fault marks every page of the held results it hit as CPU-read (not only the page
+// touched), and once a pool has taken two guard faults its small results (64 KiB or less) go back at the end of their submission instead of
+// being held. A fault waits for the GPU on the game's thread (up to a frame) and records its own submission. fefw-recomp #119 (metrist38):
+// Dagsion's guard faults 47 -> 0, each 10-11 ms. Large results stay held: the GPU reads most of them and the CPU never does.
+bool out_fault_eager() {
+    static const bool on = config_get_bool("nvn", "compute_out_fault_eager", true);
+    return on;
+}
+constexpr VkDeviceSize kEagerSmall = 64 << 10;
+constexpr uint32_t kEagerFaults = 2;
 
 uint64_t out_bytes_total() {
     return g_ob_end.load(std::memory_order_relaxed) + g_ob_gpu.load(std::memory_order_relaxed) + g_ob_fault.load(std::memory_order_relaxed) +
@@ -2198,6 +2211,10 @@ void out_end_submit(VkCommandBuffer cb, uint64_t serial) {
             if (!e.pending) continue;
             bool hold = out_lazy() && e.m && e.m->ww;
             if (hold && bits_any(e.m->cpu_read.get(), e.first, e.last)) { hold = false; g_on_eager_read.fetch_add(1, std::memory_order_relaxed); }
+            else if (hold && out_fault_eager() && e.size <= kEagerSmall && e.m->cpu_faults.load(std::memory_order_relaxed) >= kEagerFaults) {
+                hold = false;
+                g_on_eager_small.fetch_add(1, std::memory_order_relaxed);
+            }
             else if (hold && !e.guarded && !mem::ww::guard(e.m->ww, e.first, e.last - e.first + 1)) { hold = false; g_on_eager_noguard.fetch_add(1, std::memory_order_relaxed); }
             if (hold) {
                 e.guarded = true;
@@ -2244,6 +2261,17 @@ void out_retire() {
 
 void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
     if (!size || (!by_fault && !out_lazy())) return;
+    struct FaultTimer {      // a guard fault's cost on the faulting thread (the 10 s line)
+        bool on;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~FaultTimer() {
+            if (!on) return;
+            const uint64_t us = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count());
+            g_fault_us.fetch_add(us, std::memory_order_relaxed);
+            uint64_t mx = g_fault_us_max.load(std::memory_order_relaxed);
+            while (us > mx && !g_fault_us_max.compare_exchange_weak(mx, us, std::memory_order_relaxed)) {}
+        }
+    } timer{by_fault};
     const uint64_t lo = addr & ~(kPageBytes - 1), hi = (addr + size + kPageBytes - 1) & ~(kPageBytes - 1);
     std::unique_lock<std::mutex> lk(g_out_mu);
     const OutChanged changed;
@@ -2270,6 +2298,17 @@ void out_fetch(uint64_t addr, uint64_t size, bool by_fault) {
             else { copy.push_back(i); need = std::max(need, e.serial); }
         }
         if (idx.empty()) return;
+        if (by_fault && waits == 0 && out_fault_eager()) {
+            // the whole of each result hit is CPU-read: its later results there go back at once, wherever the CPU reads them next
+            std::vector<Mirror*> hit;
+            for (size_t i : idx) {
+                const OutEntry& e = g_out[i];
+                if (!e.m) continue;
+                bits_set(e.m->cpu_read.get(), e.first, e.last, true);
+                if (std::find(hit.begin(), hit.end(), e.m) == hit.end()) hit.push_back(e.m);
+            }
+            for (Mirror* m : hit) m->cpu_faults.fetch_add(1, std::memory_order_relaxed);
+        }
         if (need && !serial_done(need) && !(rt && need >= cur) && waits < 8) {
             lk.unlock();
             if (!wait_serial(need, 5ull * 1000 * 1000 * 1000)) NXLOG_W(kTag, "compute out: waited 5 s for submission %llu to read its result", static_cast<unsigned long long>(need));
@@ -2321,7 +2360,7 @@ void out_reset() {
 // One line every 10 s: what went back to game memory and why, and what the copies hold.
 void out_log() {
     static auto last = std::chrono::steady_clock::now();
-    static uint64_t p_end = 0, p_gpu = 0, p_fault = 0, p_inval = 0, pn_fault = 0, pn_inval = 0, pn_def = 0, pn_read = 0, pn_ng = 0, pn_gf = 0, p_gfaults = 0;
+    static uint64_t p_end = 0, p_gpu = 0, p_fault = 0, p_inval = 0, pn_fault = 0, pn_inval = 0, pn_def = 0, pn_read = 0, pn_ng = 0, pn_gf = 0, p_gfaults = 0, p_fault_us = 0, pn_small = 0;
     const auto now = std::chrono::steady_clock::now();
     const double secs = std::chrono::duration<double>(now - last).count();
     if (secs < 10.0) return;
@@ -2338,12 +2377,16 @@ void out_log() {
             if (e.guarded && !e.flushed) { ++held; held_bytes += e.size; }
     }
     NXLOG_I(kTag, "compute out (%s): copied back %.0f KB/s over %.1f s (end of submission %llu KiB, for GPU readers %llu KiB in %llu flushes, on demand: "
-            "CPU touches %llu KiB in %llu copies, invalidates %llu KiB in %llu copies; guard faults %llu); held in the copy %zu results, %llu KiB "
-            "(held %llu, sent back at once %llu: CPU-read pages, %llu: not guardable)",
+            "CPU touches %llu KiB in %llu copies (%.1f ms on the faulting threads, longest %.1f), invalidates %llu KiB in %llu copies; guard faults %llu); "
+            "held in the copy %zu results, %llu KiB (held %llu, sent back at once %llu: CPU-read pages, %llu: small results of a pool the CPU "
+            "faulted on, %llu: not guardable)",
             out_lazy() ? "lazy" : "always", total / 1000.0 / secs, secs, (unsigned long long)page_size_kb(end - p_end), (unsigned long long)page_size_kb(gpu - p_gpu),
             (unsigned long long)(ngf - pn_gf), (unsigned long long)page_size_kb(fault - p_fault), (unsigned long long)(nf - pn_fault),
-            (unsigned long long)page_size_kb(inval - p_inval), (unsigned long long)(ni - pn_inval), (unsigned long long)(gfaults - p_gfaults), held,
-            (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(ng - pn_ng));
+            (g_fault_us.load() - p_fault_us) / 1000.0, g_fault_us_max.exchange(0) / 1000.0, (unsigned long long)page_size_kb(inval - p_inval), (unsigned long long)(ni - pn_inval), (unsigned long long)(gfaults - p_gfaults), held,
+            (unsigned long long)(held_bytes >> 10), (unsigned long long)(nd - pn_def), (unsigned long long)(nr - pn_read), (unsigned long long)(g_on_eager_small.load() - pn_small),
+            (unsigned long long)(ng - pn_ng));
+    p_fault_us = g_fault_us.load();
+    pn_small = g_on_eager_small.load();
     static uint64_t pw_b[kOutWhyCount] = {}, pw_n[kOutWhyCount] = {};
     static const char* const kWhyName[kOutWhyCount] = {"reader", "submit end", "copies off", "dispatch", "draw vertex/index/uniform", "draw storage/xfb",
                                                        "indirect", "buffer write", "buffer read", "texture upload", "event", "other"};
