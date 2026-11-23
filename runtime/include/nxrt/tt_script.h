@@ -36,6 +36,11 @@
 //                                     itself stays real, so areas load at full speed
 //   @at <ms>                          wait until <ms> of host wall-clock time have passed since the script's first frame (an absolute time:
 //                                     a recorded route's steps keep their times however many waits came before; tools/perf/record_to_route.py)
+//   @loaded [<quiet_ms>] [timeout=<ms>]   wait until a load that began at most 5 s before this step has ended and <quiet_ms> (default 2000) of
+//                                     host time have passed with no load (loads come in bursts: the save's area, then its pieces). Loads are
+//                                     the replay's loading screens (nxrt/gauge.h load_info; [display] unpaced_loading must be on). Timeout in
+//                                     host ms, default 180000. A recorded route's gameplay follows it, not a fixed time (tools/perf/sync_route.py)
+//   @origin                           later @at times count from here instead of the script's first frame
 //   @sleep <ms>                       wait <ms> of host wall-clock time (not game time: loading and fade-outs run on the host clock even in
 //                                     deterministic mode); frames keep being delivered meanwhile
 //   @warp <world> <area>              warp to the area (practice-mod sequence, done by the runner); then waits until that area is current
@@ -112,7 +117,9 @@ enum class StepKind : uint8_t {
     Rays,        // text = "IN OUT": batch of static-collision ray casts (S26)
     PressUntil,  // buttons pressed 4 frames every `count` frames until the condition (field/op/x/id, as Assert) holds; timeout
     GoTo,        // x, z, r: steer the left stick until the player is within r of (x, z); soft = a timeout logs and goes on
-    WaitAt,      // x = milliseconds of host time since the script's first frame
+    WaitAt,      // x = milliseconds of host time since the script's first frame (or the last @origin)
+    WaitLoaded,  // x = quiet ms after the load (default 2000), timeout = host ms (-1 = 180000)
+    Origin,      // @at counts from here
 };
 
 enum class AssertField : uint8_t { Area, World, Frame, Igt, Health, PosX, PosY, PosZ, VelX, VelY, VelZ, Speed, State, Tod, Prog };

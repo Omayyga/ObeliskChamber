@@ -6429,6 +6429,7 @@ void note_frame_for_pacing() {
     const bool want = low >= 3 && now - last_stall < std::chrono::milliseconds(1500);
     if (want != nxrt::frame_limiter_unpaced()) {
         nxrt::frame_limiter_set_unpaced(want);
+        nxrt::note_loading(want);                        // for a scripted run's @loaded
         if (!want) g_pacing_on_present.store(p, std::memory_order_relaxed);   // a load just ended (prepare_textures' load-in burst)
         ft::mark(want ? "pace.loading" : "pace.playing", static_cast<uint32_t>(per));
         NXLOG_I(kTag, "pacing %s (present %llu, %llu draws)", want ? "off: loading" : "on", static_cast<unsigned long long>(p),

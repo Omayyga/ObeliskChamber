@@ -608,6 +608,22 @@ NXTEST(gameplay_steps_sleep_run_mash_give_rate) {
     expect_err("@mash A 5000 room x\n", 1, "@mash");
 }
 
+NXTEST(loaded_and_origin_parse) {
+    Script sc;
+    REQUIRE(parse_ok("@loaded\n@loaded 3000 timeout=90000\n@origin\n@at 1500\n", sc));
+    REQUIRE(sc.steps.size() == 4);
+    CHECK_EQ(sc.steps[0].kind, StepKind::WaitLoaded);
+    CHECK_EQ(sc.steps[0].x, 2000.0);
+    CHECK_EQ(sc.steps[0].timeout, (int64_t)-1);
+    CHECK_EQ(sc.steps[1].x, 3000.0);
+    CHECK_EQ(sc.steps[1].timeout, (int64_t)90000);
+    CHECK_EQ(sc.steps[2].kind, StepKind::Origin);
+    CHECK_EQ(sc.steps[3].kind, StepKind::WaitAt);
+    expect_err("@loaded 1 2\n", 1, "@loaded");
+    expect_err("@loaded -5\n", 1, "quiet ms");
+    expect_err("@origin now\n", 1, "@origin");
+}
+
 // ---- S15 steps: @mash, @run, @grant, @call ----------------------------------------------------------------
 
 NXTEST(mashuntil_parses_keys_interval_condition_and_timeout) {
