@@ -290,6 +290,7 @@ void shutdown() {
         g_commit_bits.clear();
         g_heap_cls.clear();
         g_committed = 0;
+        g_lazy = false;
     }
     {
         std::lock_guard fl(g_fixed_mu);

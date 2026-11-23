@@ -234,6 +234,46 @@ NXTEST(heap_commit_counts_each_page_once) {
     CHECK(!mem::heap_exists());
 }
 
+// [memory] heap_lazy_commit: heap_commit only reserves; the first touch commits the page's 2 MiB granule; heap_touch, views and
+// heap_rw_pages commit what they cover; a decommitted page still faults.
+NXTEST(heap_lazy_commit_on_first_use) {
+    mem::shutdown();
+    _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "1");   // the test process turns it off in the environment (test_main.cpp)
+    CHECK(mem::init());
+    CHECK(mem::heap_create(kHeapSmall));
+    constexpr uint64_t kGran = 2ull << 20;
+    CHECK(mem::heap_commit(0, 16 * kGran));
+    if (mem::heap_committed() != 0) {   // Wine: lazy commit stays off (no section heap there)
+        nxtest::skip("heap_lazy_commit is off on this host");
+        mem::shutdown();
+        _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "0");
+        return;
+    }
+    CHECK(mem::is_mapped(mem::kHeapBase, kPg));                  // but answers as mapped
+    CHECK(touch(mem::kHeapBase + 3 * kPg, true));                // first use: its granule is committed
+    CHECK_EQ(mem::heap_committed(), kGran);
+    word_at(mem::kHeapBase + 5 * kPg)[0] = 0xCAFE0003u;           // the rest of the granule needs no fault
+    CHECK_EQ(word_at(mem::kHeapBase + 5 * kPg)[0], 0xCAFE0003u);
+    CHECK(mem::heap_touch(mem::kHeapBase + kGran, kPg));         // heap_touch commits exactly what it covers
+    CHECK_EQ(mem::heap_committed(), kGran + kPg);
+    CHECK_EQ(mem::heap_rw_pages(mem::kHeapBase + 2 * kGran, kGr), 1);   // committed for the caller
+    CHECK_EQ(mem::heap_committed(), kGran + kPg + kGr);
+    void* v = mem::heap_private_view(4 * kGran, kGr);            // a view of section pages commits them first
+    CHECK(v != nullptr);
+    if (v) {
+        static_cast<volatile uint32_t*>(v)[0] = 0xCAFE0004u;
+        CHECK_EQ(word_at(mem::kHeapBase + 4 * kGran)[0], 0xCAFE0004u);
+        CHECK(mem::heap_private_view_unmap(v));
+    }
+    CHECK(mem::heap_decommit(0, kPg));
+    CHECK(!touch(mem::kHeapBase, false));                         // a decommitted page faults, it is not committed again
+    CHECK(mem::heap_decommit(8 * kGran, kGran));                  // never committed: back to reserved
+    CHECK(!touch(mem::kHeapBase + 8 * kGran, false));
+    CHECK(!touch(mem::kHeapBase + 16 * kGran, false));            // past what heap_commit asked for
+    mem::shutdown();
+    _putenv_s("NXRT_MEMORY_HEAP_LAZY_COMMIT", "0");
+}
+
 NXTEST(alias_commit_through_alias_view_is_seen_by_primary) {
     mem::shutdown();
     CHECK(mem::init());
