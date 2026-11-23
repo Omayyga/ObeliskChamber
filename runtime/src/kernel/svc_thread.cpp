@@ -148,8 +148,7 @@ void svc_clear_event(::Ctx* c) {               // w0 event handle
 void svc_reset_signal(::Ctx* c) {              // w0 readable event handle: InvalidState when it was not signaled
     auto e = handle_as<KEvent>(static_cast<uint32_t>(X(c, 0)));
     if (!e) return svc_ret(c, kInvalidHandle);
-    if (!e->state->signaled) return svc_ret(c, kInvalidState);
-    e->state->signaled = false;
+    if (!e->state->signaled.exchange(false)) return svc_ret(c, kInvalidState);   // one of two racing resets gets it
     svc_ret(c, kOk);
 }
 

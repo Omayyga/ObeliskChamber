@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "nxrt/config.h"
+#include "nxrt/memguard.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gfx_tuning.h"
 #include "nxrt/gauge.h"
@@ -4080,7 +4081,7 @@ void log_ram_census(const char* why) {
             "pools %.0f MiB (in RAM / pool size, MiB: %s; pools outside the heap %.0f), texture storage %.0f MiB (of %.0f; of textures whose image "
             "is uploaded %.0f), the rest of the heap %.0f MiB; ours: texture preparation %.0f MiB, staging ring %.0f MiB, staging past the ring so "
             "far %.0f MiB; %.1f ms",
-            why, pmc.WorkingSetSize / mib, pmc.PrivateUsage / mib, mem::heap_committed() / mib, sampled ? "" : "(not sampled) ", heap_ram / mib,
+            why, pmc.WorkingSetSize / mib, memguard_commit_bytes(pmc.PrivateUsage, pmc.PagefileUsage) / mib, mem::heap_committed() / mib, sampled ? "" : "(not sampled) ", heap_ram / mib,
             pooled / mib, kinds.c_str(), m.outside / mib, tex_ram / mib, tex_size / mib, tex_up / mib, (heap_ram - pooled) / mib,
             texprep::held_bytes() / mib, gpu::staging_ring_size() / mib, gpu::staging_fallback_bytes() / mib, ms);
     // the rest of the working set: a walk of the whole address space (about 0.2 s), on a thread of its own so the render thread does not wait

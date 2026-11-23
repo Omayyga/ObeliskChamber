@@ -58,7 +58,7 @@ struct KObject {
 };
 
 struct EventState {
-    bool signaled = false;
+    std::atomic<bool> signaled{false};   // set and read by any thread without the kernel lock (svc_thread.cpp, ServiceEvent)
 };
 struct KEvent : KObject {                                  // readable and writable handles share `state`
     std::shared_ptr<EventState> state = std::make_shared<EventState>();

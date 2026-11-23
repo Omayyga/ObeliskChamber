@@ -45,6 +45,7 @@ const CommandBuffer* cb_of(const NVNcommandBuffer* c) { return host_of<CommandBu
 // buffer (Finalize, or Initialize over it) drops the rest.
 nxrt::GaugeCounter g_command_buffers("nvn.command_buffers");
 nxrt::GaugeCounter g_command_memory("nvn.command_memory.bytes");
+nxrt::GaugeCounter g_cmdlist_capacity("nvn.cmdlist.capacity_bytes");
 std::atomic<uint64_t> g_overflow_serial{0};   // numbers the overflow rings (CommandBuffer::overflow_base)
 std::atomic<uint64_t> g_cb_calls{0}, g_cb_added{0}, g_cb_fallbacks{0};   // callbacks run, that added memory, run-outs that fell back
 
@@ -283,6 +284,9 @@ size_t nvnCommandBufferGetControlMemoryFree(const NVNcommandBuffer* c) { const C
 
 }  // namespace
 
+void be::cmdlist_capacity_add(int64_t bytes) { g_cmdlist_capacity.add(bytes); }
+
+
 // Charges one record (nvn_cmd.h).
 void be::cmdmem_charge(CommandBuffer* cb, Op op, uint32_t blob_size) {
     switch (op) {
@@ -390,6 +394,8 @@ NVNcommandHandle nvnCommandBufferEndRecording(NVNcommandBuffer* c) {
         cb->held_hint = std::min<size_t>(1u << 20, std::max(list->held.size(), cb->held_hint - cb->held_hint / 4));
         cb->tpool = nullptr;
         list->meter = nullptr;
+        list->counted_capacity = static_cast<int64_t>(list->bytes.capacity() + list->held.capacity() * sizeof(list->held[0]));
+        cmdlist_capacity_add(list->counted_capacity);
         flush_segment(cb);
         ctl_need(cb, 8);
         cb->ctl_group = false;
