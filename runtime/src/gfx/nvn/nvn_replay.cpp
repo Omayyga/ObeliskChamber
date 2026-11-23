@@ -6401,7 +6401,7 @@ void load_census(CensusEvent ev, uint64_t present) {
     // and buffers stayed flat (#155, #162).
     gfx::VideoAllocStats as;
     device().alloc_stats(&as);
-    char at[512];
+    char at[1024];
     if (gfx::video_alloc_text(as, at, sizeof at) > 0) NXLOG_I("nvn.census", "%s: %s", why, at);
 }
 

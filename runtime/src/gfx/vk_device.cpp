@@ -206,6 +206,7 @@ size_t pick_gpu(const std::vector<GpuCandidate>& gpus, const char* want, bool* m
 
 // ---- private state ----------------------------------------------------------------------------------------------------
 struct Device::Impl {
+    std::atomic<uint64_t> rt_images{0}, rt_prefer{0}, rt_dedicated{0}, other_images{0}, other_prefer{0}, other_dedicated{0};   // alloc_stats
     std::mutex small_pools_mu;                       // ImageDesc::small_pool: one VMA pool of 16 MiB blocks per memory type
     std::map<uint32_t, VmaPool> small_pools;
     // validation counters (written from any thread by the layer callback)
@@ -1153,6 +1154,12 @@ ValidationStats Device::validation_stats() const {
 void Device::alloc_stats(VideoAllocStats* out) const {
     *out = VideoAllocStats{};
     if (!vma_) return;
+    out->rt_images = impl_->rt_images.load(std::memory_order_relaxed);
+    out->rt_prefer = impl_->rt_prefer.load(std::memory_order_relaxed);
+    out->rt_dedicated = impl_->rt_dedicated.load(std::memory_order_relaxed);
+    out->other_images = impl_->other_images.load(std::memory_order_relaxed);
+    out->other_prefer = impl_->other_prefer.load(std::memory_order_relaxed);
+    out->other_dedicated = impl_->other_dedicated.load(std::memory_order_relaxed);
     VmaTotalStatistics t{};
     vmaCalculateStatistics(vma_, &t);
     const uint32_t video = device_local_heap(vma_);
@@ -1307,6 +1314,19 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
         return r;
     }
     vk_gauge_images().add(1);
+    {   // #155: did the driver want this image in memory of its own, and did it get it (alloc_stats' "images made")
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        VkImageMemoryRequirementsInfo2 ri = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        ri.image = handle;
+        vkGetImageMemoryRequirements2(device_, &ri, &mr);
+        VmaAllocationInfo2 i2{};
+        vmaGetAllocationInfo2(vma_, alloc, &i2);
+        const bool rt = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+        (rt ? impl_->rt_images : impl_->other_images).fetch_add(1, std::memory_order_relaxed);
+        if (dr.prefersDedicatedAllocation) (rt ? impl_->rt_prefer : impl_->other_prefer).fetch_add(1, std::memory_order_relaxed);
+        if (i2.dedicatedMemory) (rt ? impl_->rt_dedicated : impl_->other_dedicated).fetch_add(1, std::memory_order_relaxed);
+    }
     {   // very large images are worth a line: they decide the process' memory footprint
         VmaAllocationInfo inf{};
         vmaGetAllocationInfo(vma_, alloc, &inf);
