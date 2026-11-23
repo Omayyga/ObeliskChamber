@@ -2207,10 +2207,29 @@ void tex_residency_tick(Frame& f) {
         }
         pct = std::max(pct, os_pct);
     }
-    if (pct < cfg.percent) return;
-    const bool urgent = pct >= cfg.urgent_percent;
-    const uint32_t idle_ms = static_cast<uint32_t>(urgent ? cfg.urgent_idle_s : cfg.idle_s) * 1000u;
-    const uint64_t want = std::min<uint64_t>(budget / 100 * static_cast<uint64_t>(pct - cfg.percent + 5), 512ull << 20);
+    // [gfx] residency_trim_idle_s (auto: 300 with memory limits scaled to the PC, else 0 = off): below residency_percent, textures no draw used
+    // for this long are demoted too, at most 128 MiB and 64 textures every 5 s. The game keeps the files (and textures) of the areas it
+    // visited in its cache; on the laptop 1.4-1.6 GB of our images were unused after a few minutes. Without it they stay until video memory
+    // nears the budget, by which time the driver's blocks have grown (#155, #162). A texture a draw wants again is made whole by
+    // tex_residency_restore (a few frames of its smaller levels).
+    static const uint32_t trim_ms = [] {
+        const std::string v = nxrt::config_get_str("gfx", "residency_trim_idle_s", "auto");
+        const int64_t s = (v == "auto" || v.empty()) ? (nxrt::mem::limits_scaled() ? 300 : 0) : nxrt::config_get_int("gfx", "residency_trim_idle_s", 0);
+        const uint32_t ms = static_cast<uint32_t>(std::clamp<int64_t>(s, 0, 86400) * 1000);
+        NXLOG_I(kTag, "residency: textures unused for %u s are demoted below the pressure line too ([gfx] residency_trim_idle_s%s%s)", ms / 1000u,
+                ms ? "" : ": off", nxrt::mem::limits_scaled() ? "; limits scaled" : "");
+        return ms;
+    }();
+    static uint32_t trim_at = 0;
+    const bool trim = pct < cfg.percent;
+    if (trim) {
+        if (!trim_ms || (trim_at && now - trim_at < 5000u)) return;
+        trim_at = now;
+    }
+    const bool urgent = !trim && pct >= cfg.urgent_percent;
+    const uint32_t idle_ms = trim ? trim_ms : static_cast<uint32_t>(urgent ? cfg.urgent_idle_s : cfg.idle_s) * 1000u;
+    const uint64_t want = trim ? (128ull << 20) : std::min<uint64_t>(budget / 100 * static_cast<uint64_t>(pct - cfg.percent + 5), 512ull << 20);
+    const int max_n = trim ? 64 : 400;
     std::unordered_set<const Texture*> reg;
     pool_registered_textures(reg);
     std::vector<std::pair<uint32_t, Texture*>> cand;
@@ -2226,7 +2245,7 @@ void tex_residency_tick(Frame& f) {
     uint64_t freed = 0;
     int n = 0;
     for (auto& [age, t] : cand) {
-        if (freed >= want || n >= 400) break;
+        if (freed >= want || n >= max_n) break;
         const uint64_t saved = tex_demote(t, t->gpu, f);
         if (!saved) continue;
         freed += saved;
@@ -2240,7 +2259,7 @@ void tex_residency_tick(Frame& f) {
     if (n && (logged++ < 40 || logged % 50 == 0))
         NXLOG_I(kTag, "residency: video memory at %d%% of the %.2f GiB budget: %d textures unused for %u s and more demoted (%.0f MB given back; %zu demoted "
                       "in all, %d of %zu candidates)%s", pct, static_cast<double>(budget) / (1024.0 * 1024.0 * 1024.0), n, idle_ms / 1000,
-                static_cast<double>(freed) / (1024.0 * 1024.0), g_demoted.size(), n, cand.size(), urgent ? " [urgent]" : "");
+                static_cast<double>(freed) / (1024.0 * 1024.0), g_demoted.size(), n, cand.size(), urgent ? " [urgent]" : (trim ? " [trim: residency_trim_idle_s]" : ""));
 }
 
 // Once per present: the demoted textures a draw used again (everything once the marks are incomplete) are made whole, the most recently
