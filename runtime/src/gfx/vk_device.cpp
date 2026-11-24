@@ -14,6 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include "nxrt/boot_timeline.h"
 #include "nxrt/config.h"
@@ -27,7 +29,6 @@
 #include "vk_gauges.h"
 #include "vk_layer_filter.h"
 #include "video_alloc_stats.h"
-#include <unordered_map>
 #include "extras/framegen.h"
 #include "extras/framegen_ffx.h"
 #include "extras/temporal.h"
@@ -210,6 +211,9 @@ struct Device::Impl {
     std::atomic<uint64_t> rt_images{0}, rt_prefer{0}, rt_dedicated{0}, other_images{0}, other_prefer{0}, other_dedicated{0};   // alloc_stats
     std::mutex small_pools_mu;                       // ImageDesc::small_pool: one VMA pool of 16 MiB blocks per memory type
     std::map<uint32_t, VmaPool> small_pools;
+    // block_stats: every live image and buffer with its kind (VideoAllocKind as a number)
+    std::mutex live_mu;
+    std::unordered_map<VmaAllocation, uint8_t> live;
     // validation counters (written from any thread by the layer callback)
     std::atomic<uint64_t> errors{0}, warnings{0}, infos{0}, verbose{0};
     std::mutex first_error_mu;
@@ -1197,6 +1201,34 @@ void Device::alloc_stats(VideoAllocStats* out) const {
     out->valid = true;
 }
 
+void Device::block_stats(VideoBlockStats* out) const {
+    *out = VideoBlockStats{};
+    if (!vma_) return;
+    const uint32_t video = device_local_heap(vma_);
+    const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+    vmaGetMemoryProperties(vma_, &mp);
+    if (!mp) return;
+    std::vector<VideoBlockEntry> e;
+    {   // under the lock: an allocation can't be freed while it is read (destroy_image / destroy_buffer take it first)
+        std::lock_guard<std::mutex> lk(impl_->live_mu);
+        e.reserve(impl_->live.size());
+        for (const auto& [a, kind] : impl_->live) {
+            VmaAllocationInfo2 i2{};
+            vmaGetAllocationInfo2(vma_, a, &i2);
+            if (i2.dedicatedMemory || !i2.allocationInfo.deviceMemory) continue;   // memory of its own goes back with its image
+            const uint32_t mt = i2.allocationInfo.memoryType;
+            if (mt >= mp->memoryTypeCount || mp->memoryTypes[mt].heapIndex != video) continue;
+            VideoBlockEntry x;
+            x.block = reinterpret_cast<uint64_t>(i2.allocationInfo.deviceMemory);
+            x.block_size = i2.blockSize;
+            x.size = i2.allocationInfo.size;
+            x.kind = static_cast<VideoAllocKind>(kind);
+            e.push_back(x);
+        }
+    }
+    video_block_tally(e, out);
+}
+
 void Device::validation_reset() {
     impl_->errors = impl_->warnings = impl_->infos = impl_->verbose = 0;
     std::lock_guard<std::mutex> lk(impl_->first_error_mu);
@@ -1318,6 +1350,13 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
         return r;
     }
     vk_gauge_images().add(1);
+    {
+        const bool rt_kind = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+        const VideoAllocKind k = rt_kind ? VideoAllocKind::RenderTarget
+                                         : (d.usage & VK_IMAGE_USAGE_STORAGE_BIT) ? VideoAllocKind::Storage : VideoAllocKind::Texture;
+        std::lock_guard<std::mutex> lk(impl_->live_mu);
+        impl_->live[alloc] = static_cast<uint8_t>(k);
+    }
     {   // #155: did the driver want this image in memory of its own, and did it get it (alloc_stats' "images made")
         VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
         VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
@@ -1379,6 +1418,10 @@ void Device::destroy_image(Image& img) {
             vmaGetAllocationInfo(vma_, img.allocation, &inf);
             vk_gauge_image_bytes().sub(static_cast<int64_t>(inf.size));
         }
+        if (img.allocation) {
+            std::lock_guard<std::mutex> lk(impl_->live_mu);
+            impl_->live.erase(img.allocation);
+        }
         vmaDestroyImage(vma_, img.image, img.allocation);
         vk_gauge_images().sub(1);
     }
@@ -1405,6 +1448,10 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
+    {
+        std::lock_guard<std::mutex> lk(impl_->live_mu);
+        impl_->live[b.allocation] = static_cast<uint8_t>(VideoAllocKind::Buffer);
+    }
     {
         VkMemoryPropertyFlags mp = 0;
         vmaGetAllocationMemoryProperties(vma_, b.allocation, &mp);
@@ -1442,6 +1489,10 @@ void Device::destroy_buffer(Buffer& b) {
                 vmaGetAllocationInfo(vma_, b.allocation, &inf);
                 vk_gauge_buffer_bytes().sub(static_cast<int64_t>(inf.size));
             }
+        }
+        if (b.allocation) {
+            std::lock_guard<std::mutex> lk(impl_->live_mu);
+            impl_->live.erase(b.allocation);
         }
         vmaDestroyBuffer(vma_, b.buffer, b.allocation);
         vk_gauge_buffers().sub(1);

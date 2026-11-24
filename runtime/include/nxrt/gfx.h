@@ -61,6 +61,7 @@ struct DeviceDesc {
 };
 
 struct VideoAllocStats;   // src/gfx/video_alloc_stats.h
+struct VideoBlockStats;   // src/gfx/video_alloc_stats.h
 
 struct ValidationStats {
     uint64_t errors = 0, warnings = 0, infos = 0, verbose = 0;
@@ -222,6 +223,9 @@ public:
     ValidationStats validation_stats() const;
     // What the allocator holds and has handed out (video_alloc_stats.h). Walks the allocator: a few ms, once per load census.
     void alloc_stats(VideoAllocStats* out) const;
+    // What each block of the video heap holds, by kind (textures, render targets, storage images, buffers): whether moving textures could
+    // empty it. Walks every live image and buffer: a few ms, once per load census.
+    void block_stats(VideoBlockStats* out) const;
     void validation_reset();
 
     // Image formats: every image is checked with vkGetPhysicalDeviceImageFormatProperties2 (format, type, tiling, usage,
