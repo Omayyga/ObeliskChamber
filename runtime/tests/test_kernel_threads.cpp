@@ -1133,6 +1133,38 @@ NXTEST(event_svcs_signal_reset_clear) {
     end_case();
 }
 
+// Review item 13: an event's signaled state is atomic, and ResetSignal clears it with an exchange, so of two threads resetting one signal at
+// the same time exactly one gets Ok and the other InvalidState (both used to be able to see it set, and both "reset" it).
+NXTEST(event_reset_signal_races_resolve_to_one) {
+    begin();
+    ::Ctx c{};
+    CHECK_EQ(svc_rc(&c, 0x45), k::kOk);
+    const uint32_t hw = static_cast<uint32_t>(c.x[1]);
+    const uint32_t hr = static_cast<uint32_t>(c.x[2]);
+    REQUIRE(hw && hr);
+    int bad = 0;
+    for (int round = 0; round < 300; ++round) {
+        ::Ctx sg{};
+        sg.x[0] = hw;
+        CHECK_EQ(svc_rc(&sg, 0x11), k::kOk);                  // SignalEvent
+        std::atomic<bool> go{false};
+        std::atomic<int> ok{0};
+        auto reset = [&] {
+            while (!go.load()) YieldProcessor();
+            ::Ctx r{};
+            r.x[0] = hr;
+            if (svc_rc(&r, 0x17) == k::kOk) ok.fetch_add(1);   // ResetSignal
+        };
+        std::thread a(reset), b(reset);
+        go.store(true);
+        a.join();
+        b.join();
+        if (ok.load() != 1) ++bad;
+    }
+    CHECK_EQ(bad, 0);
+    end_case();
+}
+
 NXTEST(event_wait_timeouts_and_cross_thread_wake) {
     begin();
     ::Ctx c{};

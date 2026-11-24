@@ -463,6 +463,7 @@ void flush_batch() {
         r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
     }
     if (r != VK_SUCCESS) {
+        nxrt::diag_vk_note(static_cast<int>(r), "vkQueueSubmit2 (nvn batch)", __FILE__, __LINE__);
         NXLOG_E(kTag, "vkQueueSubmit2 failed (%d): the device is lost or out of memory", static_cast<int>(r));
         // keep the timeline moving so waiters do not hang: signal from the host
         VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
@@ -518,7 +519,10 @@ bool split_submission(Frame& f) {
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
         r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
     }
-    if (r != VK_SUCCESS) NXLOG_E(kTag, "vkQueueSubmit2 of a split submission failed (%d)", static_cast<int>(r));
+    if (r != VK_SUCCESS) {
+        nxrt::diag_vk_note(static_cast<int>(r), "vkQueueSubmit2 (nvn split)", __FILE__, __LINE__);
+        NXLOG_E(kTag, "vkQueueSubmit2 of a split submission failed (%d)", static_cast<int>(r));
+    }
     s.split_used.push_back(s.cb);
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -564,7 +568,10 @@ void wait_serial_blocking(uint64_t serial) {
     wi.pSemaphores = &g->timeline;
     wi.pValues = &serial;
     VkResult r = vkWaitSemaphores(g->dev->device(), &wi, UINT64_MAX);
-    if (r != VK_SUCCESS) NXLOG_E(kTag, "vkWaitSemaphores failed (%d)", static_cast<int>(r));
+    if (r != VK_SUCCESS) {
+        nxrt::diag_vk_note(static_cast<int>(r), "vkWaitSemaphores (nvn blocking)", __FILE__, __LINE__);
+        NXLOG_E(kTag, "vkWaitSemaphores failed (%d)", static_cast<int>(r));
+    }
     read_completed();
 }
 
@@ -1303,7 +1310,9 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         std::lock_guard<std::mutex> lk(g->dev->queue_mutex());
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
         r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
-        if (r == VK_SUCCESS) vkQueueWaitIdle(g->dev->queue());   // nothing else tells when it is done
+        if (r != VK_SUCCESS) nxrt::diag_vk_note(static_cast<int>(r), "vkQueueSubmit2 (nvn unsignalled)", __FILE__, __LINE__);
+        else if (const VkResult wr = vkQueueWaitIdle(g->dev->queue()); wr != VK_SUCCESS)   // nothing else tells when it is done
+            nxrt::diag_vk_note(static_cast<int>(wr), "vkQueueWaitIdle (nvn unsignalled)", __FILE__, __LINE__);
     }
     if (pool_copy_pending()) pool_copy_end();
     g->recording = 0;
@@ -1506,6 +1515,7 @@ bool wait_serial(uint64_t serial, uint64_t timeout_ns) {
             want_flush(serial, true);
         }
     }
+    if (r != VK_SUCCESS && r != VK_TIMEOUT) nxrt::diag_vk_note(static_cast<int>(r), "vkWaitSemaphores (nvn timeline)", __FILE__, __LINE__);
     if (r == VK_SUCCESS && !on_render_thread()) {
         std::unique_lock<std::mutex> lock(g_copy_done_mu);
         auto ready = [serial] { const auto copying = g_copy_inflight.load(); return !copying || copying > serial; };
@@ -1768,6 +1778,7 @@ bool bring_up(gfx::Device& dev, gfx::Renderer* rend, FrameLimiter* limiter, bool
     });
     extras::lowlat_set_gpu_wait_fn(&gpu_wait_frames);
     static const bool report_registered = (diag_add_report(gpu_report), true);   // the freeze dump shows the GPU state
+    diag_set_submit_state(gpu_report);   // the first Vulkan failure notes the submission state (gpu_diag.cpp)
     (void)report_registered;
     register_counter_gauges();
     cmdq::install();      // [nvn] replay_threads: before the render thread records anything
@@ -1854,6 +1865,7 @@ void tear_down() {
     gp->qcv.notify_all();
     if (gp->th.joinable()) gp->th.join();
     cmdq::shutdown();
+    diag_set_submit_state(nullptr);   // gpu_report reads g, which goes away below
     gfx::Device& d = *gp->dev;
     vkDeviceWaitIdle(d.device());
     if (gp->ring.buf.buffer) d.destroy_buffer(gp->ring.buf);

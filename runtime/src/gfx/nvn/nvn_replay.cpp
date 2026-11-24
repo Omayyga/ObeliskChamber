@@ -26,6 +26,7 @@
 #include <bit>
 
 #include "nxrt/config.h"
+#include "nxrt/diag.h"
 #include "nxrt/frame_limiter.h"
 #include "nxrt/ftrace.h"
 #include "nxrt/gauge.h"
@@ -1650,6 +1651,16 @@ void vol3d_prepare(const ProgLayout& pl) {
 
 std::atomic<uint64_t> g_pool_uploads_deferred{0};
 std::atomic<uint64_t> g_pacing_on_present{0};   // the present at which pacing last came back on after a load (note_frame_for_pacing)
+}  // namespace
+// Play, not a load: the frame limiter paces, and at least `grace` presents have gone by since the last load ended (the scene streams in over
+// its first seconds, and that burst stays as fast as before).
+bool paced_play(uint64_t grace) {
+    if (nxrt::frame_limiter_unpaced()) return false;
+    const uint64_t on_at = g_pacing_on_present.load(std::memory_order_relaxed);
+    const uint64_t p = counters().presents.load(std::memory_order_relaxed);
+    return !on_at || p < on_at || p - on_at >= grace;
+}
+namespace {
 const bool g_pool_deferred_hitch = (nxrt::hitch_add_counter("pool_uploads_deferred", []() -> uint64_t { return g_pool_uploads_deferred.load(std::memory_order_relaxed); }), true);
 
 // Makes the textures a draw samples current (uploaded, in their sampled layout) and the storage images it binds writable (GENERAL).
@@ -5187,11 +5198,39 @@ void cs_check_draw(const ProgLayout& pl) {
     }
 }
 
+// The last compute dispatches, for device-lost reports and freeze dumps ([diag] dispatch_ring, gpu_diag.cpp; from fefw-recomp #100): the
+// shader (or the one that was missing), the submission, the size or the indirect arguments, and the full barriers recorded since the last.
+void note_dispatch(const ShaderInfo* cs, const ProgLayout* pl, uint32_t x, uint32_t y, uint32_t z, uint64_t indirect, bool shadow_barrier) {
+    thread_local VkCommandBuffer s_cb = VK_NULL_HANDLE;   // per thread, as memory_barrier_count counts
+    thread_local uint64_t s_mark = 0;
+    nxrt::DispatchNote n;
+    if (cs) std::memcpy(n.shader, cs->hash.c_str(), std::min(cs->hash.size(), sizeof n.shader - 1));
+    else if (!g_cs_missing.empty()) std::memcpy(n.missing, g_cs_missing.c_str(), std::min(g_cs_missing.size(), sizeof n.missing - 1));
+    n.x = x;
+    n.y = y;
+    n.z = z;
+    n.indirect = indirect;
+    n.serial = F ? F->serial : 0;
+    n.bindings = pl ? static_cast<uint32_t>(pl->bindings.size()) : 0;
+    if (F && F->cb) {
+        const uint64_t mark = memory_barrier_count(F->cb);
+        n.barriers = static_cast<uint32_t>(F->cb == s_cb && mark >= s_mark ? mark - s_mark : mark);
+        s_cb = F->cb;
+        s_mark = mark;
+    }
+    n.flags = static_cast<uint16_t>((indirect ? nxrt::DispatchNote::kIndirect : 0) | (cs ? 0 : nxrt::DispatchNote::kMissingCs) |
+                                    (shadow_barrier ? nxrt::DispatchNote::kBarrierBefore : 0));
+    nxrt::diag_note_dispatch(n);
+}
+
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
-    if (!cs) return;
+    if (!cs) {
+        note_dispatch(nullptr, nullptr, x, y, z, indirect, false);
+        return;
+    }
     if (skip_list(cs->hash, false)) return;
     if (g_census) {
         CensusRow& r = g_census_rows["zcs " + cs->hash.substr(0, 8)];
@@ -5305,6 +5344,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         gstamp("shadow in");
     }
     cs_before_dispatch(*pl, indirect);
+    note_dispatch(cs, pl, x, y, z, indirect, g_sh_copied);
     ckpt_dispatch(F->cb, cs->hash.c_str());     // [gfx] gpu_checkpoints (no-op when off)
     const bool cs_label = pass_labels_on();
     if (cs_label) {

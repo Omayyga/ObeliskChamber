@@ -180,3 +180,7 @@ midhook 0x71011eb084
 # spoken text (ObeliskChamber_frame.cpp, [fefw] frame_fixes): the talk sequence asks the text step 0x115d330 (x0 = the window's text, w1 =
 # letters to add, 3 a frame from 0x1154754) -> w0 finished; the entry hook skips it off the 30 Hz ticks (after Fortune's Eden v1.6.8.6)
 entryhook 0x710115d330
+# Sites EmblemWeave lifts with, kept here so code mods made for it find the same sites (no hook of this port uses them; a site with
+# no hook attached only passes through). EmblemWeave's npc_log: the update's reference position (v2) and the character show / hide call (x0 chara, w1 mode)
+inline 0x7101041d7c
+entryhook 0x7100d039e0

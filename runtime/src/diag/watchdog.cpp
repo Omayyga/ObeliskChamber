@@ -231,6 +231,7 @@ std::string emit_dump(const std::string& report_path, const std::string& header)
     text += '\n';
     text += dump_text();
     text += kernel::sync_wait_report();
+    text += diag_vk_failure_text();
     text += extra_reports();
     log_lines(text);
     write_report(report_path, text);
@@ -403,6 +404,7 @@ uint64_t diag_frame_count() { return g_frames.load(std::memory_order_relaxed); }
 uint32_t watchdog_fire_count() { return g_fires.load(std::memory_order_relaxed); }
 
 std::string diag_thread_dump() { return dump_text(); }
+std::string diag_extra_reports() { return extra_reports(); }
 
 void diag_add_report(std::string (*fn)()) {
     std::lock_guard<std::mutex> lk(g_report_mu);

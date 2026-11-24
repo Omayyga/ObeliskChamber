@@ -202,6 +202,9 @@ std::string build_report(const EXCEPTION_RECORD* rec, const CONTEXT* cx, DWORD t
         out += mem::ww::describe_page(addr);
     }
 
+    // A Vulkan call that failed before the exception (gpu_diag.cpp): an out-of-memory error or a lost device can be what led here.
+    out += diag_vk_failure_text();
+
     // Last guest function: the lifted function whose host code contains the faulting instruction.
     if (const uint64_t g = guest_function_of(rip))
         appendf(out, "last guest function entered: f_%llx\n", static_cast<unsigned long long>(g));

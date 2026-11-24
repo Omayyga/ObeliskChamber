@@ -81,12 +81,17 @@ void cache_thread(int period_s) {
     }
     s.ok.store(true);
     // The entry holds the table's default (4000 MiB) until the set-up replaces it with the computed budget; after a minute with no change the
-    // default is taken as the budget
+    // default is taken as the budget. It can also read 0 at first: main's code is mapped before its data is filled in, and this thread got
+    // there at 1.8 s on a laptop, read 0 and gave up, so neither the lines nor the cap ever came (0.3.2 soak run). 0 is waited out too.
     const uint64_t initial = kTableDefault;
     uint64_t budget = initial;
-    for (int i = 0; i < 20 * 60 && (budget = rd64(s.base + kFileBudget)) == initial; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (int i = 0; i < 20 * 60; ++i) {
+        budget = rd64(s.base + kFileBudget);
+        if (budget && budget != initial) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     if (!budget) {
-        NXLOG_W(kTag, "the file cache budget reads 0: nothing applied or logged");
+        NXLOG_W(kTag, "the file cache budget still reads 0 after a minute: nothing applied or logged");
         return;
     }
     s.game_budget.store(budget);

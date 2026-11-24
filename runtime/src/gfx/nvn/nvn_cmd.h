@@ -149,10 +149,16 @@ struct CommandBuffer;
 // runs when the NVN call returns (cmdmem_run_pending, from the thunk in nvn_abi.h).
 void cmdmem_charge(CommandBuffer* cb, Op op, uint32_t blob_size);
 
+// Bytes the recorded command lists alive hold (their record and object vectors' capacity, counted at EndRecording; gauge
+// nvn.cmdlist.capacity_bytes, api_cmdbuf.cpp): the soak's check that lists kept by the game do not keep growing (review Tier 4).
+void cmdlist_capacity_add(int64_t bytes);
+
 class CmdList : public Obj {
 public:
     static constexpr Kind kKind = Kind::CmdList;
     CmdList() : Obj(kKind) {}
+    ~CmdList() override { if (counted_capacity) cmdlist_capacity_add(-counted_capacity); }
+    int64_t counted_capacity = 0;          // what this list added to the gauge at EndRecording
     std::vector<uint8_t> bytes;
     std::vector<Ref<Obj>> held;           // objects the payloads point to
     uint64_t handle = 0;                  // NVNcommandHandle (0 until EndRecording)

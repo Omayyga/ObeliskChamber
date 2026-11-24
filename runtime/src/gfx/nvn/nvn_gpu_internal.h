@@ -31,6 +31,11 @@ class FrameLimiter;
 namespace nxrt::nvn::be::gpu {
 
 bool on_render_thread();
+// Play, not a load: the frame limiter paces, and at least `grace` presents have gone by since the last load ended (nvn_replay.cpp).
+bool paced_play(uint64_t grace);
+// [gfx] residency's figure for video memory in use, in percent of the budget ([gfx] residency_test_budget_mb and residency_os_pressure
+// included); -1 when not known. Sampled at most every 250 ms (nvn_gpu_texture.cpp).
+int resid_pressure_percent();
 void flush_caches();              // writes the pipeline cache to disk now (the key file is appended as pipelines are created)
 gfx::Device& device();
 VkDevice vkdev();

@@ -16,6 +16,9 @@ struct MemGuardOptions {
     void* user = nullptr;
 };
 
+// Private commit from PROCESS_MEMORY_COUNTERS_EX. Wine / Proton fill PagefileUsage but leave PrivateUsage 0 (from fefw-recomp #128): then
+// the guard read a footprint of 0 and never tripped, and the logs showed 0 MB. PagefileUsage is the same figure on Windows.
+inline uint64_t memguard_commit_bytes(uint64_t private_usage, uint64_t pagefile_usage) { return private_usage ? private_usage : pagefile_usage; }
 uint64_t memguard_footprint();       // bytes of private commit of this process (0 if the query fails)
 // Private commit includes the video memory a process has allocated (WDDM keeps a commit charge for it). The guard is about host memory, so it
 // subtracts what this function returns (the GPU's dedicated usage of this process; the Vulkan device sets it). Null: no subtraction.

@@ -138,9 +138,12 @@ struct ModInfo {
     std::string dir;     // the mod's host folder (UTF-8)
     bool has_romfs = false, has_exefs = false;
     bool romfs_on = true, exefs_on = true;
-    bool exefs_patches = false;   // exefs/ holds .ips / .pchtxt patches (applied by Set up, not at start)
+    bool exefs_patches = false;   // exefs/ or a folder in it holds .ips / .ips32 / .pchtxt patches (applied by Set up, not at start)
 };
 std::vector<ModInfo> mods_list();
+// Whether an exefs/ folder (UTF-8) holds patch files Set up applies: .ips, .ips32 or .pchtxt, in it or in a folder below it (not one
+// whose name starts with '.'), as fefw_build.py exefs_files and EmblemWeave's patches.rs find them.
+bool exefs_patch_files(const std::string& exefs_dir);
 bool mods_set(const std::string& dir, bool romfs_on, bool exefs_on, std::string* err);
 
 // A game module's say over the paths of the account save data. The hook gets the save's host folder (UTF-8), the normalised guest path
