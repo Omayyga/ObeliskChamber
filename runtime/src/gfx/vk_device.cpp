@@ -1055,14 +1055,17 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     // the driver only when nothing is left in it. On an RX 6600 XT 8 GB the allocator held 33 blocks (5.2 GB) from the 4th minute on with
     // only 2.1-4.1 GB in use: area changes left every block partly used, the free 1-3 GB could not be given back, and video memory sat at
     // 94% of the budget while the frame rate fell. Smaller blocks empty out whole far more often (and images over half a block get memory of
-    // their own, returned when they go). auto = 64 MiB on cards whose largest video memory heap is 8.5 GiB or less, else VMA's default; a
-    // number of MiB (16 to 1024); 0 = VMA's default.
+    // their own, returned when they go). auto = 32 MiB on cards whose largest video memory heap is 8.5 GiB or less, else VMA's default; a
+    // number of MiB (16 to 1024); 0 = VMA's default. 32 rather than 64 since 0.3.2's soak run: after a heavy scene on an RTX 3070 Laptop
+    // 8 GB, 31% (1.1 GB) of the taken blocks sat free in holes between kept textures. A/B on that laptop (four saves and back, 11 loads,
+    // 2 runs each): 32 MiB left 40-100 MiB less free space in the blocks at most loads (7-9% against 10% at the end), with the same frame
+    // rate and pictures; about 160 blocks against 120.
     {
         std::string v = config_get_str("gfx", "video_block_mb", "auto");
         for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const uint64_t heap = nxrt::mem::limits_video_heap_bytes();
         int64_t mb = 0;
-        if (v.empty() || v == "auto") mb = heap && heap <= (85ull << 30) / 10 ? 64 : 0;
+        if (v.empty() || v == "auto") mb = heap && heap <= (85ull << 30) / 10 ? 32 : 0;
         else mb = std::clamp<int64_t>(config_get_int("gfx", "video_block_mb", 0), 0, 1024);
         if (mb > 0 && mb < 16) mb = 16;
         if (mb > 0) aci.preferredLargeHeapBlockSize = static_cast<VkDeviceSize>(mb) << 20;
