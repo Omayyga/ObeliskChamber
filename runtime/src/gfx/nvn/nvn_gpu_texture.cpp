@@ -81,6 +81,8 @@ struct TexGpu {
     VkExtent3D base = {1, 1, 1};                        // level 0 extent (depth for 3D images)
     uint32_t levels = 1, layers = 1;
     VkImageUsageFlags usage = 0;
+    VkImageCreateFlags create_flags = 0;                // as made (tex_move makes the image again with them)
+    bool create_known = false;                          // create_flags was recorded (not for sparse images)
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;   // tracked layout (the same for every level and layer)
     bool failed = false;                                // no image: the texture is not usable on the GPU (logged once)
@@ -888,6 +890,8 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         }
     }
     g->usage = usage;
+    g->create_flags = flags;
+    g->create_known = true;
 
     // Resolution scale: the image is the NVN size times the scale. Other modules keep the NVN size (tex_extent) and ask tex_scale /
     // tex_image_extent where the image size matters (render area, viewports, copies, the support buffer's render_scale).
@@ -2131,6 +2135,67 @@ uint64_t tex_demote(Texture* t, TexGpu* g, Frame& f) {
     return before - g->est_bytes;
 }
 
+// [gfx] defrag (the defragmentation plan, #155): a texture can move to new memory when its whole content is in the image and nothing else
+// holds the image: sampled only (render targets and storage images live in their own pools, [gfx] kind_pools), alone on its storage, made
+// whole (not a demoted one, those live in the small-texture pools), 2D (arrays and cubes too), in its sampled layout, with no CPU write,
+// upload or texture preparation pending.
+bool movable(const Texture* t, const TexGpu* g) {
+    if (!g || g->failed || g->sparse || g->refs != 1 || g->depth || !g->uploaded || g->streamed || g->promoted || g->presented || g->scale != 1.0f ||
+        g->demoted_ms || g->type != VK_IMAGE_TYPE_2D || !g->create_known)
+        return false;
+    if (g->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) return false;
+    if (g->layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL || !(g->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(g->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        return false;
+    if (!t->mem || t->overflow || t->is_display || t->vpool || t->b.samples > 1 || t->destroyed.load(std::memory_order_relaxed) || t->cpu_dirty.load())
+        return false;
+    const uint32_t gen = t->prep_gen.load(std::memory_order_relaxed);
+    if (t->prep_prov.load(std::memory_order_relaxed) == (0x80000000u | gen)) return false;   // a quick stand-in waiting for its final texels
+    return true;
+}
+
+// The same image again in new memory, its content copied on the GPU (every level and layer), as tex_demote does without dropping levels:
+// the views are made again on demand, every texture pool holding it rewrites its entry (pool_texture_remade), and the old image and its
+// views go after the frames that use them. Returns the bytes moved (the estimate), 0 when it was not moved.
+uint64_t tex_move(Texture* t, TexGpu* g, Frame& f) {
+    if (!movable(t, g)) return 0;
+    Shape s = shape_of(*t);
+    Shape ns = s;
+    ns.base = g->base;
+    ns.levels = g->levels;
+    ns.layers = g->layers;
+    gfx::Image ni;
+    std::string err;
+    if (device().create_image(make_desc(ns, g->format, g->usage, g->create_flags), &ni, &err) != VK_SUCCESS) return 0;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    image_barrier(f.cb, ni.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, g->aspect, 0, ns.levels, 0, ns.layers);
+    std::vector<VkImageCopy> regions;
+    for (uint32_t j = 0; j < ns.levels; ++j) {
+        VkImageCopy r = {};
+        r.srcSubresource = {g->aspect, j, 0, ns.layers};
+        r.dstSubresource = {g->aspect, j, 0, ns.layers};
+        r.extent = level_extent(g->base, j);
+        r.extent.depth = 1;
+        regions.push_back(r);
+    }
+    vkCmdCopyImage(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ni.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()),
+                   regions.data());
+    gfx::Image old = g->img;
+    std::vector<VkImageView> views;
+    for (auto& kv : g->views) views.push_back(kv.second);
+    g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->last_key = {};
+    defer_destroy_vk([old, views]() mutable {
+        for (VkImageView v : views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
+        device().destroy_image(old);
+    });
+    g->img = ni;
+    g->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    pool_texture_remade(t);
+    return std::max<uint64_t>(g->est_bytes, 1);
+}
+
 // Makes a demoted texture whole again: a new image, filled from the game's memory as at its first use; the small one goes after the frames
 // that use it.
 bool tex_promote(Texture* t, Frame& f) {
@@ -2211,6 +2276,40 @@ constexpr uint32_t kPromoteCooldownMs = 30000;
 
 void tex_mark_seen(Texture* t) {
     if (t && t->gpu && !t->gpu->failed) t->gpu->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+}
+
+// [gfx] defrag_test_moves (default 0, a test aid for the defragmentation plan): every present, this many textures move to new memory
+// (tex_move), taken in turn from the registered ones that can move, so that a run with screenshots shows whether a move is ever visible.
+void tex_defrag_test(Frame& f) {
+    static const int n_per = static_cast<int>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "defrag_test_moves", 0), 0, 256));
+    if (!n_per) return;
+    static uint64_t moved = 0, bytes = 0, looks = 0;
+    static size_t cursor = 0;
+    static uint32_t logged_at = 0;
+    std::unordered_set<const Texture*> reg;
+    pool_registered_textures(reg);
+    std::vector<Texture*> cand;
+    cand.reserve(reg.size());
+    for (const Texture* ct : reg) {
+        Texture* t = const_cast<Texture*>(ct);
+        if (movable(t, t->gpu)) cand.push_back(t);
+    }
+    ++looks;
+    if (!cand.empty()) {
+        std::sort(cand.begin(), cand.end(), [](const Texture* a, const Texture* b) { return a->id < b->id; });
+        for (int i = 0; i < n_per; ++i) {
+            Texture* t = cand[(cursor++) % cand.size()];
+            const uint64_t b = tex_move(t, t->gpu, f);
+            if (b) { ++moved; bytes += b; }
+        }
+    }
+    const uint32_t now = resid_ms();
+    if (!logged_at) logged_at = now;
+    if (now - logged_at >= 10000u) {
+        logged_at = now;
+        NXLOG_I(kTag, "defrag test: %llu textures moved so far (%.0f MiB), %zu can move now, %llu presents ([gfx] defrag_test_moves = %d)",
+                static_cast<unsigned long long>(moved), bytes / 1048576.0, cand.size(), static_cast<unsigned long long>(looks), n_per);
+    }
 }
 
 void tex_residency_tick(Frame& f) {
