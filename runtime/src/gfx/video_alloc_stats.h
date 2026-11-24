@@ -103,6 +103,8 @@ struct VideoBlockStats {
     VideoBlockGroup mixed;        // blocks holding a render target, a storage image or a buffer as well
     VideoBlockGroup sparse;       // blocks under half used (either kind)
     VideoBlockGroup sparse_tex;   // of them, textures only
+    uint64_t kind_pooled = 0;     // [gfx] kind_pools: allocations made in the pools of their kind so far
+    uint64_t kind_fallbacks = 0;  // of the ones meant for them, made in the default pools because the pool could not
 };
 
 // Groups the entries by block. Sorts `e` in place.
@@ -141,13 +143,15 @@ inline int video_block_text(const VideoBlockStats& s, char* out, size_t n) {
                          "allocator blocks by content: %u blocks / %.0f MiB, %llu allocations, %.0f MiB free (in use: textures %.0f, render targets %.0f, "
                          "storage images %.0f, buffers %.0f MiB); textures only %u blocks / %.0f MiB, %.0f MiB free; with other allocations %u blocks / "
                          "%.0f MiB, %.0f MiB free (render targets %.0f, storage images %.0f, buffers %.0f, textures %.0f MiB in them); under half used %u "
-                         "blocks / %.0f MiB, %.0f MiB free, of them textures only %u blocks / %.0f MiB free",
+                         "blocks / %.0f MiB, %.0f MiB free, of them textures only %u blocks / %.0f MiB free; kinds kept apart: %llu allocations "
+                         "in pools of their kind, %llu fell back to the default pools",
                          s.all.blocks, s.all.block_bytes / mib, static_cast<unsigned long long>(s.allocs), s.all.free_bytes() / mib,
                          u(s.all, VideoAllocKind::Texture), u(s.all, VideoAllocKind::RenderTarget), u(s.all, VideoAllocKind::Storage),
                          u(s.all, VideoAllocKind::Buffer), s.tex_only.blocks, s.tex_only.block_bytes / mib, s.tex_only.free_bytes() / mib, s.mixed.blocks,
                          s.mixed.block_bytes / mib, s.mixed.free_bytes() / mib, u(s.mixed, VideoAllocKind::RenderTarget),
                          u(s.mixed, VideoAllocKind::Storage), u(s.mixed, VideoAllocKind::Buffer), u(s.mixed, VideoAllocKind::Texture), s.sparse.blocks,
-                         s.sparse.block_bytes / mib, s.sparse.free_bytes() / mib, s.sparse_tex.blocks, s.sparse_tex.free_bytes() / mib);
+                         s.sparse.block_bytes / mib, s.sparse.free_bytes() / mib, s.sparse_tex.blocks, s.sparse_tex.free_bytes() / mib,
+                         static_cast<unsigned long long>(s.kind_pooled), static_cast<unsigned long long>(s.kind_fallbacks));
 }
 
 }  // namespace nxrt::gfx
