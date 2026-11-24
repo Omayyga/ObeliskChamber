@@ -211,6 +211,13 @@ struct Device::Impl {
     std::atomic<uint64_t> rt_images{0}, rt_prefer{0}, rt_dedicated{0}, other_images{0}, other_prefer{0}, other_dedicated{0};   // alloc_stats
     std::mutex small_pools_mu;                       // ImageDesc::small_pool: one VMA pool of 16 MiB blocks per memory type
     std::map<uint32_t, VmaPool> small_pools;
+    // [gfx] kind_pools: render targets and storage images, and GPU-only buffers, each in pools of their own per memory type, so the
+    // allocator's default blocks hold sampled textures only (see create_image)
+    bool kind_pools = false;
+    VkDeviceSize kind_block = 0;                     // the pools' block size: the video block size
+    std::mutex kind_pools_mu;
+    std::map<std::pair<int, uint32_t>, VmaPool> kind_pools_map;   // (VideoAllocKind, memory type)
+    std::atomic<uint64_t> kind_pooled{0}, kind_fallbacks{0};
     // block_stats: every live image and buffer with its kind (VideoAllocKind as a number)
     std::mutex live_mu;
     std::unordered_map<VmaAllocation, uint8_t> live;
@@ -1076,6 +1083,22 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         NXLOG_I(kTag, "video memory blocks: %s ([gfx] video_block_mb = %s; largest video memory heap %.1f GiB)",
                 mb > 0 ? (std::to_string(mb) + " MiB").c_str() : "256 MiB (the allocator's default)", v.c_str(),
                 static_cast<double>(heap) / (1024.0 * 1024.0 * 1024.0));
+        // [gfx] kind_pools (0.3.3, the defragmentation plan): keep render targets and storage images, and GPU-only buffers, out of the
+        // blocks the textures use. One kept render target or buffer stops a block from ever emptying, and moving textures (what
+        // defragmentation will do) can only empty a block that holds nothing else. Laptop census (#207, 32 MiB blocks): half the free
+        // space sat in blocks that also held small render targets (80-100 MiB) or buffers (44-300 MiB); with 256 MiB blocks every block
+        // did. auto = on when the video blocks are small (the auto rule above), else off. Each kind gets pools of the same block size
+        // per memory type; anything over half a block, or that the driver wants in memory of its own, stays in the default pools
+        // (memory of its own), and an allocation the pool can't make falls back to them (a custom pool has no fallback to other
+        // memory types of its own).
+        std::string kp = config_get_str("gfx", "kind_pools", "auto");
+        for (char& c : kp) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool kp_on = (kp.empty() || kp == "auto") ? (mb > 0 && mb <= 64) : config_get_bool("gfx", "kind_pools", false);
+        impl_->kind_pools = kp_on && mb > 0;
+        impl_->kind_block = mb > 0 ? static_cast<VkDeviceSize>(mb) << 20 : 0;
+        NXLOG_I(kTag, "video memory kinds kept apart: %s ([gfx] kind_pools = %s): render targets and storage images, and GPU-only buffers, "
+                      "in pools of their own, textures alone in the default blocks",
+                impl_->kind_pools ? "on" : (kp_on ? "off (needs small video blocks: [gfx] video_block_mb)" : "off"), kp.c_str());
     }
     const bool mem_priority = x_mpri && ampri.memoryPriority;
     if (mem_priority) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
@@ -1134,6 +1157,9 @@ Device::~Device() {
     extras::xess_shutdown();   // the XeSS context holds device memory
     if (impl_ && vma_)
         for (auto& [mt, pool] : impl_->small_pools)
+            if (pool) vmaDestroyPool(vma_, pool);
+    if (impl_ && vma_)
+        for (auto& [key, pool] : impl_->kind_pools_map)
             if (pool) vmaDestroyPool(vma_, pool);
     if (vma_) vmaDestroyAllocator(vma_);
     extras::streamline_shutdown();
@@ -1227,6 +1253,8 @@ void Device::block_stats(VideoBlockStats* out) const {
         }
     }
     video_block_tally(e, out);
+    out->kind_pooled = impl_->kind_pooled.load(std::memory_order_relaxed);
+    out->kind_fallbacks = impl_->kind_fallbacks.load(std::memory_order_relaxed);
 }
 
 void Device::validation_reset() {
@@ -1295,6 +1323,36 @@ bool Device::image_supported(const ImageDesc& d, std::string* why) {
     return true;
 }
 
+namespace {
+// [gfx] kind_pools: the pool for one kind of allocation in one memory type, made on first use. Null: none (the default pools take it).
+VmaPool kind_pool(Device::Impl* impl, VmaAllocator vma, VideoAllocKind kind, uint32_t mt) {
+    std::lock_guard<std::mutex> lk(impl->kind_pools_mu);
+    VmaPool& pool = impl->kind_pools_map[{static_cast<int>(kind), mt}];
+    if (!pool) {
+        VmaPoolCreateInfo pci = {};
+        pci.memoryTypeIndex = mt;
+        pci.blockSize = impl->kind_block;
+        pci.priority = 1.0f;   // render targets and buffers stay in video memory before sampled textures (VK_EXT_memory_priority)
+        if (vmaCreatePool(vma, &pci, &pool) != VK_SUCCESS) pool = nullptr;
+        else NXLOG_I("vk", "video memory: a pool of %llu MiB blocks for %s in memory type %u",
+                     static_cast<unsigned long long>(impl->kind_block >> 20),
+                     kind == VideoAllocKind::Buffer ? "GPU-only buffers" : "render targets and storage images", mt);
+    }
+    return pool;
+}
+
+// Whether an allocation of this size and memory type goes to a kind pool: small enough (at most half a block, as VMA's own rule for
+// memory of its own), not wanted in memory of its own by the driver, and in the video heap.
+bool kind_pool_fits(Device::Impl* impl, VmaAllocator vma, const VkMemoryRequirements2& mr, const VkMemoryDedicatedRequirements& dr, uint32_t mt) {
+    if (!impl->kind_pools || !impl->kind_block) return false;
+    if (dr.prefersDedicatedAllocation || dr.requiresDedicatedAllocation) return false;
+    if (mr.memoryRequirements.size * 2 > impl->kind_block) return false;
+    const VkPhysicalDeviceMemoryProperties* mp = nullptr;
+    vmaGetMemoryProperties(vma, &mp);
+    return mp && mt < mp->memoryTypeCount && mp->memoryTypes[mt].heapIndex == device_local_heap(vma);
+}
+}  // namespace
+
 VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) {
     std::string reason;
     if (!image_supported(d, &reason)) {
@@ -1341,10 +1399,31 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
             ai.pool = pool;
         }
     }
+    const bool rt_or_storage = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                           VK_IMAGE_USAGE_STORAGE_BIT)) != 0;
+    if (!ai.pool && impl_->kind_pools && rt_or_storage) {
+        // [gfx] kind_pools: the size and the driver's wish before the image exists (Vulkan 1.3)
+        VkDeviceImageMemoryRequirements dir = {VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS};
+        dir.pCreateInfo = &ci;
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        vkGetDeviceImageMemoryRequirements(device_, &dir, &mr);
+        uint32_t mt = 0;
+        if (vmaFindMemoryTypeIndexForImageInfo(vma_, &ci, &ai, &mt) == VK_SUCCESS && kind_pool_fits(impl_, vma_, mr, dr, mt))
+            ai.pool = kind_pool(impl_, vma_, VideoAllocKind::RenderTarget, mt);
+    }
     Image img;
     VkImage handle = VK_NULL_HANDLE;
     VmaAllocation alloc = nullptr;
     VkResult r = vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr);
+    if (r != VK_SUCCESS && ai.pool && rt_or_storage && !d.small_pool) {
+        // a custom pool has no other memory type to fall back to: the default pools do (system memory when video memory is full)
+        impl_->kind_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        ai.pool = nullptr;
+        r = vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr);
+    } else if (r == VK_SUCCESS && ai.pool && rt_or_storage && !d.small_pool) {
+        impl_->kind_pooled.fetch_add(1, std::memory_order_relaxed);
+    }
     if (r != VK_SUCCESS) {
         if (why) *why = "vmaCreateImage failed (" + std::to_string(r) + ")";
         return r;
@@ -1443,9 +1522,26 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
         ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
     if (use == MemoryUse::Readback) ai.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    if (use == MemoryUse::GpuOnly && impl_->kind_pools) {   // [gfx] kind_pools: GPU-only buffers out of the textures' blocks
+        VkDeviceBufferMemoryRequirements dbr = {VK_STRUCTURE_TYPE_DEVICE_BUFFER_MEMORY_REQUIREMENTS};
+        dbr.pCreateInfo = &bi;
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        vkGetDeviceBufferMemoryRequirements(device_, &dbr, &mr);
+        uint32_t mt = 0;
+        if (vmaFindMemoryTypeIndexForBufferInfo(vma_, &bi, &ai, &mt) == VK_SUCCESS && kind_pool_fits(impl_, vma_, mr, dr, mt))
+            ai.pool = kind_pool(impl_, vma_, VideoAllocKind::Buffer, mt);
+    }
     VmaAllocationInfo info = {};
     Buffer b;
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    if (r != VK_SUCCESS && ai.pool) {
+        impl_->kind_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        ai.pool = nullptr;
+        r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
+    } else if (r == VK_SUCCESS && ai.pool) {
+        impl_->kind_pooled.fetch_add(1, std::memory_order_relaxed);
+    }
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
     {

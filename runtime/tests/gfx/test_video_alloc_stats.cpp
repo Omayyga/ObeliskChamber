@@ -94,6 +94,10 @@ NXTEST(blocks_by_content) {
     CHECK(std::strstr(t, "textures only 2 blocks / 64 MiB, 26 MiB free"));
     CHECK(std::strstr(t, "with other allocations 2 blocks / 48 MiB, 26 MiB free (render targets 16, storage images 0, buffers 2, textures 4 MiB in them)"));
     CHECK(std::strstr(t, "under half used 2 blocks / 48 MiB, 38 MiB free, of them textures only 1 blocks / 24 MiB free"));
+    s.kind_pooled = 120;
+    s.kind_fallbacks = 3;
+    CHECK(nxrt::gfx::video_block_text(s, t, sizeof t) > 0);
+    CHECK(std::strstr(t, "kinds kept apart: 120 allocations in pools of their kind, 3 fell back to the default pools"));
 }
 
 NXTEST(blocks_none) {
