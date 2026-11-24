@@ -40,6 +40,7 @@
 #include "nvn_enums.h"
 #include "nvn_format.h"
 #include "nvn_gpu_internal.h"
+#include "nxrt/frame_limiter.h"
 #include "nvn_residency.h"
 #include "extras/hdr_nvn.h"
 #include "nvn_astc_gpu.h"
@@ -919,7 +920,12 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         g->levels = is.levels;
     }
     std::string why2;
-    const VkResult cr = device().create_image(make_desc(is, chosen, usage, flags), &g->img, &why2);
+    gfx::ImageDesc cdesc = make_desc(is, chosen, usage, flags);
+    // [gfx] defrag: a sampled-only 2D texture can move (tex_defrag_tick); it goes to the texture pools when defragmentation is on
+    cdesc.movable = !(usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) &&
+                    is.type == VK_IMAGE_TYPE_2D && is.samples <= 1;
+    const VkResult cr = device().create_image(cdesc, &g->img, &why2);
+    if (cr == VK_SUCCESS && cdesc.movable) device().set_alloc_owner(g->img.allocation, g);
     if (cr == VK_ERROR_OUT_OF_DEVICE_MEMORY || cr == VK_ERROR_OUT_OF_HOST_MEMORY) {
         // Out of memory is not the texture's fault: tex_or_null makes it again later (kTexRetryPresents). Under pressure thousands of
         // textures can fail in a row: the first few are logged, then one in 256.
@@ -2165,7 +2171,10 @@ uint64_t tex_move(Texture* t, TexGpu* g, Frame& f) {
     ns.layers = g->layers;
     gfx::Image ni;
     std::string err;
-    if (device().create_image(make_desc(ns, g->format, g->usage, g->create_flags), &ni, &err) != VK_SUCCESS) return 0;
+    gfx::ImageDesc nd = make_desc(ns, g->format, g->usage, g->create_flags);
+    nd.movable = true;
+    if (device().create_image(nd, &ni, &err) != VK_SUCCESS) return 0;
+    device().set_alloc_owner(ni.allocation, g);
     move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     image_barrier(f.cb, ni.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, g->aspect, 0, ns.levels, 0, ns.layers);
     std::vector<VkImageCopy> regions;
@@ -2276,6 +2285,139 @@ constexpr uint32_t kPromoteCooldownMs = 30000;
 
 void tex_mark_seen(Texture* t) {
     if (t && t->gpu && !t->gpu->failed) t->gpu->seen_ms.store(resid_ms(), std::memory_order_relaxed);
+}
+
+// [gfx] defrag: tex_move at a defragmentation move's destination. The new image is bound to the move's temporary allocation; the texture
+// keeps its allocation handle (VMA moves it there when the pass ends). The old image and its views go once the copy's submission completed
+// (vkDestroyImage only: the allocation is not ours to free, see gfx::Device::DefragMove). False: not moved (the move is ignored).
+static bool tex_move_at(Texture* t, TexGpu* g, Frame& f, VmaAllocation dst, std::vector<VkImage>& old_images, std::vector<VkImageView>& old_views) {
+    if (!movable(t, g)) return false;
+    Shape s = shape_of(*t);
+    Shape ns = s;
+    ns.base = g->base;
+    ns.levels = g->levels;
+    ns.layers = g->layers;
+    gfx::ImageDesc nd = make_desc(ns, g->format, g->usage, g->create_flags);
+    nd.movable = true;
+    VkImage ni = VK_NULL_HANDLE;
+    if (device().create_image_at(nd, dst, &ni) != VK_SUCCESS) return false;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    image_barrier(f.cb, ni, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, g->aspect, 0, ns.levels, 0, ns.layers);
+    std::vector<VkImageCopy> regions;
+    for (uint32_t j = 0; j < ns.levels; ++j) {
+        VkImageCopy r = {};
+        r.srcSubresource = {g->aspect, j, 0, ns.layers};
+        r.dstSubresource = {g->aspect, j, 0, ns.layers};
+        r.extent = level_extent(g->base, j);
+        r.extent.depth = 1;
+        regions.push_back(r);
+    }
+    vkCmdCopyImage(f.cb, g->img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ni, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<uint32_t>(regions.size()),
+                   regions.data());
+    old_images.push_back(g->img.image);
+    for (auto& kv : g->views) old_views.push_back(kv.second);
+    g->views.clear();
+    g->last_view = VK_NULL_HANDLE;
+    g->last_key = {};
+    g->img.image = ni;
+    g->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    move_layout(f, *g, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    pool_texture_remade(t);
+    return true;
+}
+
+// [gfx] defrag (auto: on with [gfx] kind_pools): at loading screens (the frame limiter's loading state, and [gfx] defrag_after_load_ms after
+// it), VMA's defragmentation of the texture pools runs one pass at a time: each pass moves at most defrag_mb_per_pass MiB and
+// defrag_moves_per_pass textures (tex_move_at), and ends once the GPU finished its copies, so that whole blocks empty and go back to the
+// driver. Textures that can't move now are left where they are (the move is ignored). One log line per loading screen.
+void tex_defrag_tick(Frame& f) {
+    if (!device().defrag_enabled()) return;
+    struct State {
+        bool open = false, in_window = false, done = false;
+        uint64_t serial = 0;
+        std::vector<gfx::Device::DefragMove> moves;
+        std::vector<VkImage> old_images;
+        std::vector<VkImageView> old_views;
+        uint32_t window_until = 0, started = 0;
+        int windows = 0;
+    };
+    static State st;
+    static const uint64_t max_bytes = static_cast<uint64_t>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "defrag_mb_per_pass", 64), 1, 4096)) << 20;
+    static const uint32_t max_moves = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "defrag_moves_per_pass", 256), 1, 65536));
+    static const uint32_t after_ms = static_cast<uint32_t>(std::clamp<int64_t>(nxrt::config_get_int("gfx", "defrag_after_load_ms", 3000), 0, 600000));
+    const uint32_t now = resid_ms();
+    if (nxrt::frame_limiter_unpaced()) {   // loading
+        if (!st.in_window) {
+            st.in_window = true;
+            st.done = false;
+            st.started = now;
+            ++st.windows;
+        }
+        st.window_until = now + after_ms;
+    }
+    if (st.open) {   // the open pass: once its copies are done, the old images go and VMA moves the allocations
+        if (poll_completed() < st.serial) return;
+        for (VkImageView v : st.old_views) { vkDestroyImageView(vkdev(), v, nullptr); vk_gauge_image_views().sub(1); }
+        for (VkImage im : st.old_images) vkDestroyImage(vkdev(), im, nullptr);
+        st.old_views.clear();
+        st.old_images.clear();
+        device().defrag_end_pass(st.moves);
+        st.moves.clear();
+        st.open = false;
+    }
+    if (!st.in_window) return;
+    auto finish = [&]() {
+        if (device().defrag_active()) device().defrag_stop();
+        const gfx::Device::DefragStats ds = device().defrag_take_stats();
+        if (ds.passes || ds.blocks_freed)
+            NXLOG_I(kTag, "defrag (loading screen %d): %llu textures moved (%.0f MiB) in %llu passes over %.1f s, %llu could not move; %llu blocks "
+                          "(%.0f MiB) given back to the driver ([gfx] defrag)", st.windows, static_cast<unsigned long long>(ds.moved),
+                    ds.moved_bytes / 1048576.0, static_cast<unsigned long long>(ds.passes), (now - st.started) / 1000.0,
+                    static_cast<unsigned long long>(ds.ignored), static_cast<unsigned long long>(ds.blocks_freed), ds.bytes_freed / 1048576.0);
+        st.in_window = false;
+    };
+    if (st.done || static_cast<int32_t>(now - st.window_until) > 0) {
+        finish();
+        return;
+    }
+    std::vector<gfx::Device::DefragMove> moves;
+    if (!device().defrag_next_pass(max_bytes, max_moves, &moves)) {   // every pool done
+        st.done = true;
+        finish();
+        return;
+    }
+    // owners: the live textures by their image record (a TexGpu shared by several texture objects can't move: movable() wants refs == 1)
+    std::unordered_map<const TexGpu*, Texture*> by_gpu;
+    {
+        std::unordered_set<const Texture*> reg;
+        pool_registered_textures(reg);
+        by_gpu.reserve(reg.size());
+        for (const Texture* ct : reg)
+            if (ct->gpu) by_gpu.emplace(ct->gpu, const_cast<Texture*>(ct));
+    }
+    int moved = 0;
+    for (gfx::Device::DefragMove& m : moves) {
+        TexGpu* g = static_cast<TexGpu*>(m.owner);
+        bool live = false;
+        if (g) {
+            std::lock_guard<std::mutex> lk(g_live_mu);
+            live = g_live_set.count(g) != 0;
+        }
+        Texture* t = nullptr;
+        if (live && g->img.allocation == m.src) {
+            auto it = by_gpu.find(g);
+            if (it != by_gpu.end()) t = it->second;
+        }
+        if (!t || !tex_move_at(t, g, f, m.dst_tmp, st.old_images, st.old_views)) m.ignore = true;
+        else ++moved;
+    }
+    if (!moved) {   // nothing to copy: end the pass now
+        device().defrag_end_pass(moves);
+        return;
+    }
+    st.moves = std::move(moves);
+    st.serial = f.serial;
+    st.open = true;
 }
 
 // [gfx] defrag_test_moves (default 0, a test aid for the defragmentation plan): every present, this many textures move to new memory

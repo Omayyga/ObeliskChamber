@@ -15,6 +15,7 @@
 #include <mutex>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "nxrt/boot_timeline.h"
@@ -218,6 +219,15 @@ struct Device::Impl {
     std::mutex kind_pools_mu;
     std::map<std::pair<int, uint32_t>, VmaPool> kind_pools_map;   // (VideoAllocKind, memory type)
     std::atomic<uint64_t> kind_pooled{0}, kind_fallbacks{0};
+    // [gfx] defrag: the texture pools' defragmentation (defrag_*), driven by the render thread
+    bool defrag_on = false;
+    std::mutex defrag_mu;                            // pinned and held: destroy_image runs on the reaper thread too
+    std::unordered_set<VmaAllocation> pinned;        // the open pass' source allocations
+    std::vector<Image> held;                         // destroy_image calls on pinned allocations, done at the pass' end
+    VmaDefragmentationContext defrag_ctx = nullptr;
+    VmaDefragmentationPassMoveInfo defrag_pass = {};
+    size_t defrag_pool_i = 0;                        // the texture pool being defragmented (order of kind_pools_map)
+    Device::DefragStats defrag_stats;
     // block_stats: every live image and buffer with its kind (VideoAllocKind as a number)
     std::mutex live_mu;
     std::unordered_map<VmaAllocation, uint8_t> live;
@@ -1099,6 +1109,16 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
         NXLOG_I(kTag, "video memory kinds kept apart: %s ([gfx] kind_pools = %s): render targets and storage images, and GPU-only buffers, "
                       "in pools of their own, textures alone in the default blocks",
                 impl_->kind_pools ? "on" : (kp_on ? "off (needs small video blocks: [gfx] video_block_mb)" : "off"), kp.c_str());
+        // [gfx] defrag (0.3.3, the defragmentation plan): game textures that can move go to texture pools of their own (one per memory
+        // type, the video block size), and at loading screens VMA's defragmentation moves them so that whole blocks empty and go back to
+        // the driver (the render thread drives it: nvn_gpu_texture.cpp, tex_defrag_tick). auto = on when [gfx] kind_pools is on (render
+        // targets and buffers out of the textures' blocks: only then can moving textures empty a block).
+        std::string df = config_get_str("gfx", "defrag", "auto");
+        for (char& c : df) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const bool df_on = (df.empty() || df == "auto") ? impl_->kind_pools : config_get_bool("gfx", "defrag", false);
+        impl_->defrag_on = df_on && impl_->kind_pools;
+        NXLOG_I(kTag, "video memory defragmentation at loading screens: %s ([gfx] defrag = %s)",
+                impl_->defrag_on ? "on" : (df_on ? "off (needs [gfx] kind_pools)" : "off"), df.c_str());
     }
     const bool mem_priority = x_mpri && ampri.memoryPriority;
     if (mem_priority) aci.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_PRIORITY_BIT;
@@ -1158,6 +1178,10 @@ Device::~Device() {
     if (impl_ && vma_)
         for (auto& [mt, pool] : impl_->small_pools)
             if (pool) vmaDestroyPool(vma_, pool);
+    if (impl_ && vma_ && impl_->defrag_ctx) {
+        vmaEndDefragmentation(vma_, impl_->defrag_ctx, nullptr);
+        impl_->defrag_ctx = nullptr;
+    }
     if (impl_ && vma_)
         for (auto& [key, pool] : impl_->kind_pools_map)
             if (pool) vmaDestroyPool(vma_, pool);
@@ -1336,7 +1360,8 @@ VmaPool kind_pool(Device::Impl* impl, VmaAllocator vma, VideoAllocKind kind, uin
         if (vmaCreatePool(vma, &pci, &pool) != VK_SUCCESS) pool = nullptr;
         else NXLOG_I("vk", "video memory: a pool of %llu MiB blocks for %s in memory type %u",
                      static_cast<unsigned long long>(impl->kind_block >> 20),
-                     kind == VideoAllocKind::Buffer ? "GPU-only buffers" : "render targets and storage images", mt);
+                     kind == VideoAllocKind::Buffer ? "GPU-only buffers" : kind == VideoAllocKind::Texture ? "textures that can move ([gfx] defrag)"
+                                                                                                    : "render targets and storage images", mt);
     }
     return pool;
 }
@@ -1401,6 +1426,17 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     }
     const bool rt_or_storage = (d.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                                            VK_IMAGE_USAGE_STORAGE_BIT)) != 0;
+    const bool to_textures = !ai.pool && impl_->defrag_on && d.movable && !rt_or_storage;
+    if (to_textures) {   // [gfx] defrag: the texture pools
+        VkDeviceImageMemoryRequirements dir = {VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS};
+        dir.pCreateInfo = &ci;
+        VkMemoryDedicatedRequirements dr = {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 mr = {VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dr};
+        vkGetDeviceImageMemoryRequirements(device_, &dir, &mr);
+        uint32_t mt = 0;
+        if (vmaFindMemoryTypeIndexForImageInfo(vma_, &ci, &ai, &mt) == VK_SUCCESS && kind_pool_fits(impl_, vma_, mr, dr, mt))
+            ai.pool = kind_pool(impl_, vma_, VideoAllocKind::Texture, mt);
+    }
     if (!ai.pool && impl_->kind_pools && rt_or_storage) {
         // [gfx] kind_pools: the size and the driver's wish before the image exists (Vulkan 1.3)
         VkDeviceImageMemoryRequirements dir = {VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS};
@@ -1416,12 +1452,12 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     VkImage handle = VK_NULL_HANDLE;
     VmaAllocation alloc = nullptr;
     VkResult r = vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr);
-    if (r != VK_SUCCESS && ai.pool && rt_or_storage && !d.small_pool) {
+    if (r != VK_SUCCESS && ai.pool && (rt_or_storage || to_textures) && !d.small_pool) {
         // a custom pool has no other memory type to fall back to: the default pools do (system memory when video memory is full)
         impl_->kind_fallbacks.fetch_add(1, std::memory_order_relaxed);
         ai.pool = nullptr;
         r = vmaCreateImage(vma_, &ci, &ai, &handle, &alloc, nullptr);
-    } else if (r == VK_SUCCESS && ai.pool && rt_or_storage && !d.small_pool) {
+    } else if (r == VK_SUCCESS && ai.pool && (rt_or_storage || to_textures) && !d.small_pool) {
         impl_->kind_pooled.fetch_add(1, std::memory_order_relaxed);
     }
     if (r != VK_SUCCESS) {
@@ -1490,6 +1526,17 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
 }
 
 void Device::destroy_image(Image& img) {
+    // [gfx] defrag: an allocation of the open pass waits for the pass' end. The lock is held through the destroy, so that no allocation
+    // is freed between VMA choosing a pass' moves and their pinning (destroy_image runs on the reaper thread too).
+    std::unique_lock<std::mutex> dlk;
+    if (img.allocation && impl_->defrag_on) {
+        dlk = std::unique_lock<std::mutex>(impl_->defrag_mu);
+        if (impl_->pinned.count(img.allocation)) {
+            impl_->held.push_back(img);
+            img = Image{};
+            return;
+        }
+    }
     if (img.view) { vkDestroyImageView(device_, img.view, nullptr); vk_gauge_image_views().sub(1); }
     if (img.image) {
         if (img.allocation) {
@@ -1505,6 +1552,149 @@ void Device::destroy_image(Image& img) {
         vk_gauge_images().sub(1);
     }
     img = Image{};
+}
+
+// ---- [gfx] defrag ---------------------------------------------------------------------------------------------------------------------
+bool Device::defrag_enabled() const { return impl_ && impl_->defrag_on; }
+bool Device::defrag_active() const { return impl_ && impl_->defrag_ctx; }
+
+void Device::set_alloc_owner(VmaAllocation a, void* owner) {
+    if (a && vma_) vmaSetAllocationUserData(vma_, a, owner);
+}
+
+namespace {
+void defrag_end_context(VmaAllocator vma, Device::Impl* impl) {
+    if (!impl->defrag_ctx) return;
+    VmaDefragmentationStats st{};
+    vmaEndDefragmentation(vma, impl->defrag_ctx, &st);
+    impl->defrag_ctx = nullptr;
+    impl->defrag_stats.blocks_freed += st.deviceMemoryBlocksFreed;
+    impl->defrag_stats.bytes_freed += st.bytesFreed;
+    ++impl->defrag_pool_i;
+}
+}  // namespace
+
+bool Device::defrag_next_pass(uint64_t max_bytes, uint32_t max_moves, std::vector<DefragMove>* moves) {
+    moves->clear();
+    if (!impl_->defrag_on) return false;
+    for (;;) {
+        if (!impl_->defrag_ctx) {
+            VmaPool pool = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(impl_->kind_pools_mu);
+                size_t i = 0;
+                for (const auto& [key, p] : impl_->kind_pools_map) {
+                    if (key.first != static_cast<int>(VideoAllocKind::Texture) || !p) continue;
+                    if (i++ == impl_->defrag_pool_i) { pool = p; break; }
+                }
+            }
+            if (!pool) {   // every texture pool done: the next load starts from the first again
+                impl_->defrag_pool_i = 0;
+                return false;
+            }
+            VmaDefragmentationInfo info = {};
+            info.flags = VMA_DEFRAGMENTATION_FLAG_ALGORITHM_BALANCED_BIT;   // EXTENSIVE is not used by VMA where buffer-image granularity > 1
+            info.pool = pool;
+            info.maxBytesPerPass = max_bytes;
+            info.maxAllocationsPerPass = max_moves;
+            if (vmaBeginDefragmentation(vma_, &info, &impl_->defrag_ctx) != VK_SUCCESS) {
+                impl_->defrag_ctx = nullptr;
+                ++impl_->defrag_pool_i;
+                continue;
+            }
+        }
+        impl_->defrag_pass = {};
+        std::unique_lock<std::mutex> lk(impl_->defrag_mu);   // no destroy_image between choosing the moves and pinning them
+        const VkResult r = vmaBeginDefragmentationPass(vma_, impl_->defrag_ctx, &impl_->defrag_pass);
+        if (r != VK_INCOMPLETE || !impl_->defrag_pass.moveCount) {   // VK_SUCCESS: nothing (more) to move in this pool
+            lk.unlock();
+            defrag_end_context(vma_, impl_);
+            continue;
+        }
+        for (uint32_t i = 0; i < impl_->defrag_pass.moveCount; ++i) {
+            const VmaDefragmentationMove& m = impl_->defrag_pass.pMoves[i];
+            VmaAllocationInfo inf{};
+            vmaGetAllocationInfo(vma_, m.srcAllocation, &inf);
+            DefragMove dm;
+            dm.src = m.srcAllocation;
+            dm.dst_tmp = m.dstTmpAllocation;
+            dm.owner = inf.pUserData;
+            dm.size = inf.size;
+            moves->push_back(dm);
+            impl_->pinned.insert(m.srcAllocation);
+        }
+        ++impl_->defrag_stats.passes;
+        return true;
+    }
+}
+
+void Device::defrag_end_pass(const std::vector<DefragMove>& moves) {
+    if (!impl_->defrag_ctx) return;
+    for (uint32_t i = 0; i < impl_->defrag_pass.moveCount && i < moves.size(); ++i) {
+        VmaDefragmentationMove& m = impl_->defrag_pass.pMoves[i];
+        if (moves[i].ignore) {
+            m.operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_IGNORE;
+            ++impl_->defrag_stats.ignored;
+        } else {
+            m.operation = VMA_DEFRAGMENTATION_MOVE_OPERATION_COPY;
+            ++impl_->defrag_stats.moved;
+            impl_->defrag_stats.moved_bytes += moves[i].size;
+        }
+    }
+    const VkResult r = vmaEndDefragmentationPass(vma_, impl_->defrag_ctx, &impl_->defrag_pass);
+    impl_->defrag_pass = {};
+    std::vector<Image> held;
+    {
+        std::lock_guard<std::mutex> lk(impl_->defrag_mu);
+        impl_->pinned.clear();
+        held.swap(impl_->held);
+    }
+    for (Image& img : held) destroy_image(img);   // their allocations are at their new place now (or unchanged)
+    if (r == VK_SUCCESS) defrag_end_context(vma_, impl_);   // this pool is done
+}
+
+void Device::defrag_stop() {
+    if (!impl_->defrag_ctx) return;
+    defrag_end_context(vma_, impl_);
+    impl_->defrag_pool_i = 0;
+}
+
+Device::DefragStats Device::defrag_take_stats() {
+    DefragStats s = impl_->defrag_stats;
+    impl_->defrag_stats = DefragStats{};
+    return s;
+}
+
+VkResult Device::create_image_at(const ImageDesc& d, VmaAllocation at, VkImage* out) {
+    *out = VK_NULL_HANDLE;
+    VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.flags = d.flags;
+    ci.imageType = d.type;
+    ci.format = d.format;
+    ci.extent = {d.width, d.height, d.depth};
+    ci.mipLevels = d.mip_levels;
+    ci.arrayLayers = d.array_layers;
+    ci.samples = d.samples;
+    ci.tiling = d.tiling;
+    ci.usage = d.usage;
+    ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageFormatListCreateInfo fl = {VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    if (d.view_format_count && (d.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
+        fl.viewFormatCount = d.view_format_count;
+        fl.pViewFormats = d.view_formats;
+        ci.pNext = &fl;
+    }
+    VkImage img = VK_NULL_HANDLE;
+    VkResult r = vkCreateImage(device_, &ci, nullptr, &img);
+    if (r != VK_SUCCESS) return r;
+    r = vmaBindImageMemory(vma_, at, img);
+    if (r != VK_SUCCESS) {
+        vkDestroyImage(device_, img, nullptr);
+        return r;
+    }
+    *out = img;
+    return VK_SUCCESS;
 }
 
 // ---- buffers ----------------------------------------------------------------------------------------------------------

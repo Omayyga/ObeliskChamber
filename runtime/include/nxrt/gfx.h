@@ -86,6 +86,9 @@ struct ImageDesc {
     // [gfx] residency's demoted textures: placed in a pool of small blocks of their own, so they do not fill the room their whole images
     // left in the shared blocks (which then empty and go back to the OS)
     bool small_pool = false;
+    // [gfx] defrag: a game texture that can move (gfx::Device::defrag_*): placed in the texture pools (one per memory type, video block
+    // size) when defragmentation is on, so a defragmentation context sees textures only
+    bool movable = false;
     // A1b ([gfx] image_format_lists): the formats a MUTABLE_FORMAT image's views may use, chained as VkImageFormatListCreateInfo, so the
     // driver can keep compression it would turn off for "any compatible format". 0: no list (every compatible format allowed).
     VkFormat view_formats[4] = {};
@@ -234,6 +237,31 @@ public:
     bool image_supported(const ImageDesc& d, std::string* why = nullptr);
     VkResult create_image(const ImageDesc& d, Image* out, std::string* why = nullptr);   // VK_ERROR_FORMAT_NOT_SUPPORTED when refused
     void destroy_image(Image& img);
+
+    // ---- [gfx] defrag: VMA's defragmentation of the texture pools (the defragmentation plan, #155) ---------------------------------
+    // On when [gfx] defrag resolved on (needs [gfx] kind_pools). Owners: an opaque pointer kept in the allocation (VMA user data).
+    bool defrag_enabled() const;
+    void set_alloc_owner(VmaAllocation a, void* owner);
+    struct DefragMove {
+        VmaAllocation src = nullptr;      // the allocation that moves; after defrag_end_pass it is at the new place (same handle)
+        VmaAllocation dst_tmp = nullptr;  // bind the new image here (create_image_at)
+        void* owner = nullptr;            // set_alloc_owner's pointer, or null
+        uint64_t size = 0;
+        bool ignore = false;              // set by the caller: this one could not move
+    };
+    struct DefragStats {
+        uint64_t moved = 0, moved_bytes = 0, ignored = 0, passes = 0, blocks_freed = 0, bytes_freed = 0;
+    };
+    // The next pass over the texture pools, at most max_bytes / max_moves; false when every pool is done (the context is ended).
+    // Between defrag_next_pass and defrag_end_pass the moves' source allocations are pinned: destroy_image of one is held until the end.
+    bool defrag_next_pass(uint64_t max_bytes, uint32_t max_moves, std::vector<DefragMove>* moves);
+    // After the copies finished and the old images are destroyed (vkDestroyImage only: the allocation stays, see DefragMove::src).
+    void defrag_end_pass(const std::vector<DefragMove>& moves);
+    void defrag_stop();                    // ends the context between passes (the load is over)
+    bool defrag_active() const;            // a context is open
+    DefragStats defrag_take_stats();       // since the last call
+    // A new VkImage of the description bound at an allocation (a defragmentation move's destination); no view, no allocation of its own.
+    VkResult create_image_at(const ImageDesc& d, VmaAllocation at, VkImage* out);
     FormatCheckStats format_check_stats() const;
 
     VkResult create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, MemoryUse use, Buffer* out, const char* name = nullptr);
