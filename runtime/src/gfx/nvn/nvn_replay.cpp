@@ -6443,6 +6443,15 @@ void load_census(CensusEvent ev, uint64_t present) {
     device().alloc_stats(&as);
     char at[1024];
     if (gfx::video_alloc_text(as, at, sizeof at) > 0) NXLOG_I("nvn.census", "%s: %s", why, at);
+    // [nvn] census_blocks (default on): what the blocks hold, by kind, so we know how much moving textures alone could give back
+    // (the defragmentation plan, #155).
+    static const bool blocks = nxrt::config_get_bool("nvn", "census_blocks", true);
+    if (blocks) {
+        gfx::VideoBlockStats bs;
+        device().block_stats(&bs);
+        char bt[1024];
+        if (gfx::video_block_text(bs, bt, sizeof bt) > 0) NXLOG_I("nvn.census", "%s: %s", why, bt);
+    }
 }
 
 // [display] unpaced_loading (default on): the limiter stops waiting while the game loads, since its loading code advances once per

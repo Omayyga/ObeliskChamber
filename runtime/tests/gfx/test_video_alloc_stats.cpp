@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "video_alloc_stats.h"
 
@@ -53,4 +54,54 @@ NXTEST(driver_figure_behind) {
     CHECK(s.video.free_bytes() == 0);
     CHECK(s.outside_bytes() == 0);
     CHECK(nxrt::gfx::video_alloc_free_percent(nxrt::gfx::VideoAllocGroup{}) == 0);
+}
+
+// The defragmentation question: which blocks could moving textures empty?
+NXTEST(blocks_by_content) {
+    using nxrt::gfx::VideoAllocKind;
+    using nxrt::gfx::VideoBlockEntry;
+    const uint64_t M = 1ull << 20;
+    std::vector<VideoBlockEntry> e = {
+        // block 1, 32 MiB: textures only, 8 MiB used (under half)
+        {1, 32 * M, 5 * M, VideoAllocKind::Texture}, {1, 32 * M, 3 * M, VideoAllocKind::Texture},
+        // block 2, 32 MiB: a render target and a texture, 20 MiB used
+        {2, 32 * M, 16 * M, VideoAllocKind::RenderTarget}, {2, 32 * M, 4 * M, VideoAllocKind::Texture},
+        // block 3, 16 MiB (a small-texture pool): a buffer, 2 MiB used (under half)
+        {3, 16 * M, 2 * M, VideoAllocKind::Buffer},
+        // block 4, 32 MiB: textures only, 30 MiB used
+        {4, 32 * M, 30 * M, VideoAllocKind::Texture},
+    };
+    std::swap(e[0], e[5]);   // out of order on purpose
+    nxrt::gfx::VideoBlockStats s;
+    nxrt::gfx::video_block_tally(e, &s);
+    CHECK(s.valid);
+    CHECK(s.allocs == 6);
+    CHECK(s.all.blocks == 4);
+    CHECK(s.all.block_bytes == 112 * M);
+    CHECK(s.all.free_bytes() == 52 * M);
+    CHECK(s.tex_only.blocks == 2);
+    CHECK(s.tex_only.free_bytes() == 26 * M);
+    CHECK(s.mixed.blocks == 2);
+    CHECK(s.mixed.free_bytes() == 26 * M);
+    CHECK(s.mixed.used[static_cast<int>(VideoAllocKind::RenderTarget)] == 16 * M);
+    CHECK(s.sparse.blocks == 2);
+    CHECK(s.sparse_tex.blocks == 1);
+    CHECK(s.sparse_tex.free_bytes() == 24 * M);
+    char t[1024];
+    CHECK(nxrt::gfx::video_block_text(s, t, sizeof t) > 0);
+    std::printf("    %s\n", t);
+    CHECK(std::strstr(t, "4 blocks / 112 MiB, 6 allocations, 52 MiB free"));
+    CHECK(std::strstr(t, "textures only 2 blocks / 64 MiB, 26 MiB free"));
+    CHECK(std::strstr(t, "with other allocations 2 blocks / 48 MiB, 26 MiB free (render targets 16, storage images 0, buffers 2, textures 4 MiB in them)"));
+    CHECK(std::strstr(t, "under half used 2 blocks / 48 MiB, 38 MiB free, of them textures only 1 blocks / 24 MiB free"));
+}
+
+NXTEST(blocks_none) {
+    std::vector<nxrt::gfx::VideoBlockEntry> e;
+    nxrt::gfx::VideoBlockStats s;
+    nxrt::gfx::video_block_tally(e, &s);
+    CHECK(s.valid && s.all.blocks == 0 && s.all.free_bytes() == 0);
+    nxrt::gfx::VideoBlockStats none;
+    char t[64] = "x";
+    CHECK(nxrt::gfx::video_block_text(none, t, sizeof t) == 0);
 }
