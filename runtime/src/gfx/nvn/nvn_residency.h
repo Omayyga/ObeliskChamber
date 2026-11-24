@@ -66,6 +66,8 @@ void tex_residency_tick(Frame& f);   // nvn_gpu_texture.cpp
 // nvn_gpu_texture.cpp, once per present: the demoted textures seen again are made whole, most recently sampled first, within [gfx]
 // residency_restore_max / residency_restore_mb a present
 void tex_residency_restore(Frame& f);
+// nvn_gpu_texture.cpp, once per present: [gfx] defrag_test_moves textures moved to new memory (a test aid for the defragmentation plan)
+void tex_defrag_test(Frame& f);
 void tex_mark_seen(Texture* t);      // nvn_gpu_texture.cpp: a shader indexed t through a pool array
 // Set by the pool arrays around their tex_sampled_view calls: writing a pool descriptor is not a use (only the marks are).
 extern thread_local bool g_resid_pool_view;

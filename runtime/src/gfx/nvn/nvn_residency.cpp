@@ -225,9 +225,10 @@ void residency_begin_submit(Frame& f) {
         tex_residency_tick(f);   // nvn_gpu_texture.cpp: failed images retried; demote idle ones under pressure
     }
     // the first submission of each present (a frame has several): restore the demoted textures seen again, within the budget
-    if (residency_on() && now != last_restore) {
+    if (now != last_restore) {
         last_restore = now;
-        tex_residency_restore(f);
+        if (residency_on()) tex_residency_restore(f);
+        tex_defrag_test(f);   // [gfx] defrag_test_moves (off by default)
     }
 }
 
