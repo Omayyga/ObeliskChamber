@@ -314,6 +314,7 @@ void play_install(uint64_t base, play::GameHost*, const play::Settings&) {
     filecache_install(base);
     detail_install();   // before the game's file system is set up: the graphics settings files are edited as the RomFS is laid out
     msg_install();      // the same: our messages in the dialogs' message files (the System menu's Quit Game)
+    randomizer_install();   // the same: GameData/Person.bin, who looks like whom ([fefw] randomize_units)
     twprobe_start(base);
     const bool fps60 = config_get_bool("fefw", "fps60", false), fps120 = config_get_bool("fefw", "fps120", false);
     const bool fps240 = config_get_bool("fefw", "fps240", false);   // testing: gameplay that does not stop at 120 before the CPU does

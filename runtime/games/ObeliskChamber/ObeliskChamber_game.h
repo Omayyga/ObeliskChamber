@@ -70,6 +70,10 @@ const char* frame_group_name(int g);
 void detail_install();
 std::string detail_summary();      // "" when nothing is changed
 
+// ObeliskChamber_randomizer.cpp: [fefw] randomize_units / randomize_seed / randomize_force, the unit randomizer: an edit of GameData/Person.bin
+// as the RomFS is set up (play mode install, before the game starts; applies at the next start)
+void randomizer_install();
+
 // ObeliskChamber_menu.cpp: the F1 menu (GamePlay::settings_menu)
 void settings_menu(play::UiHost& host, gfx::Overlay& overlay);
 

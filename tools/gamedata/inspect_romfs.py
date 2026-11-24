@@ -5,14 +5,16 @@
     python -I tools/gamedata/inspect_romfs.py find <romfs> Anatolia Troy    (which files contain these words)
     python -I tools/gamedata/inspect_romfs.py dump <file> [-o out.json]     (decode one file)
 
-Written for the unit randomizer (runtime/games/ObeliskChamber/ObeliskChamber_randomizer.cpp, planned), which needs to know where the
-game keeps its characters and its map placements. Nothing here writes to the RomFS.
+Written for the unit randomizer (runtime/games/ObeliskChamber/ObeliskChamber_randomizer.cpp; randomize_units.py is its oracle), which
+needs to know where the game keeps its characters and its map placements. Nothing here writes to the RomFS.
 
 Formats it understands, after taking off zstd (magic 28 B5 2F FD) when a file has it:
   - MessagePack (the game's graphics settings are MessagePack, ObeliskChamber_detail.cpp): every top-level value, as JSON. Binary
     values become {"$bin": hex}, ext values {"$ext": type, "hex": ...}, and map keys that are not strings are written as text.
   - MSBT (MsgStdBn, the message files under Msg/<language>/): label -> text, with control tags as [group.type:params].
   - SARC (archives such as Layout/*.arc): the names and sizes of the files inside; --extract <dir> writes them out.
+  - GameData tables (GameData/*.bin, GameData/Dispos/*.bin, ...): every table's records with the schema's field names, as
+    {"$gamedata": {table: [records]}}, or {table: {group: [records]}} for grouped tables such as Dispos. gamedata_bin.py has the format.
   - Anything else: the first bytes as hex, so the format can be recognised.
 
 zstd needs the `zstandard` package (pip install zstandard) or the zstd program on the PATH.
@@ -24,6 +26,9 @@ import shutil
 import struct
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gamedata_bin  # noqa: E402
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 
@@ -296,6 +301,8 @@ def kind(data):
         return "msbt"
     if data[:4] == b"SARC":
         return "sarc"
+    if gamedata_bin.parse(data) is not None:
+        return "gamedata"
     if decode_msgpack(data) is not None:
         return "msgpack"
     if data and as_text(data[:4096]) is not None and as_text(data) is not None:
@@ -316,6 +323,9 @@ def decode(data, extract=None):
                 with open(out, "wb") as f:
                     f.write(b)
         return {"$sarc": [{"name": n, "size": len(b), "kind": kind(unzstd(b) if b[:4] == ZSTD_MAGIC else b)} for n, b in s]}
+    g = gamedata_bin.parse(data)
+    if g is not None:
+        return {"$gamedata": g.dump()}
     v = decode_msgpack(data)
     if v is not None:
         return {"$msgpack": v[0] if len(v) == 1 else v}
