@@ -12,8 +12,10 @@ to change: for every record of an identifier being replaced, the record is made 
 
     名前            the name (MPID_*)                       <- the replacement's
     アセットフラグ   the model (AID_*), base records          <- the replacement's AID
-    アセット流用     the model, borrowed, story records       <- the replacement's PID
+    アセット流用     the model, borrowed, story records       <- the character's own base PID (which now has the replacement's AID)
     性別            gender (the body's animations)           <- the replacement's
+
+A story record never borrows the replacement's base: when the replacement is itself replaced, that base looks like someone else.
 
 Every edit replaces a pointer with another that is already in the file, so the file keeps its size and layout. The PID, class, stats,
 items, skills, affiliation and 識別子 (which the game uses to tell the routes apart) stay the slot's own. Records with no model of their
@@ -152,7 +154,7 @@ def apply(data, mapping):
     p = Person(data)
     b, f = p.b, p.f
     out = bytearray(data)
-    swap = {o.ident: r for o, r in mapping if o.ident != r.ident}
+    swap = {o.ident: (o, r) for o, r in mapping if o.ident != r.ident}
     changed, skipped = [], []
 
     def put_ptr(off, value):
@@ -160,9 +162,10 @@ def apply(data, mapping):
         struct.pack_into("<Q", out, gamedata_bin.HEADER + off, value)
 
     for rec in p.t.records():
-        r = swap.get(b.string(rec + f[F_IDENT]))
-        if r is None:
+        pair = swap.get(b.string(rec + f[F_IDENT]))
+        if pair is None:
             continue
+        o, r = pair
         aid, reuse = b.ptr(rec + f[F_AID]), b.ptr(rec + f[F_REUSE])
         if aid is None and reuse is None:
             skipped.append(b.key(rec))
@@ -174,8 +177,11 @@ def apply(data, mapping):
         if aid is not None:
             put_ptr(rec + f[F_AID], r.aid_ptr)
             what.append("model")
-        if reuse is not None:
-            put_ptr(rec + f[F_REUSE], r.key_ptr)
+        # A borrowed model points at the character's own base record, which now carries the replacement's model. Never at the
+        # replacement's base: that one is edited too when the replacement is itself replaced (Lin -> Tro, Tro -> Mhm made Lind's
+        # slot look like Mahadu). Only a record that borrowed another character's base changes here.
+        if reuse is not None and reuse != o.key_ptr:
+            put_ptr(rec + f[F_REUSE], o.key_ptr)
             what.append("borrowed model")
         out[gamedata_bin.HEADER + rec + f[F_GENDER]] = r.gender
         changed.append((b.key(rec), what))

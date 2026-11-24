@@ -105,6 +105,7 @@ ROWS = [
     ("PID_SC00_06_ダグザ竜", "MPID_Dagda", "Dag", 0, "JID_ダグザ竜", None, None),
     ("PID_SC00_06_ダグザ", "MPID_Dagda", "Dag", 1, "JID_ジ・エターナル", "PID_ダグザ", "AID_ダグザ_冥将"),
     ("PID_SC00_13_アナトリア替", "MPID_WhitePeople", None, 1, None, None, "AID_モブ"),
+    ("PID_SC11_05_リンド代", "MPID_Lindo", "Lin", 1, None, "PID_カイ", None),     # borrows another character's base (as SC11_05_ザーコネ)
 ]
 
 
@@ -210,6 +211,11 @@ class TestApply(unittest.TestCase):
                 return b.record(t, r)
         raise KeyError(key)
 
+    def look(self, data, key):
+        """The model a record shows: its own AID, else the AID of the record it borrows from."""
+        r = self.rec(data, key)
+        return r.get("アセットフラグ") or self.rec(data, r["アセット流用"]).get("アセットフラグ")
+
     def test_swap(self):
         out, changed, skipped = ru.apply(self.data, [self.pair("Kai", "Tro"), self.pair("Tro", "Lin")])
         self.assertEqual(len(out), len(self.data))
@@ -217,12 +223,28 @@ class TestApply(unittest.TestCase):
         self.assertEqual((kai["名前"], kai["アセットフラグ"], kai["性別"], kai["識別子"], kai["兵種"]),
                          ("MPID_Troja", "AID_トロイア", 2, "Kai", "JID_無職"))
         sc = self.rec(out, "PID_SC00_05_カイ")
-        self.assertEqual((sc["名前"], sc["アセット流用"], sc["兵種"]), ("MPID_Troja", "PID_トロイア", "JID_オリハルディア"))
+        self.assertEqual((sc["名前"], sc["アセット流用"], sc["兵種"]), ("MPID_Troja", "PID_カイ", "JID_オリハルディア"))
         tro = self.rec(out, "PID_トロイア")       # Troy takes Lind's look; Cai still got Troy's own
         self.assertEqual((tro["名前"], tro["アセットフラグ"], tro["性別"]), ("MPID_Lindo", "AID_リンド", 1))
         self.assertEqual(self.rec(out, "PID_リンド")["名前"], "MPID_Lindo")   # not in the mapping
         self.assertEqual([k for k, _ in changed], ["PID_カイ", "PID_トロイア", "PID_SC00_05_カイ"])
+        self.assertEqual(dict(changed)["PID_SC00_05_カイ"], ["name"])      # it keeps borrowing PID_カイ, which now looks like Troy
         self.assertEqual(skipped, [])
+
+    def test_chain_keeps_each_look(self):
+        # The in-game seed 5664321453894125683 had Lin -> Tro and Tro -> Mhm: Lind's story slot borrowed PID_トロイア, which by then
+        # looked like Mahadu. Every slot must show its own replacement's original model, however the pairs chain.
+        before = {k: self.look(self.data, k) for k in ("PID_カイ", "PID_トロイア", "PID_リンド")}
+        m = [self.pair("Lin", "Tro"), self.pair("Tro", "Kai"), self.pair("Kai", "Lin")]
+        out, _, _ = ru.apply(self.data, m)
+        self.assertEqual(self.look(out, "PID_SC00_05_リンド"), before["PID_トロイア"])
+        self.assertEqual(self.look(out, "PID_リンド"), before["PID_トロイア"])
+        self.assertEqual(self.look(out, "PID_トロイア"), before["PID_カイ"])
+        self.assertEqual(self.look(out, "PID_SC00_05_カイ"), before["PID_リンド"])
+        self.assertEqual(self.look(out, "PID_カイ"), before["PID_リンド"])
+        odd = self.rec(out, "PID_SC11_05_リンド代")       # borrowed Cai's base: now its own (Lind's), which looks like Troy
+        self.assertEqual((odd["アセット流用"], self.look(out, "PID_SC11_05_リンド代"), odd["名前"]),
+                         ("PID_リンド", before["PID_トロイア"], "MPID_Troja"))
 
     def test_dragon_left_alone(self):
         out, changed, skipped = ru.apply(self.data, [self.pair("Dag", "Kai")])
@@ -230,8 +252,9 @@ class TestApply(unittest.TestCase):
         dragon = self.rec(out, "PID_SC00_06_ダグザ竜")
         self.assertEqual((dragon["名前"], dragon["性別"]), ("MPID_Dagda", 0))
         human = self.rec(out, "PID_SC00_06_ダグザ")
-        self.assertEqual((human["名前"], human["アセット流用"], human["アセットフラグ"]), ("MPID_Kai", "PID_カイ", "AID_カイ"))
-        self.assertEqual(dict(changed)["PID_SC00_06_ダグザ"], ["name", "model", "borrowed model"])
+        self.assertEqual((human["名前"], human["アセット流用"], human["アセットフラグ"]), ("MPID_Kai", "PID_ダグザ", "AID_カイ"))
+        self.assertEqual(self.look(out, "PID_ダグザ"), "AID_カイ")
+        self.assertEqual(dict(changed)["PID_SC00_06_ダグザ"], ["name", "model"])
 
     def test_only_those_bytes(self):
         out, _, _ = ru.apply(self.data, [self.pair("Lin", "Kai")])

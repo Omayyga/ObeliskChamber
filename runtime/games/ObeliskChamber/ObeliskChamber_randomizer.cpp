@@ -9,7 +9,8 @@
 // base record (PID_カイ) with its own model (アセットフラグ = AID_カイ) and a record per story appearance (PID_SC00_05_カイ) that borrows the
 // base's model (アセット流用 = PID_カイ). Placements, event scripts and AI arguments all name those PIDs, so only Person.bin changes: every
 // record of a replaced identifier takes the replacement base record's
-//     名前 (name, MPID_*), アセットフラグ (model, AID_*), アセット流用 (borrowed model, the base PID) and 性別 (gender).
+//     名前 (name, MPID_*), アセットフラグ (model, AID_*) and 性別 (gender),
+// and a story record's アセット流用 (borrowed model) points at its own character's base, which now has the replacement's model.
 // Each is a pointer swapped for one already in the file, so the file keeps its size and layout. Records with no model at all are dragon
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
@@ -318,9 +319,9 @@ void edit_person(const NxModFile* file, void*) {
         const uint64_t rec = t.first + uint64_t(t.rec_size) * i;
         const char* ident = b.string(rec + t.f_ident);
         if (!ident) continue;
-        const Character* r = nullptr;
+        const Character *own = nullptr, *r = nullptr;
         for (const auto& [o, rep] : mapping)
-            if (o->ident == ident && o->ident != rep->ident) r = rep;
+            if (o->ident == ident && o->ident != rep->ident) own = o, r = rep;
         if (!r) continue;
         const bool aid = b.is_ptr(rec + t.f_aid), reuse = b.is_ptr(rec + t.f_reuse);
         if (!aid && !reuse) {
@@ -329,7 +330,10 @@ void edit_person(const NxModFile* file, void*) {
         }
         if (b.is_ptr(rec + t.f_name) && r->name_ptr) put(rec + t.f_name, r->name_ptr);
         if (aid) put(rec + t.f_aid, r->aid_ptr);
-        if (reuse) put(rec + t.f_reuse, r->key_ptr);
+        // A borrowed model points at the character's own base record, which now carries the replacement's model; never at the
+        // replacement's base, which is edited too when the replacement is itself replaced (Lin -> Tro, Tro -> Mhm made Lind look
+        // like Mahadu). So only a record that borrowed another character's base changes here.
+        if (reuse && b.u64(rec + t.f_reuse) != own->key_ptr) put(rec + t.f_reuse, own->key_ptr);
         out[kHeader + rec + t.f_gender] = r->gender;
         ++changed;
     }
