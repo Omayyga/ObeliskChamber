@@ -3,7 +3,7 @@
 
     python -I tools/gamedata/randomize_units.py <romfs> --seed 1234 [--force Anh=Tro,Lin=Kou] [-o Person.bin] [--show SC00_04 SC00_05]
 
-It prints the same mapping line and checksum as the runtime's log, so a run of the game can be checked against it.
+It prints the same mapping lines and checksum as the runtime's log, so a run of the game can be checked against it.
 
 How a swap works. A character is a 識別子 (identifier, e.g. Kai) in GameData/Person.bin. Each identifier has a base record (PID_カイ: the
 one with its own model, AID_カイ) and a record for each story appearance (PID_SC00_05_カイ, which borrows the base's model through
@@ -30,10 +30,22 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamedata_bin  # noqa: E402
 
-# First milestone: the four lords (Cai, Dietrich, Theodora, Leda), Hong Hua, Troy and Lind.
-TEST_POOL = ["Kai", "Dit", "Seo", "Led", "Kou", "Tro", "Lin"]
-# Never a replacement: Eshmel (the Prologue / Part 3 protagonist), left out for now.
-EXCLUDED = {"Ism"}
+# The pool, by 識別子, in Person.bin's order: the characters shuffled among themselves. Of the 140 with a human model: the 89 placed on
+# some map (Dispos/*.bin other than Dummy and GraphicCheck_*), then 30 never placed but with a full model of their own: 14 that look
+# playable (Mic Nin Yan Noc Sop Cat Ned Zac Maj Cle Kir Iio Mys Guj), the 8 gods (Sot Fot Juf Ish Jun Smi Cla Car) and 8 NPCs with a
+# unique look (Gra Nom Gan Kar Ver Gab Orp Han). Left out: Eshmel (Ism, the Prologue / Part 3 protagonist), Oktar (Oct, no model in
+# AssetTable.bin) and 19 NPCs built from stock mob bodies and heads (Lan Tul Sua Lle Miw Has Kon Nas Hed Get Zon Kyo Kat Tsi Sam Cou
+# Ten Rox Crn). "Maｄ" (Mandalan) really ends in a full-width ｄ.
+POOL = """
+    Kai Tia Pet Hur Bel Gat Max Gol Dan Dit Fab Esm Mic Orh Die Lor Set Nin Seo Bon Tob Lil Lys Tal Urs Lou Sim Fia Led Buc
+    Sci Oly Moo Anh Naz Sar Dai Hal Kou Tro Sot Fot Juf Dag Bal Lyr Ish Mna Sol Jun Mar Smi Cla Car Aur Guj Yan Iio Pep Noc
+    Sop Cat Ned Zac Maj Ven Ini Jas Ale Nuz Cen Asw Cle Mys Nat Hri Kir Ann Gra Kra Tah Cas Nom Lon Cir Che Shi Hyo Gan Gil
+    Zen Znz Har Ger Kar Bou Day Hoo Baa Bjo Bol Lec Maｄ Ara Hno Lin Ban Jan Win Bre Qui Dra Yas Coh Mhm Ver Gab Orp Han
+""".split()
+# The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
+SHUFFLE_TRIES = 1000
+# How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
+PAIRS_PER_LINE = 10
 
 F_NAME, F_IDENT, F_GENDER, F_REUSE, F_AID = "名前", "識別子", "性別", "アセット流用", "アセットフラグ"
 MASK64 = (1 << 64) - 1
@@ -113,11 +125,13 @@ def parse_force(text):
     return pairs, warn
 
 
-def make_mapping(person, seed, pool=TEST_POOL, force=()):
-    """[(original Character, replacement Character)] and warnings. Forced pairs first (in the order given), then each pool identifier not
-    forced, in pool order, draws a replacement from every eligible character not yet used: no two originals share a replacement."""
+def make_mapping(person, seed, pool=POOL, force=()):
+    """[(original Character, replacement Character)] and warnings. Forced pairs first, in the order given. Then the pool characters not
+    forced (originals) and those not yet used as a replacement (candidates), each in Person.bin's order: the candidates are shuffled
+    (Fisher-Yates, from the last), and original i takes candidate i. Nobody keeps their own look: while an original drew itself, the
+    candidates are shuffled again, from where they are, with the same generator (about 2.7 shuffles for the full pool). Only a lone
+    candidate, or SHUFFLE_TRIES shuffles that all failed (which a real pool cannot do), can leave someone as themselves."""
     warn = []
-    cands = [c for c in person.chars if c.ident not in EXCLUDED]
     used, done, out = set(), set(), []
     for a, b in force:
         ca, cb = person.find(a), person.find(b)
@@ -130,22 +144,23 @@ def make_mapping(person, seed, pool=TEST_POOL, force=()):
         out.append((ca, cb))
         done.add(ca.ident)
         used.add(cb.ident)
-    rng = SplitMix64(seed)
     for ident in pool:
-        c = person.by_ident.get(ident)
-        if c is None:
+        if ident not in person.by_ident:
             warn.append("pool: no character %s in Person.bin" % ident)
-            continue
-        if ident in done:
-            continue
-        free = [x for x in cands if x.ident not in used]
-        if not free:
-            warn.append("pool: no replacement left for %s" % ident)
-            continue
-        r = free[rng.next() % len(free)]
-        out.append((c, r))
-        done.add(ident)
-        used.add(r.ident)
+    pool = set(pool)
+    origs = [c for c in person.chars if c.ident in pool and c.ident not in done]
+    cands = [c for c in person.chars if c.ident in pool and c.ident not in used]
+    rng = SplitMix64(seed)
+    n = min(len(origs), len(cands))
+    for _ in range(SHUFFLE_TRIES):
+        for i in range(len(cands) - 1, 0, -1):
+            j = rng.next() % (i + 1)
+            cands[i], cands[j] = cands[j], cands[i]
+        if len(cands) < 2 or all(origs[i] is not cands[i] for i in range(n)):
+            break
+    out += zip(origs[:n], cands[:n])
+    for c in origs[n:]:
+        warn.append("pool: no replacement left for %s" % c.ident)
     return out, warn
 
 
@@ -188,8 +203,11 @@ def apply(data, mapping):
     return bytes(out), changed, skipped
 
 
-def mapping_line(seed, mapping):
-    return "randomizer: seed %d: %s" % (seed, ", ".join("%s -> %s" % (o.label(), r.label()) for o, r in mapping))
+def mapping_lines(seed, mapping):
+    """The log's mapping: a line with the seed and the number of pairs, then the pairs, PAIRS_PER_LINE to a line."""
+    pairs = ["%s -> %s" % (o.label(), r.label()) for o, r in mapping]
+    return ["randomizer: seed %d: %d pairs" % (seed, len(pairs))] + [
+        "randomizer:   " + ", ".join(pairs[i:i + PAIRS_PER_LINE]) for i in range(0, len(pairs), PAIRS_PER_LINE)]
 
 
 def summary_line(changed, skipped, edited):
@@ -223,7 +241,6 @@ def main(argv=None):
     ap.add_argument("romfs", help="the RomFS folder (with GameData/Person.bin)")
     ap.add_argument("--seed", type=int, required=True, help="the [fefw] randomize_seed the game logged")
     ap.add_argument("--force", default="", help="as [fefw] randomize_force, e.g. Anh=Tro,Lin=Kou")
-    ap.add_argument("--all", action="store_true", help="every eligible character in the pool (the full design), not the test pool")
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
     ap.add_argument("-v", action="store_true", help="list every record changed")
@@ -232,13 +249,12 @@ def main(argv=None):
     with open(os.path.join(a.romfs, "GameData", "Person.bin"), "rb") as fh:
         data = fh.read()
     person = Person(data)
-    pool = [c.ident for c in person.chars if c.ident not in EXCLUDED] if a.all else TEST_POOL
     force, warn = parse_force(a.force)
-    mapping, warn2 = make_mapping(person, a.seed, pool, force)
+    mapping, warn2 = make_mapping(person, a.seed, POOL, force)
     for w in warn + warn2:
         print("warning: " + w, file=sys.stderr)
     edited, changed, skipped = apply(data, mapping)
-    print(mapping_line(a.seed, mapping))
+    print("\n".join(mapping_lines(a.seed, mapping)))
     print(summary_line(changed, skipped, edited))
     if a.v:
         for key, what in changed:

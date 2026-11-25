@@ -167,32 +167,72 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(self.p.find("Lindo").ident, "Lin")
         self.assertIsNone(self.p.find("Anatolia"))
 
-    def test_one_to_one_and_seeded(self):
-        for seed in range(50):
-            m, warn = ru.make_mapping(self.p, seed, ["Kai", "Tro", "Lin"])
+    POOL = ["Kai", "Tro", "Lin", "Dag"]
+
+    def idents(self, m):
+        return [(o.ident, r.ident) for o, r in m]
+
+    def test_shuffle_seeded_and_never_self(self):
+        seen = set()
+        for seed in range(200):
+            m, warn = ru.make_mapping(self.p, seed, self.POOL)
             self.assertEqual(warn, [])
-            self.assertEqual([o.ident for o, _ in m], ["Kai", "Tro", "Lin"])
+            self.assertEqual([o.ident for o, _ in m], ["Kai", "Tro", "Lin", "Dag"])      # Person.bin's order
             reps = [r.ident for _, r in m]
-            self.assertEqual(len(set(reps)), 3)
-            self.assertNotIn("Ism", reps)
-            self.assertEqual(reps, [r.ident for _, r in ru.make_mapping(self.p, seed, ["Kai", "Tro", "Lin"])[0]])
-        seen = {tuple(r.ident for _, r in ru.make_mapping(self.p, s, ["Kai", "Tro", "Lin"])[0]) for s in range(50)}
-        self.assertGreater(len(seen), 5)
+            self.assertEqual(sorted(reps), sorted(self.POOL))                           # a shuffle of the pool: Ism never drawn
+            self.assertTrue(all(o.ident != r.ident for o, r in m), (seed, reps))
+            self.assertEqual(m, ru.make_mapping(self.p, seed, self.POOL)[0])
+            seen.add(tuple(reps))
+        self.assertEqual(len(seen), 9)                                                  # every derangement of four turns up
+
+    def test_draw_is_even(self):
+        # each of the 9 derangements of four about equally often (a fix-up that hands a self-draw to a neighbour skews this)
+        counts = {}
+        for seed in range(2700):
+            reps = tuple(r.ident for _, r in ru.make_mapping(self.p, seed, self.POOL)[0])
+            counts[reps] = counts.get(reps, 0) + 1
+        self.assertEqual(len(counts), 9)
+        self.assertTrue(all(220 <= c <= 380 for c in counts.values()), counts)
+
+    def test_one_left_keeps_itself(self):
+        self.assertEqual(self.idents(ru.make_mapping(self.p, 3, ["Kai"])[0]), [("Kai", "Kai")])
 
     def test_force(self):
-        m, warn = ru.make_mapping(self.p, 7, ["Kai", "Tro", "Lin"], ru.parse_force("Lindo=Troy, Kai=Dagda")[0])
+        m, warn = ru.make_mapping(self.p, 7, self.POOL, ru.parse_force("Lindo=Troy, Kai=Dagda")[0])
         self.assertEqual(len(warn), 1)                       # "Troy" is not a name the data knows (Troja is)
-        m, warn = ru.make_mapping(self.p, 7, ["Kai", "Tro", "Lin"], ru.parse_force("Lindo=Troja, Kai=Dag, Tro=Dag")[0])
+        m, warn = ru.make_mapping(self.p, 7, self.POOL, ru.parse_force("Lindo=Troja, Kai=Dag, Tro=Dag")[0])
         self.assertEqual(len(warn), 1)                       # Dag is taken
-        pairs = [(o.ident, r.ident) for o, r in m]
+        pairs = self.idents(m)
         self.assertEqual(pairs[:2], [("Lin", "Tro"), ("Kai", "Dag")])
-        self.assertEqual(len(pairs), 3)
-        self.assertNotIn(pairs[2][1], ("Tro", "Dag", "Ism"))
+        self.assertEqual([o for o, _ in pairs[2:]], ["Tro", "Dag"])          # the rest share what is left
+        self.assertEqual(sorted(r for _, r in pairs[2:]), ["Kai", "Lin"])
         self.assertEqual(ru.parse_force(" Kai , Lin = Tro,"), ([("Lin", "Tro")], ['randomize_force: "Kai" is not original=replacement']))
+
+    def test_force_self(self):
+        m, _ = ru.make_mapping(self.p, 7, self.POOL, ru.parse_force("Kai=Kai")[0])
+        self.assertEqual(self.idents(m)[0], ("Kai", "Kai"))
+        self.assertEqual(len(m), 4)
 
     def test_force_outside_pool(self):
         m, _ = ru.make_mapping(self.p, 1, [], ru.parse_force("Dag=Kai")[0])
-        self.assertEqual([(o.ident, r.ident) for o, r in m], [("Dag", "Kai")])
+        self.assertEqual(self.idents(m), [("Dag", "Kai")])
+        for seed in range(20):   # Tro is the one original left and Kai a spare candidate: Tro never draws itself
+            m, warn = ru.make_mapping(self.p, seed, ["Kai", "Tro"], ru.parse_force("Kai=Ism")[0])
+            self.assertEqual((self.idents(m), warn), ([("Kai", "Ism"), ("Tro", "Kai")], []))
+        m, warn = ru.make_mapping(self.p, 1, ["Kai", "Tro"], ru.parse_force("Ism=Kai")[0])   # one candidate (Tro) for two
+        self.assertEqual(self.idents(m)[0], ("Ism", "Kai"))
+        self.assertEqual(len(m), 2)
+        self.assertEqual(warn, ["pool: no replacement left for Tro"] if m[1][0].ident == "Kai" else ["pool: no replacement left for Kai"])
+
+    def test_missing_pool_name(self):
+        _, warn = ru.make_mapping(self.p, 1, ["Kai", "Tro", "Xyz"])
+        self.assertEqual(warn, ["pool: no character Xyz in Person.bin"])
+
+    def test_pool_list(self):
+        self.assertEqual(len(ru.POOL), 119)
+        self.assertEqual(len(set(ru.POOL)), 119)
+        self.assertNotIn("Ism", ru.POOL)
+        self.assertIn("Ma\uff44", ru.POOL)
 
 
 class TestApply(unittest.TestCase):
@@ -275,7 +315,10 @@ class TestApply(unittest.TestCase):
 
     def test_lines(self):
         m = [self.pair("Kai", "Tro")]
-        self.assertEqual(ru.mapping_line(5, m), "randomizer: seed 5: Kai(Kai) -> Tro(Troja)")
+        self.assertEqual(ru.mapping_lines(5, m), ["randomizer: seed 5: 1 pairs", "randomizer:   Kai(Kai) -> Tro(Troja)"])
+        lines = ru.mapping_lines(5, m * 21)
+        self.assertEqual([len(x.split(" -> ")) - 1 for x in lines[1:]], [10, 10, 1])
+        self.assertEqual(lines[0], "randomizer: seed 5: 21 pairs")
         out, changed, skipped = ru.apply(self.data, m)
         self.assertRegex(ru.summary_line(changed, skipped, out), r"^randomizer: Person.bin: 2 records changed, 0 dragon forms left as "
                                                                  r"they are \(fnv1a64 [0-9a-f]{16}\)$")

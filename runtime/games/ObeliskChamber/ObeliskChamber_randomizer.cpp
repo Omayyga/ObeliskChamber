@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Fire Emblem: Fortune's Weave: the unit randomizer ([fefw] randomize_units, randomize_seed, randomize_force), in the style of Ignis for
-// FE14. First milestone: swap logic only, for a test pool of seven characters (the four lords Cai, Dietrich, Theodora and Leda, Hong Hua,
-// Troy and Lind). Each is replaced by a character drawn (seeded, without repeats) from every character with a human model, everywhere the
-// story meets them, enemies included. Stats, classes, items, portraits and text are the slot's own.
+// FE14. Swap logic only: the 119 characters of the pool (kPool) are shuffled among themselves (seeded, one-to-one, nobody keeps their own
+// look), everywhere the story meets them, enemies included. Stats, classes, items, portraits and text are the slot's own.
 //
 // GameData/Person.bin is edited as the RomFS is set up (services/mods_dll.cpp add_runtime_edit), so it applies at the next start. The file is
 // a self-describing table container (tools/gamedata/gamedata_bin.py has the layout). A character is a 識別子 (identifier, e.g. "Kai"): a
@@ -14,7 +13,7 @@
 // Each is a pointer swapped for one already in the file, so the file keeps its size and layout. Records with no model at all are dragon
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
-// tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping line and checksum.
+// tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
 
 #include <algorithm>
@@ -39,9 +38,22 @@ namespace {
 
 constexpr const char* kTag = "fefw";
 
-// The first milestone's pool, by 識別子. Eshmel (Ism), the Prologue / Part 3 protagonist, is never a replacement for now.
-const char* const kTestPool[] = {"Kai", "Dit", "Seo", "Led", "Kou", "Tro", "Lin"};
-const char* const kExcluded[] = {"Ism"};
+// The pool, by 識別子: the characters shuffled among themselves (randomize_units.py POOL, which says how it was chosen). Of the 140 with a
+// human model: the 89 placed on some map, then 30 never placed but with a full model of their own (14 that look playable, the 8 gods,
+// 8 NPCs with a unique look). Left out: Eshmel (Ism), Oktar (no model) and 19 NPCs built from stock mob bodies and heads.
+const char* const kPool[] = {
+    "Kai", "Tia", "Pet", "Hur", "Bel", "Gat", "Max", "Gol", "Dan", "Dit", "Fab", "Esm", "Mic", "Orh", "Die", "Lor", "Set", "Nin", "Seo",
+    "Bon", "Tob", "Lil", "Lys", "Tal", "Urs", "Lou", "Sim", "Fia", "Led", "Buc", "Sci", "Oly", "Moo", "Anh", "Naz", "Sar", "Dai", "Hal",
+    "Kou", "Tro", "Sot", "Fot", "Juf", "Dag", "Bal", "Lyr", "Ish", "Mna", "Sol", "Jun", "Mar", "Smi", "Cla", "Car", "Aur", "Guj", "Yan",
+    "Iio", "Pep", "Noc", "Sop", "Cat", "Ned", "Zac", "Maj", "Ven", "Ini", "Jas", "Ale", "Nuz", "Cen", "Asw", "Cle", "Mys", "Nat", "Hri",
+    "Kir", "Ann", "Gra", "Kra", "Tah", "Cas", "Nom", "Lon", "Cir", "Che", "Shi", "Hyo", "Gan", "Gil", "Zen", "Znz", "Har", "Ger", "Kar",
+    "Bou", "Day", "Hoo", "Baa", "Bjo", "Bol", "Lec",
+    "Ma\xef\xbd\x84",   // Maｄ (Mandalan): the identifier really ends in a full-width ｄ
+    "Ara", "Hno", "Lin", "Ban", "Jan", "Win", "Bre", "Qui", "Dra", "Yas", "Coh", "Mhm", "Ver", "Gab", "Orp", "Han"};
+// The most shuffles make_mapping() tries for a draw where nobody keeps their own look
+constexpr int kShuffleTries = 1000;
+// How many pairs each log line names: a log line is cut at 4096 bytes.
+constexpr size_t kPairsPerLine = 10;
 
 // Table and field names (UTF-8), as Person.bin's schema spells them
 constexpr const char* kTablePerson = "\xe5\x80\x8b\xe4\xba\xba";                                          // 個人
@@ -239,8 +251,8 @@ std::string trim(const std::string& s) {
 
 using Mapping = std::vector<std::pair<const Character*, const Character*>>;
 
-// Forced pairs first, in the order given; then each pool identifier not forced, in pool order, draws from every eligible character not yet
-// used. randomize_units.py make_mapping() is the same, step for step.
+// Forced pairs first, in the order given; then the rest of the pool is shuffled among itself (Fisher-Yates over the candidates, from the
+// last, repeated until nobody drew themselves). randomize_units.py make_mapping() is the same, step for step.
 Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std::string& force) {
     Mapping out;
     std::vector<std::string> used, done;
@@ -271,27 +283,31 @@ Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std:
         done.push_back(ca->ident);
         used.push_back(cb->ident);
     }
-    uint64_t rng = seed;
-    for (const char* ident : kTestPool) {
-        const auto it = std::find_if(cs.begin(), cs.end(), [&](const Character& c) { return c.ident == ident; });
-        if (it == cs.end()) {
+    // The pool characters not forced (originals) and those not yet used as a replacement (candidates), each in Person.bin's order
+    auto in_pool = [](const std::string& ident) {
+        return std::any_of(std::begin(kPool), std::end(kPool), [&](const char* x) { return ident == x; });
+    };
+    for (const char* ident : kPool)
+        if (std::none_of(cs.begin(), cs.end(), [&](const Character& c) { return c.ident == ident; }))
             NXLOG_W(kTag, "randomizer: pool: no character %s in Person.bin", ident);
-            continue;
-        }
-        if (in(done, ident)) continue;
-        std::vector<const Character*> free;
-        for (const Character& c : cs)
-            if (!in(used, c.ident) && std::none_of(std::begin(kExcluded), std::end(kExcluded), [&](const char* x) { return c.ident == x; }))
-                free.push_back(&c);
-        if (free.empty()) {
-            NXLOG_W(kTag, "randomizer: pool: no replacement left for %s", ident);
-            continue;
-        }
-        const Character* r = free[splitmix64(rng) % free.size()];
-        out.push_back({&*it, r});
-        done.push_back(ident);
-        used.push_back(r->ident);
+    std::vector<const Character*> origs, cands;
+    for (const Character& c : cs) {
+        if (!in_pool(c.ident)) continue;
+        if (!in(done, c.ident)) origs.push_back(&c);
+        if (!in(used, c.ident)) cands.push_back(&c);
     }
+    // Original i takes candidate i. Nobody keeps their own look: while an original drew itself, shuffle again (about 2.7 shuffles for the
+    // full pool). Only a lone candidate, or kShuffleTries failed shuffles (which a real pool cannot do), leaves someone as themselves.
+    uint64_t rng = seed;
+    const size_t n = std::min(origs.size(), cands.size());
+    for (int t = 0; t < kShuffleTries; ++t) {
+        for (size_t i = cands.size(); i-- > 1;) std::swap(cands[i], cands[splitmix64(rng) % (i + 1)]);
+        bool self = false;
+        for (size_t i = 0; i < n; ++i) self = self || origs[i] == cands[i];
+        if (cands.size() < 2 || !self) break;
+    }
+    for (size_t i = 0; i < n; ++i) out.push_back({origs[i], cands[i]});
+    for (size_t i = n; i < origs.size(); ++i) NXLOG_W(kTag, "randomizer: pool: no replacement left for %s", origs[i]->ident.c_str());
     return out;
 }
 
@@ -308,9 +324,13 @@ void edit_person(const NxModFile* file, void*) {
     }
     const std::vector<Character> cs = characters(b, t);
     const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force);
-    std::string line;
-    for (const auto& [o, r] : mapping) line += (line.empty() ? "" : ", ") + o->label() + " -> " + r->label();
-    NXLOG_I(kTag, "randomizer: seed %" PRIu64 ": %s", g_set.seed, line.c_str());
+    NXLOG_I(kTag, "randomizer: seed %" PRIu64 ": %zu pairs", g_set.seed, mapping.size());
+    for (size_t i = 0; i < mapping.size(); i += kPairsPerLine) {
+        std::string line;
+        for (size_t j = i; j < std::min(i + kPairsPerLine, mapping.size()); ++j)
+            line += (j == i ? "" : ", ") + mapping[j].first->label() + " -> " + mapping[j].second->label();
+        NXLOG_I(kTag, "randomizer:   %s", line.c_str());
+    }
 
     std::vector<uint8_t> out(file->data, file->data + file->size);
     auto put = [&](uint64_t off, uint64_t v) { std::memcpy(out.data() + kHeader + off, &v, 8); };   // only on fields is_ptr() vouched for
