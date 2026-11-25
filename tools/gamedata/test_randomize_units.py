@@ -307,6 +307,8 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(len(set(ru.POOL)), 113)
         for out in ("Ism", "Bal", "Oct", "Ger", "Lan"):   # Eshmel, no model (Balor, Oktar), generic (Gervasio), stock model (Randa)
             self.assertNotIn(out, ru.POOL)
+        self.assertEqual(len(ru.LIVING_LOOKS), 7)                 # the pool's Underworld-only looks
+        self.assertTrue(all(x.endswith("冥闘士") for x in ru.LIVING_LOOKS))
         for kept in ("Ara", "Ban", "Dra", "Kat"):         # portraits on Underworld entries (Arago, Vandahl, Drake); Katarina
             self.assertIn(kept, ru.POOL)
         self.assertIn("Ma\uff44", ru.POOL)

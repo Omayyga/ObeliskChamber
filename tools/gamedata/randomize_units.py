@@ -46,8 +46,8 @@ POOL = """
     Znz Kar Bou Day Baa Bjo Bol Lec Maｄ Ara Hno Lin Ban Bre Qui Dra Coh Mhm Ver Gab Orp Kat Han
 """.split()
 # Underworld looks (容姿 in AssetTable.bin) whose wearer is shown living: the model without the Underworld keyword, the portrait without
-# the Underworld tint. Breza first, as the test; the other Underworld-only characters follow once he is confirmed in game.
-LIVING_LOOKS = ["ブレザ冥闘士"]
+# the Underworld tint. The pool characters whose plain look is Underworld only: Breza, King Arago, Hanno, Vandahl, Drake, Cohen, Mahadu.
+LIVING_LOOKS = ["ブレザ冥闘士", "アラゴ大王冥闘士", "ハンノ冥闘士", "ヴァンダル冥闘士", "ドレイク冥闘士", "コーエン冥闘士", "マハマドゥ冥闘士"]
 UNDERWORLD = "SID_冥界兵"
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
