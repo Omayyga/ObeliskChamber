@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Fire Emblem: Fortune's Weave: the unit randomizer ([fefw] randomize_units, randomize_seed, randomize_force), in the style of Ignis for
-// FE14. Swap logic only: the 119 characters of the pool (kPool) are shuffled among themselves (seeded, one-to-one, nobody keeps their own
+// FE14. Swap logic only: the 109 characters of the pool (kPool) are shuffled among themselves (seeded, one-to-one, nobody keeps their own
 // look), everywhere the story meets them, enemies included. Stats, classes, items, portraits and text are the slot's own.
 //
 // GameData/Person.bin is edited as the RomFS is set up (services/mods_dll.cpp add_runtime_edit), so it applies at the next start. The file is
@@ -38,18 +38,17 @@ namespace {
 
 constexpr const char* kTag = "fefw";
 
-// The pool, by 識別子: the characters shuffled among themselves (randomize_units.py POOL, which says how it was chosen). Of the 140 with a
-// human model: the 89 placed on some map, then 30 never placed but with a full model of their own (14 that look playable, the 8 gods,
-// 8 NPCs with a unique look). Left out: Eshmel (Ism), Oktar (no model) and 19 NPCs built from stock mob bodies and heads.
+// The pool, by 識別子: the characters shuffled among themselves (randomize_units.py POOL, which says how it was chosen). Every one has a
+// model and a portrait of its own. Of the 140 with a human model: the 79 placed on some map, then 30 never placed (14 that look playable,
+// the 8 gods, 8 NPCs with a unique look). Left out: Eshmel (Ism), Balor and Oktar (no model), and 28 built from stock heads, who have the
+// generic portrait. "Ma\xef\xbd\x84" is Maｄ (Mandalan): the identifier really ends in a full-width ｄ.
 const char* const kPool[] = {
     "Kai", "Tia", "Pet", "Hur", "Bel", "Gat", "Max", "Gol", "Dan", "Dit", "Fab", "Esm", "Mic", "Orh", "Die", "Lor", "Set", "Nin", "Seo",
     "Bon", "Tob", "Lil", "Lys", "Tal", "Urs", "Lou", "Sim", "Fia", "Led", "Buc", "Sci", "Oly", "Moo", "Anh", "Naz", "Sar", "Dai", "Hal",
-    "Kou", "Tro", "Sot", "Fot", "Juf", "Dag", "Bal", "Lyr", "Ish", "Mna", "Sol", "Jun", "Mar", "Smi", "Cla", "Car", "Aur", "Guj", "Yan",
-    "Iio", "Pep", "Noc", "Sop", "Cat", "Ned", "Zac", "Maj", "Ven", "Ini", "Jas", "Ale", "Nuz", "Cen", "Asw", "Cle", "Mys", "Nat", "Hri",
-    "Kir", "Ann", "Gra", "Kra", "Tah", "Cas", "Nom", "Lon", "Cir", "Che", "Shi", "Hyo", "Gan", "Gil", "Zen", "Znz", "Har", "Ger", "Kar",
-    "Bou", "Day", "Hoo", "Baa", "Bjo", "Bol", "Lec",
-    "Ma\xef\xbd\x84",   // Maｄ (Mandalan): the identifier really ends in a full-width ｄ
-    "Ara", "Hno", "Lin", "Ban", "Jan", "Win", "Bre", "Qui", "Dra", "Yas", "Coh", "Mhm", "Ver", "Gab", "Orp", "Han"};
+    "Kou", "Tro", "Sot", "Fot", "Juf", "Dag", "Lyr", "Ish", "Mna", "Sol", "Jun", "Mar", "Smi", "Cla", "Car", "Aur", "Guj", "Yan", "Iio",
+    "Pep", "Noc", "Sop", "Cat", "Ned", "Zac", "Maj", "Ven", "Ini", "Jas", "Ale", "Nuz", "Cen", "Asw", "Cle", "Mys", "Nat", "Hri", "Kir",
+    "Ann", "Gra", "Kra", "Tah", "Cas", "Nom", "Lon", "Cir", "Che", "Shi", "Hyo", "Gan", "Gil", "Zen", "Znz", "Kar", "Bou", "Day", "Baa",
+    "Bjo", "Bol", "Lec", "Ma\xef\xbd\x84", "Hno", "Lin", "Bre", "Qui", "Coh", "Mhm", "Ver", "Gab", "Orp", "Han"};
 // The most shuffles make_mapping() tries for a draw where nobody keeps their own look
 constexpr int kShuffleTries = 1000;
 // How many pairs each log line names: a log line is cut at 4096 bytes.

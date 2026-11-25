@@ -229,9 +229,10 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(warn, ["pool: no character Xyz in Person.bin"])
 
     def test_pool_list(self):
-        self.assertEqual(len(ru.POOL), 119)
-        self.assertEqual(len(set(ru.POOL)), 119)
-        self.assertNotIn("Ism", ru.POOL)
+        self.assertEqual(len(ru.POOL), 109)
+        self.assertEqual(len(set(ru.POOL)), 109)
+        for out in ("Ism", "Bal", "Oct", "Ger", "Kat"):   # Eshmel, no model (Balor, Oktar), generic portrait (Gervasio, Katarina)
+            self.assertNotIn(out, ru.POOL)
         self.assertIn("Ma\uff44", ru.POOL)
 
 

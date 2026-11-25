@@ -30,17 +30,18 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamedata_bin  # noqa: E402
 
-# The pool, by 識別子, in Person.bin's order: the characters shuffled among themselves. Of the 140 with a human model: the 89 placed on
-# some map (Dispos/*.bin other than Dummy and GraphicCheck_*), then 30 never placed but with a full model of their own: 14 that look
-# playable (Mic Nin Yan Noc Sop Cat Ned Zac Maj Cle Kir Iio Mys Guj), the 8 gods (Sot Fot Juf Ish Jun Smi Cla Car) and 8 NPCs with a
-# unique look (Gra Nom Gan Kar Ver Gab Orp Han). Left out: Eshmel (Ism, the Prologue / Part 3 protagonist), Oktar (Oct, no model in
-# AssetTable.bin) and 19 NPCs built from stock mob bodies and heads (Lan Tul Sua Lle Miw Has Kon Nas Hed Get Zon Kyo Kat Tsi Sam Cou
-# Ten Rox Crn). "Maｄ" (Mandalan) really ends in a full-width ｄ.
+# The pool, by 識別子, in Person.bin's order: the characters shuffled among themselves. Every one has a model and a portrait of its own
+# (UI/Face/<n> for its head HD_<n>). Of the 140 with a human model: the 79 placed on some map, then 30 never placed: 14 that look
+# playable (Mic Nin Yan Noc Sop Cat Ned Zac Maj Cle Kir Iio Mys Guj), the 8 gods (Sot Fot Juf Ish Jun Smi Cla Car) and 8
+# NPCs with a unique look (Gra Nom Gan Kar Ver Gab Orp Han). Left out: Eshmel (Ism, the Prologue / Part 3 protagonist); Balor (Bal) and
+# Oktar (Oct), whose models are not in AssetTable.bin (Balor only ever appears as a dragon); and the 28 built from stock heads (HD_Std*,
+# HD_Eld*, HD_Glm*, ...) with the generic portrait: placed on maps, Har Ger Hoo Ara Ban Jan Win Dra Yas; never placed, Lan Tul Sua Lle
+# Miw Has Kon Nas Hed Get Zon Kyo Kat Tsi Sam Cou Ten Rox Crn. "Maｄ" (Mandalan) really ends in a full-width ｄ.
 POOL = """
     Kai Tia Pet Hur Bel Gat Max Gol Dan Dit Fab Esm Mic Orh Die Lor Set Nin Seo Bon Tob Lil Lys Tal Urs Lou Sim Fia Led Buc
-    Sci Oly Moo Anh Naz Sar Dai Hal Kou Tro Sot Fot Juf Dag Bal Lyr Ish Mna Sol Jun Mar Smi Cla Car Aur Guj Yan Iio Pep Noc
-    Sop Cat Ned Zac Maj Ven Ini Jas Ale Nuz Cen Asw Cle Mys Nat Hri Kir Ann Gra Kra Tah Cas Nom Lon Cir Che Shi Hyo Gan Gil
-    Zen Znz Har Ger Kar Bou Day Hoo Baa Bjo Bol Lec Maｄ Ara Hno Lin Ban Jan Win Bre Qui Dra Yas Coh Mhm Ver Gab Orp Han
+    Sci Oly Moo Anh Naz Sar Dai Hal Kou Tro Sot Fot Juf Dag Lyr Ish Mna Sol Jun Mar Smi Cla Car Aur Guj Yan Iio Pep Noc Sop
+    Cat Ned Zac Maj Ven Ini Jas Ale Nuz Cen Asw Cle Mys Nat Hri Kir Ann Gra Kra Tah Cas Nom Lon Cir Che Shi Hyo Gan Gil Zen
+    Znz Kar Bou Day Baa Bjo Bol Lec Maｄ Hno Lin Bre Qui Coh Mhm Ver Gab Orp Han
 """.split()
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
