@@ -45,6 +45,10 @@ POOL = """
     Cat Ned Zac Maj Ven Ini Jas Ale Nuz Cen Asw Cle Mys Nat Hri Kir Ann Gra Kra Tah Cas Nom Lon Cir Che Shi Hyo Gan Gil Zen
     Znz Kar Bou Day Baa Bjo Bol Lec Maｄ Ara Hno Lin Ban Bre Qui Dra Coh Mhm Ver Gab Orp Kat Han
 """.split()
+# Underworld looks (容姿 in AssetTable.bin) whose wearer is shown living: the model without the Underworld keyword, the portrait without
+# the Underworld tint. Breza first, as the test; the other Underworld-only characters follow once he is confirmed in game.
+LIVING_LOOKS = ["ブレザ冥闘士"]
+UNDERWORLD = "SID_冥界兵"
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -218,6 +222,59 @@ def summary_line(changed, skipped, edited):
         len(changed), len(skipped), fnv1a64(edited))
 
 
+def apply_assets(data, looks=LIVING_LOOKS):
+    """AssetTable.bin with each look in `looks` shown living, and a list of what changed. For a look L (e.g. ブレザ冥闘士):
+
+        容姿情報 FID_<L>                      特殊 (1: the Underworld tint) -> 0
+        アセットテーブル entries with 容姿 = L   a 条件 alternative "AID_x & SID_冥界兵" -> "AID_x" (so the plain look gets the
+                                              portrait: Breza's had it only under the Underworld conditions); a キーワード list of
+                                              just SID_冥界兵 (which makes the model undead) -> empty
+
+    Every edit is a count or a byte in place: the file keeps its size and layout. The PID_冥将_* costume records that share an entry
+    show living too."""
+    b = gamedata_bin.GameDataBin(bytes(data))
+    out = bytearray(data)
+    H = gamedata_bin.HEADER
+    assets, faces = b.table("アセットテーブル"), b.table("容姿情報")
+    f_cond, f_look, f_kw = (assets.field(n).off for n in ("条件", "容姿", "キーワード"))
+    f_special = faces.field("特殊").off
+    changes = []
+
+    def strings(at):
+        """The strings of a string[] value at `at` (count in the low 16 bits of its first word, array pointer at +8)."""
+        n = b.u32(at) & 0xFFFF
+        arr = b.ptr(at + 8)
+        return [] if arr is None else [b.string(arr + 8 * i) for i in range(n)]
+
+    def set_count(at, n):
+        struct.pack_into("<H", out, H + at, n)
+
+    for look in looks:
+        for rec in faces.records():
+            if b.key(rec) == "FID_" + look and b.d[H + rec + f_special] == 1:
+                out[H + rec + f_special] = 0
+                changes.append("FID_%s: no tint" % look)
+        for rec in assets.records():
+            if b.string(rec + f_look) != look:
+                continue
+            word = b.u32(rec + f_cond)
+            arr = b.ptr(rec + f_cond + 8)
+            for i in range(word & 0xFFFF if arr is not None else 0):
+                e = arr + (word >> 16) * i
+                alt = strings(e)
+                if len(alt) == 2 and (alt[0] or "").startswith("AID_") and alt[1] == UNDERWORLD:
+                    set_count(e, 1)
+                    changes.append("%s: %s" % (look, alt[0]))
+            if strings(rec + f_kw) == [UNDERWORLD]:
+                set_count(rec + f_kw, 0)
+                changes.append("%s: living model" % look)
+    return bytes(out), changes
+
+
+def assets_line(changes, edited):
+    return "randomizer: AssetTable.bin: %d changes (%s) (fnv1a64 %016x)" % (len(changes), "; ".join(changes), fnv1a64(edited))
+
+
 def show_placements(romfs, names, person_before, edited):
     after = Person(edited)
     for n in names:
@@ -245,6 +302,7 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, required=True, help="the [fefw] randomize_seed the game logged")
     ap.add_argument("--force", default="", help="as [fefw] randomize_force, e.g. Anh=Tro,Lin=Kou")
     ap.add_argument("-o", help="write the edited Person.bin here")
+    ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
@@ -266,6 +324,14 @@ def main(argv=None):
             print("  %s: left as it is (no model of its own)" % key)
     if a.show:
         show_placements(a.romfs, a.show, person, edited)
+    assets = os.path.join(a.romfs, "GameData", "AssetTable.bin")
+    if os.path.exists(assets):
+        with open(assets, "rb") as fh:
+            edited_assets, changes = apply_assets(fh.read())
+        print(assets_line(changes, edited_assets))
+        if a.o_assets:
+            with open(a.o_assets, "wb") as fh:
+                fh.write(edited_assets)
     if a.o:
         with open(a.o, "wb") as fh:
             fh.write(edited)

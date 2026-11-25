@@ -13,6 +13,8 @@
 // Each is a pointer swapped for one already in the file, so the file keeps its size and layout. Records with no model at all are dragon
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
+// GameData/AssetTable.bin is edited too, so that some Underworld looks (kLivingLooks) show their wearer living: see edit_assets().
+//
 // tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
 
@@ -62,6 +64,16 @@ constexpr const char* kFieldIdent = "\xe8\xad\x98\xe5\x88\xa5\xe5\xad\x90";     
 constexpr const char* kFieldGender = "\xe6\x80\xa7\xe5\x88\xa5";                                          // 性別
 constexpr const char* kFieldReuse = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe6\xb5\x81\xe7\x94\xa8";   // アセット流用
 constexpr const char* kFieldAid = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe3\x83\x95\xe3\x83\xa9\xe3\x82\xb0";   // アセットフラグ
+
+// AssetTable.bin: looks (容姿) whose wearer is shown living (randomize_units.py LIVING_LOOKS). Breza first, as the test.
+const char* const kLivingLooks[] = {"\xe3\x83\x96\xe3\x83\xac\xe3\x82\xb6\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab"};   // ブレザ冥闘士
+constexpr const char* kUnderworld = "SID_\xe5\x86\xa5\xe7\x95\x8c\xe5\x85\xb5";                     // SID_冥界兵
+constexpr const char* kTableAssets = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe3\x83\x86\xe3\x83\xbc\xe3\x83\x96\xe3\x83\xab";   // アセットテーブル
+constexpr const char* kTableFaces = "\xe5\xae\xb9\xe5\xa7\xbf\xe6\x83\x85\xe5\xa0\xb1";                // 容姿情報
+constexpr const char* kFieldCond = "\xe6\x9d\xa1\xe4\xbb\xb6";                                       // 条件
+constexpr const char* kFieldLook = "\xe5\xae\xb9\xe5\xa7\xbf";                                       // 容姿
+constexpr const char* kFieldKeywords = "\xe3\x82\xad\xe3\x83\xbc\xe3\x83\xaf\xe3\x83\xbc\xe3\x83\x89";   // キーワード
+constexpr const char* kFieldSpecial = "\xe7\x89\xb9\xe6\xae\x8a";                                    // 特殊
 
 constexpr size_t kHeader = 0x20;
 constexpr uint32_t kTableVersion = 0x20251201;
@@ -134,46 +146,57 @@ private:
     std::vector<Label> labels_;
 };
 
-struct PersonTable {
-    uint64_t first = 0;
-    uint32_t rec_size = 0, count = 0;
-    uint32_t f_name = 0, f_ident = 0, f_gender = 0, f_reuse = 0, f_aid = 0;
+// A flat table (depth 1) found by its label: its records and its schema
+struct Table {
+    uint64_t first = 0, schema = 0;
+    uint32_t rec_size = 0, count = 0, nfields = 0;
+    uint64_t rec(uint32_t i) const { return first + uint64_t(rec_size) * i; }
 };
 
-bool find_person(const Bin& b, PersonTable* t, std::string* why) {
+bool find_table(const Bin& b, const char* name, Table* t) {
     for (const Bin::Label& l : b.labels()) {
-        if (std::strcmp(l.name, kTablePerson) != 0 || l.at < 0x20) continue;
+        if (std::strcmp(l.name, name) != 0 || l.at < 0x20) continue;
         const uint64_t desc = l.at - 0x20;
         if (b.u32(desc) != kTableVersion || b.u32(desc + 4) != 1) continue;   // a flat table's descriptor sits just before it
         if (!b.is_ptr(l.at + 0x20) || b.u64(l.at + 0x20) != desc || !b.is_ptr(l.at + 0x28)) continue;
         t->rec_size = b.u32(desc + 16);
-        const uint32_t nfields = b.u32(desc + 20);
-        const uint64_t schema = b.u64(desc + 24);
+        t->nfields = b.u32(desc + 20);
+        t->schema = b.u64(desc + 24);
         t->count = b.u32(l.at + 0x10) >> 16;
         t->first = b.u64(l.at + 0x28);
-        if (t->rec_size < 0x20 || !b.has(t->first, uint64_t(t->rec_size) * t->count) || !b.has(schema, 0x20ull * nfields)) break;
-        struct Want {
-            const char* name;
-            uint32_t size;
-            uint32_t* off;
-        } want[] = {{kFieldName, 8, &t->f_name}, {kFieldIdent, 8, &t->f_ident}, {kFieldGender, 1, &t->f_gender},
-                    {kFieldReuse, 16, &t->f_reuse}, {kFieldAid, 8, &t->f_aid}};
-        int found = 0;
-        for (Want& w : want) {
-            for (uint32_t i = 0; i < nfields; ++i) {
-                const uint64_t f = schema + 0x20ull * i;
-                const char* name = b.string(f);
-                if (!name || std::strcmp(name, w.name) != 0) continue;
-                const uint32_t size = b.u32(f + 24), off = b.u32(f + 28);
-                if (size == w.size && off + size <= t->rec_size) *w.off = off, ++found;
-                break;
-            }
-        }
-        if (found == 5) return true;
-        *why = "its schema lacks a field the randomizer needs";
+        return t->rec_size >= 0x20 && b.has(t->first, uint64_t(t->rec_size) * t->count) && b.has(t->schema, 0x20ull * t->nfields);
+    }
+    return false;
+}
+
+// A field's offset in the record, when the schema has it with this size
+bool find_field(const Bin& b, const Table& t, const char* name, uint32_t size, uint32_t* off) {
+    for (uint32_t i = 0; i < t.nfields; ++i) {
+        const uint64_t f = t.schema + 0x20ull * i;
+        const char* n = b.string(f);
+        if (!n || std::strcmp(n, name) != 0) continue;
+        const uint32_t fsize = b.u32(f + 24), foff = b.u32(f + 28);
+        if (fsize != size || foff + fsize > t.rec_size) return false;
+        *off = foff;
+        return true;
+    }
+    return false;
+}
+
+struct PersonTable : Table {
+    uint32_t f_name = 0, f_ident = 0, f_gender = 0, f_reuse = 0, f_aid = 0;
+};
+
+bool find_person(const Bin& b, PersonTable* t, std::string* why) {
+    if (!find_table(b, kTablePerson, t)) {
+        *why = "no person table";
         return false;
     }
-    if (why->empty()) *why = "no person table";
+    if (find_field(b, *t, kFieldName, 8, &t->f_name) && find_field(b, *t, kFieldIdent, 8, &t->f_ident) &&
+        find_field(b, *t, kFieldGender, 1, &t->f_gender) && find_field(b, *t, kFieldReuse, 16, &t->f_reuse) &&
+        find_field(b, *t, kFieldAid, 8, &t->f_aid))
+        return true;
+    *why = "its schema lacks a field the randomizer needs";
     return false;
 }
 
@@ -364,6 +387,79 @@ void edit_person(const NxModFile* file, void*) {
 
 bool match_person(const std::string& key) { return key == "/gamedata/person.bin"; }
 
+// ---- living looks: AssetTable.bin ------------------------------------------------------------------------------------------------------
+// For each look L in kLivingLooks, in place (randomize_units.py apply_assets() is the same, step for step):
+//     容姿情報 FID_<L>                       特殊 1 (the Underworld tint on the portrait) -> 0
+//     アセットテーブル entries with 容姿 = L    a 条件 alternative "AID_x & SID_冥界兵" -> "AID_x", so the plain look gets the portrait
+//                                           (Breza's had it only under the Underworld conditions, so whoever wore him got the generic
+//                                           one); a キーワード list of just SID_冥界兵 (the undead model) -> empty
+// Each is a count or a byte, so the file keeps its size and layout.
+void edit_assets(const NxModFile* file, void*) {
+    Bin b;
+    Table assets, faces;
+    uint32_t f_cond = 0, f_look = 0, f_kw = 0, f_special = 0;
+    if (!b.open(file->data, file->size) || !find_table(b, kTableAssets, &assets) || !find_table(b, kTableFaces, &faces) ||
+        !find_field(b, assets, kFieldCond, 16, &f_cond) || !find_field(b, assets, kFieldLook, 16, &f_look) ||
+        !find_field(b, assets, kFieldKeywords, 16, &f_kw) || !find_field(b, faces, kFieldSpecial, 1, &f_special)) {
+        NXLOG_W(kTag, "randomizer: %s: not the asset table the randomizer knows: left as it is", file->path);
+        return;
+    }
+    std::vector<uint8_t> out(file->data, file->data + file->size);
+    std::vector<std::string> changes;
+    // the strings of a string[] value: count in the low 16 bits of its first word, the array of string pointers at +8
+    auto strings = [&](uint64_t at) {
+        std::vector<std::string> v;
+        if (!b.is_ptr(at + 8)) return v;
+        const uint64_t arr = b.u64(at + 8);
+        for (uint32_t i = 0, n = b.u32(at) & 0xFFFF; i < n; ++i) {
+            const char* s = b.string(arr + 8ull * i);
+            v.push_back(s ? s : "");
+        }
+        return v;
+    };
+    auto set_count = [&](uint64_t at, uint16_t n) { std::memcpy(out.data() + kHeader + at, &n, 2); };   // inside the data: b.has vouched
+    for (const char* look : kLivingLooks) {
+        const std::string fid = std::string("FID_") + look;
+        for (uint32_t i = 0; i < faces.count; ++i) {
+            const uint64_t rec = faces.rec(i);
+            const char* key = b.string(rec + 8);
+            if (key && fid == key && b.u8(rec + f_special) == 1) {
+                out[kHeader + rec + f_special] = 0;
+                changes.push_back(fid + ": no tint");
+            }
+        }
+        for (uint32_t i = 0; i < assets.count; ++i) {
+            const uint64_t rec = assets.rec(i);
+            const char* l = b.string(rec + f_look);
+            if (!l || std::strcmp(l, look) != 0) continue;
+            const uint32_t word = b.u32(rec + f_cond);
+            if (b.is_ptr(rec + f_cond + 8)) {
+                const uint64_t arr = b.u64(rec + f_cond + 8);
+                for (uint32_t k = 0; k < (word & 0xFFFF); ++k) {
+                    const uint64_t e = arr + uint64_t(word >> 16) * k;
+                    if (!b.has(e, 16)) break;
+                    const std::vector<std::string> alt = strings(e);
+                    if (alt.size() == 2 && alt[0].rfind("AID_", 0) == 0 && alt[1] == kUnderworld) {
+                        set_count(e, 1);
+                        changes.push_back(std::string(look) + ": " + alt[0]);
+                    }
+                }
+            }
+            const std::vector<std::string> kw = strings(rec + f_kw);
+            if (kw.size() == 1 && kw[0] == kUnderworld) {
+                set_count(rec + f_kw, 0);
+                changes.push_back(std::string(look) + ": living model");
+            }
+        }
+    }
+    std::string list;
+    for (const std::string& c : changes) list += (list.empty() ? "" : "; ") + c;
+    NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), list.c_str(), fnv1a64(out));
+    if (!changes.empty()) file->replace(file, out.data(), out.size());
+}
+
+bool match_assets(const std::string& key) { return key == "/gamedata/assettable.bin"; }
+
 uint64_t new_seed() {
     std::random_device rd;
     uint64_t s = (uint64_t(rd()) << 32) ^ rd() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -392,9 +488,10 @@ void randomizer_install() {
                     err.c_str());
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
-    const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr);
+    const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
+                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
-            ok ? " (GameData/Person.bin is edited as it loads)" : ": too late to edit the files, applies at the next start");
+            ok ? " (GameData/Person.bin and AssetTable.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
 }
 
 }  // namespace nxrt::games::ObeliskChamber

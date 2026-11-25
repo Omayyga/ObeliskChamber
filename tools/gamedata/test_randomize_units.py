@@ -93,6 +93,80 @@ def person(rows):
     return b.build()
 
 
+def table(b, name, fields, rec_size, rows, write):
+    """Adds a flat table to Builder b: schema, records (write(at, row) fills each), descriptor and object."""
+    d = b.data
+    schema = len(d)
+    for fname, typ, size, off in fields:
+        at = len(d)
+        d += bytes(0x20)
+        b.strptr(at, fname)
+        b.strptr(at + 8, typ)
+        struct.pack_into("<II", d, at + 24, size, off)
+    first = len(d)
+    for i, row in enumerate(rows):
+        at = len(d)
+        d += bytes(rec_size)
+        b.strptr(at + 8, row[0])
+        struct.pack_into("<I", d, at + 0x10, 0x10000 | i)
+        write(at, row)
+    desc = len(d)
+    d += bytes(0x40)
+    struct.pack_into("<II", d, desc, gb.TABLE_VERSION, 1)
+    b.strptr(desc + 8, name)
+    struct.pack_into("<IIQ", d, desc + 16, rec_size, len(fields), schema)
+    b.rel.append(desc + 24)
+    obj = desc + 0x20
+    d += bytes(0x10)
+    b.strptr(obj + 8, name)
+    struct.pack_into("<I", d, obj + 0x10, len(rows) << 16)
+    struct.pack_into("<QQ", d, obj + 0x20, desc, first)
+    b.rel += [obj + 0x20, obj + 0x28]
+    b.labels.append((obj, name))
+
+
+def string_list(b, at, items, width=8):
+    """A string[] value at `at`: count | 8 << 16, then a pointer to an array of string pointers."""
+    d = b.data
+    struct.pack_into("<I", d, at, len(items) | width << 16)
+    if not items:
+        return
+    arr = len(d)
+    d += bytes(8 * len(items))
+    for i, s in enumerate(items):
+        b.strptr(arr + 8 * i, s)
+    struct.pack_into("<Q", d, at + 8, arr)
+    b.rel.append(at + 8)
+
+
+def asset_table(entries, faces):
+    """entries: (key, [[condition strings], ...], look, [keywords]); faces: (FID key, 特殊). Returns AssetTable.bin bytes."""
+    b = Builder()
+    lists = []          # string lists to lay out after the tables: (at, items)
+    conds = []          # (at, alternatives)
+
+    def write_entry(at, row):
+        _, alts, look, kws = row
+        conds.append((at + 0x20, alts))
+        b.strptr(at + 0x30, look)
+        lists.append((at + 0x40, kws))
+
+    table(b, "アセットテーブル", [("条件", "string[,]", 16, 0x20), ("容姿", "data", 16, 0x30), ("キーワード", "string[]", 16, 0x40)],
+          0x50, entries, write_entry)
+    table(b, "容姿情報", [("特殊", "u8", 1, 0x20)], 0x28, faces, lambda at, row: b.data.__setitem__(at + 0x20, row[1]))
+    for at, alts in conds:
+        struct.pack_into("<I", b.data, at, len(alts) | 16 << 16)
+        arr = len(b.data)
+        b.data += bytes(16 * len(alts))
+        struct.pack_into("<Q", b.data, at + 8, arr)
+        b.rel.append(at + 8)
+        for i, alt in enumerate(alts):
+            string_list(b, arr + 16 * i, alt)
+    for at, items in lists:
+        string_list(b, at, items)
+    return b.build()
+
+
 ROWS = [
     ("PID_無し", None, None, 0, None, None, None),
     ("PID_カイ", "MPID_Kai", "Kai", 1, "JID_無職", None, "AID_カイ"),
@@ -325,6 +399,58 @@ class TestApply(unittest.TestCase):
         out, changed, skipped = ru.apply(self.data, m)
         self.assertRegex(ru.summary_line(changed, skipped, out), r"^randomizer: Person.bin: 2 records changed, 0 dragon forms left as "
                                                                  r"they are \(fnv1a64 [0-9a-f]{16}\)$")
+
+
+class TestLivingLooks(unittest.TestCase):
+    ENTRIES = [
+        ("e0", [["AID_ブレザ"]], None, []),
+        ("e1", [["AID_ブレザ", "SID_冥界兵"], ["AID_ブレザ", "AID_ブレザ冥将"], ["PID_冥将_ブレザ"]], "ブレザ冥闘士", ["SID_冥界兵"]),
+        ("e2", [["AID_ドレイク"]], "ドレイク冥闘士", ["SID_冥界兵"]),
+        ("e3", [["AID_カイ", "SID_冥界兵"]], "カイ冥闘士", ["SID_冥界兵"]),
+    ]
+    FACES = [("FID_ブレザ冥闘士", 1), ("FID_ドレイク冥闘士", 1), ("FID_カイ冥闘士", 1)]
+
+    def look(self, data):
+        b = gb.GameDataBin(data)
+        t, f = b.table("アセットテーブル"), b.table("容姿情報")
+
+        def strs(at):
+            n, arr = b.u32(at) & 0xFFFF, b.ptr(at + 8)
+            return [] if arr is None else [b.string(arr + 8 * i) for i in range(n)]
+
+        entries = {}
+        for r in t.records():
+            word, arr = b.u32(r + 0x20), b.ptr(r + 0x28)
+            alts = [strs(arr + 16 * i) for i in range(word & 0xFFFF)]
+            entries[b.key(r)] = (alts, strs(r + 0x40))
+        return entries, {b.key(r): b.d[gb.HEADER + r + 0x20] for r in f.records()}
+
+    def test_builder(self):
+        entries, faces = self.look(asset_table(self.ENTRIES, self.FACES))
+        self.assertEqual(entries["e1"], (self.ENTRIES[1][1], ["SID_冥界兵"]))
+        self.assertEqual(faces["FID_ブレザ冥闘士"], 1)
+
+    def test_breza(self):
+        data = asset_table(self.ENTRIES, self.FACES)
+        out, changes = ru.apply_assets(data, ["ブレザ冥闘士"])
+        self.assertEqual(len(out), len(data))
+        entries, faces = self.look(out)
+        self.assertEqual(entries["e1"], ([["AID_ブレザ"], ["AID_ブレザ", "AID_ブレザ冥将"], ["PID_冥将_ブレザ"]], []))
+        self.assertEqual(faces, {"FID_ブレザ冥闘士": 0, "FID_ドレイク冥闘士": 1, "FID_カイ冥闘士": 1})
+        before = self.look(data)[0]
+        for k in ("e0", "e2", "e3"):
+            self.assertEqual(entries[k], before[k])
+        self.assertEqual(changes, ["FID_ブレザ冥闘士: no tint", "ブレザ冥闘士: AID_ブレザ", "ブレザ冥闘士: living model"])
+        self.assertEqual(ru.apply_assets(out, ["ブレザ冥闘士"])[1], [])          # already living: nothing more to do
+
+    def test_plain_look_with_keyword(self):
+        # Drake's pattern: the plain look already names the portrait; only the keyword and the tint change
+        out, changes = ru.apply_assets(asset_table(self.ENTRIES, self.FACES), ["ドレイク冥闘士"])
+        entries, faces = self.look(out)
+        self.assertEqual(entries["e2"], ([["AID_ドレイク"]], []))
+        self.assertEqual(faces["FID_ドレイク冥闘士"], 0)
+        self.assertEqual(len(changes), 2)
+        self.assertTrue(ru.assets_line(changes, out).startswith("randomizer: AssetTable.bin: 2 changes (FID_ドレイク冥闘士: no tint; "))
 
 
 if __name__ == "__main__":
