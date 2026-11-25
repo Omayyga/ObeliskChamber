@@ -29,6 +29,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamedata_bin  # noqa: E402
+import gamedata_edit  # noqa: E402
 
 # The pool, by 識別子, in Person.bin's order: the characters shuffled among themselves. Every one has a model and a portrait of its own: a
 # portrait (フェイス in AssetTable.bin 容姿情報, UI/Face/<n>) numbered under 300; 3xx are the generic class portraits. Of the 140 with a human
@@ -45,14 +46,20 @@ POOL = """
     Cat Ned Zac Maj Ven Ini Jas Ale Nuz Cen Asw Cle Mys Nat Hri Kir Ann Gra Kra Tah Cas Nom Lon Cir Che Shi Hyo Gan Gil Zen
     Znz Kar Bou Day Baa Bjo Bol Lec Maｄ Ara Hno Lin Ban Bre Qui Dra Coh Mhm Ver Gab Orp Kat Han
 """.split()
-# Underworld looks (容姿 in AssetTable.bin) whose wearer is shown living: the model without the Underworld keyword, the portrait without
-# the Underworld tint. The pool characters whose plain look is Underworld only: Breza, King Arago, Hanno, Vandahl, Drake, Cohen, Mahadu.
+# AssetTable.bin: Underworld forms. The engine gives units of the Underworld Army the keyword SID_冥界兵; a look entry whose condition is
+# "AID_x & SID_冥界兵" then gives them their Underworld look (the 冥闘士 portrait entry: tinted portrait, Underworld voice) and model.
+# The pool characters whose plain look is Underworld only: they get a living portrait entry for their plain look, and keep the
+# Underworld one for Underworld slots (as Breza already had). Breza, King Arago, Hanno, Vandahl, Drake, Cohen, Mahadu:
 LIVING_LOOKS = ["ブレザ冥闘士", "アラゴ大王冥闘士", "ハンノ冥闘士", "ヴァンダル冥闘士", "ドレイク冥闘士", "コーエン冥闘士", "マハマドゥ冥闘士"]
 UNDERWORLD = "SID_冥界兵"
-# Living looks that also have a pre-rendered menu portrait (Layout/Textures/Face*.arc, by FID_* name) with the Underworld tint baked in:
-# the roster, item and profile screens show that image instead of drawing the portrait. Renaming the look (in AssetTable.bin and in the
-# expression overrides of Profile.bin) makes the menu miss it and draw the portrait live, untinted. Same length in UTF-8: in place.
-RENAMED_LOOKS = [("コーエン冥闘士", "コーエン冥闘生")]
+# The pool characters with no Underworld form at all, by asset key (AID_<x>), in Person.bin's order: each gets one, a tinted copy of
+# its plain look's portrait entry and an "AID_x & SID_冥界兵" look entry, so that in an Underworld slot it looks the part.
+UNDERWORLD_FORMS = """
+    ピーテル ウルタンド マクシム ゴライアス ダンテ エスメラルダ ミカエラ オルヘル ディエゴ ロレッタ セテス ニネ リリアン ライサンダー ルルディヤー シモン フィアナ シロッコ オリンピア ムウ ナジャ ダイトウ ハルヴィン コウカ
+    トロイア ソティス フォトナ ユ・ファス ライラー イシエト ソレル ジュラ マーズ スミルノス クレール カーラ アウロラ グザラン ヨーカイ イオ ペペ ノクチュラ ソフィア カターニャ ヌディーヌ ザーコネ マジーデ ベンディッツ
+    イニオニ ジャスミン アレキサンドラ ヌッツォ セントリオン アスワン クレオブロス ミュソン ネイサン キリーク キロイカ アンナ グラディウス クラプカ タホウニア カストール ノムヴェデ ロン ガンシン ゼノン カール ビジョウ
+    ベラフィ ガブリエル オルフェウス カタリナ ハンニバル
+""".split()
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -226,83 +233,138 @@ def summary_line(changed, skipped, edited):
         len(changed), len(skipped), fnv1a64(edited))
 
 
-def apply_assets(data, looks=LIVING_LOOKS, renames=RENAMED_LOOKS):
-    """AssetTable.bin with each look in `looks` shown living, and a list of what changed. For a look L (e.g. ブレザ冥闘士):
+def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
+    """AssetTable.bin with living and Underworld forms, and a list of what changed. The file grows (gamedata_edit.Editor); the runtime
+    does the same in edit_assets(), step for step, so the bytes must match.
 
-        容姿情報 FID_<L>                      特殊 (1: the Underworld tint) -> 0
-        アセットテーブル entries with 容姿 = L   a 条件 alternative "AID_x & SID_冥界兵" -> "AID_x" (so the plain look gets the
-                                              portrait: Breza's had it only under the Underworld conditions); a キーワード list of
-                                              just SID_冥界兵 (which makes the model undead) -> empty
+    1. Each look U in `looks` (e.g. ドレイク冥闘士), L = U without 冥闘士 (ドレイク), x its character's asset key (AID_ドレイク):
+         a new portrait entry FID_L, a copy of FID_U with 特殊 0 (no Underworld tint; a voice code ending in 9, the Underworld set,
+         becomes 0: King Arago's generic Mme9 -> Mme0); the plain look entry ("AID_x" alone) gets 容姿 L, and a キーワード list of just
+         SID_冥界兵 (the undead model) becomes empty; and, unless one exists, a new look entry "AID_x & SID_冥界兵" -> U with the
+         keyword, so that an Underworld slot still shows him as the vanilla game does.
+    2. Each AID_x of `forms`: L = the 容姿 of its plain look entry, U = L + 冥闘士: a new portrait entry FID_U, a copy of FID_L with
+       特殊 1 (the tint), and a new look entry "AID_x & SID_冥界兵" -> U with the keyword.
 
-    Every edit is a count or a byte in place: the file keeps its size and layout. The PID_冥将_* costume records that share an entry
-    show living too. Then the RENAMED_LOOKS renames (rename_strings())."""
+    New portrait entries go after the last of 容姿情報 (with a label each, as every entry has), new look entries after the last of
+    アセットテーブル: later entries win, so an Underworld entry overrides the plain one, as Cai's does. A new look entry is a copy of
+    the vanilla "AID_ブレザ & SID_冥界兵" entry (only its condition, look and keyword set). Its condition lists go at the end of the data."""
     b = gamedata_bin.GameDataBin(bytes(data))
-    out = bytearray(data)
-    H = gamedata_bin.HEADER
+    e = gamedata_edit.Editor(data)
     assets, faces = b.table("アセットテーブル"), b.table("容姿情報")
     f_cond, f_look, f_kw = (assets.field(n).off for n in ("条件", "容姿", "キーワード"))
-    f_special = faces.field("特殊").off
+    f_voice, f_special = faces.field("ボイス").off, faces.field("特殊").off
     changes = []
 
     def strings(at):
-        """The strings of a string[] value at `at` (count in the low 16 bits of its first word, array pointer at +8)."""
-        n = b.u32(at) & 0xFFFF
-        arr = b.ptr(at + 8)
+        n, arr = b.u32(at) & 0xFFFF, b.ptr(at + 8)
         return [] if arr is None else [b.string(arr + 8 * i) for i in range(n)]
 
-    def set_count(at, n):
-        struct.pack_into("<H", out, H + at, n)
+    def alts(rec):
+        word, arr = b.u32(rec + f_cond), b.ptr(rec + f_cond + 8)
+        return [] if arr is None else [strings(arr + (word >> 16) * i) for i in range(word & 0xFFFF)]
 
+    entries = list(assets.records())
+    conds = {rec: alts(rec) for rec in entries}
+    fids = {}
+    for rec in faces.records():
+        fids.setdefault(b.key(rec), rec)
+    template = next((r for r in entries if b.string(r + f_look) == "ブレザ冥闘士" and ["AID_ブレザ", UNDERWORLD] in conds[r]), None)
+
+    def plain_of(aid):
+        return next((r for r in entries if [aid] in conds[r]), None)
+
+    def has_underworld(aid):
+        return any([aid, UNDERWORLD] in conds[r] for r in entries)
+
+    new_faces = []      # (source portrait entry, new key, 特殊, voice or None to keep)
+    new_looks = []      # (AID_x, look)
     for look in looks:
-        for rec in faces.records():
-            if b.key(rec) == "FID_" + look and b.d[H + rec + f_special] == 1:
-                out[H + rec + f_special] = 0
-                changes.append("FID_%s: no tint" % look)
-        for rec in assets.records():
-            if b.string(rec + f_look) != look:
-                continue
-            word = b.u32(rec + f_cond)
-            arr = b.ptr(rec + f_cond + 8)
-            for i in range(word & 0xFFFF if arr is not None else 0):
-                e = arr + (word >> 16) * i
-                alt = strings(e)
-                if len(alt) == 2 and (alt[0] or "").startswith("AID_") and alt[1] == UNDERWORLD:
-                    set_count(e, 1)
-                    changes.append("%s: %s" % (look, alt[0]))
-            if strings(rec + f_kw) == [UNDERWORLD]:
-                set_count(rec + f_kw, 0)
-                changes.append("%s: living model" % look)
-    if renames:
-        out, renamed = rename_strings(bytes(out), renames)
-        changes += renamed
-    return bytes(out), changes
+        living = look[:-len("冥闘士")]
+        src = fids.get("FID_" + look)
+        aid = next((alt[0] for r in entries if b.string(r + f_look) == look for alt in conds[r] if alt and alt[0].startswith("AID_")),
+                   None)
+        plain = plain_of(aid) if aid else None
+        if src is None or plain is None or "FID_" + living in fids:
+            changes.append("%s: skipped" % look)
+            continue
+        voice = b.string(src + f_voice) or ""
+        new_faces.append((src, "FID_" + living, 0, voice[:-1] + "0" if voice.endswith("9") else None))
+        e.set_ptr(plain + f_look, living)
+        changes.append("%s: living look %s" % (aid, living))
+        if strings(plain + f_kw) == [UNDERWORLD]:
+            e.u32(plain + f_kw, e.u32(plain + f_kw) & 0xFFFF0000)
+            changes.append("%s: living model" % aid)
+        if not has_underworld(aid):
+            new_looks.append((aid, look))
+    for stem in forms:
+        aid = "AID_" + stem
+        plain = next((r for r in entries if [aid] in conds[r] and b.string(r + f_look)), None)
+        living = plain is not None and b.string(plain + f_look)
+        if not living or "FID_" + living not in fids or "FID_" + living + "冥闘士" in fids or has_underworld(aid):
+            changes.append("%s: skipped" % aid)
+            continue
+        new_faces.append((fids["FID_" + living], "FID_" + living + "冥闘士", 1, None))
+        new_looks.append((aid, living + "冥闘士"))
+    if new_looks and template is None:
+        changes.append("no template look entry: no Underworld forms added")
+        new_looks = []
 
+    labels = {name: at for at, name in b.labels}
+    H = gamedata_bin.HEADER
+    face_recs = list(faces.records())
+    face_end, look_end, data_end = face_recs[-1] + faces.rec_size, entries[-1] + assets.rec_size, b.data_size
+    face_raw = b"".join(bytes(b.d[H + src:H + src + faces.rec_size]) for src, _, _, _ in new_faces)
+    look_raw = bytes(b.d[H + template:H + template + assets.rec_size]) * len(new_looks) if new_looks else b""
+    aux_raw = bytes(32 * len(new_looks))
+    # in place, at the offsets of the file as it is: the record counts of the two tables
+    e.u32(labels["容姿情報"] + 0x10, (len(face_recs) + len(new_faces)) << 16)
+    e.u32(labels["アセットテーブル"] + 0x10, (len(entries) + len(new_looks)) << 16)
+    # the inserts, from the end of the file down, so that each lands where the file as it is says
+    e.insert(data_end, aux_raw)
+    e.insert(face_end, face_raw)
+    e.insert(look_end, look_raw)
 
-def rename_strings(data, renames=RENAMED_LOOKS):
-    """A GameData file with each string that is `old`, or ends in "_" + old (FID_コーエン冥闘士, ニコ_コーエン冥闘士), spelled with `new`
-    instead, and a list of the renamed strings. Only the string pool changes, in place: every pointer still points where it did."""
-    b = gamedata_bin.GameDataBin(bytes(data))
-    out = bytearray(data)
-    changes = []
-    at = b.strings
-    while at < len(data):
-        end = data.index(b"\0", at)
-        text = data[at:end].decode("utf-8", "replace")
-        for old, new in renames:
-            assert len(old.encode()) == len(new.encode())
-            if text == old or text.endswith("_" + old):
-                out[at:end] = (text[:len(text) - len(old)] + new).encode()
-                changes.append("%s -> %s" % (text, text[:len(text) - len(old)] + new))
-        at = end + 1
-    return bytes(out), changes
+    def now(at):
+        """Where an offset of the file as it was is now."""
+        return at + (len(look_raw) if at >= look_end else 0) + (len(face_raw) if at >= face_end else 0) + (
+            len(aux_raw) if at >= data_end else 0)
 
-
-def file_line(name, changes, edited):
-    return "randomizer: %s: %d changes (%s) (fnv1a64 %016x)" % (name, len(changes), "; ".join(changes), fnv1a64(edited))
+    face_row = max(b.u32(r + 0x14) >> 16 for r in face_recs)
+    for i, (src, key, special, voice) in enumerate(new_faces):
+        rec = now(face_end) - len(face_raw) + faces.rec_size * i   # the inserted block starts where face_end was, moved by look_raw
+        e.u32(rec + 0x10, 0x10000 | (len(face_recs) + i))
+        e.u32(rec + 0x14, (face_row + 1 + i) << 16)
+        for o in range(0, faces.rec_size, 8):
+            if src + o in b.ptrs:
+                e.copy_ptr(rec + o, now(src + o))
+        e.set_ptr(rec + 8, key)
+        if voice is not None:
+            e.set_ptr(rec + f_voice, voice)
+        e.data[rec + f_special] = special
+        e.add_label(rec, key)
+        changes.append("%s (%s)" % (key, "tint" if special else "no tint"))
+    look_row = max(b.u32(r + 0x14) >> 16 for r in entries)
+    aux = now(data_end) - len(aux_raw)
+    for i, (aid, look) in enumerate(new_looks):
+        rec = look_end + assets.rec_size * i
+        lists = aux + 32 * i
+        e.u32(rec + 0x10, 0x10000 | (len(entries) + i))
+        e.u32(rec + 0x14, (look_row + 1 + i) << 16)
+        e.u32(rec + f_cond, 1 | 16 << 16)
+        e.set_ptr(rec + f_cond + 8, lists)
+        e.set_ptr(rec + f_look, look)
+        e.u32(rec + f_kw, 1 | 8 << 16)
+        e.copy_ptr(rec + f_kw + 8, now(template + f_kw + 8))
+        e.u32(lists, 2 | 8 << 16)
+        e.set_ptr(lists + 8, lists + 16)
+        e.set_ptr(lists + 16, aid)
+        e.set_ptr(lists + 24, UNDERWORLD)
+        changes.append("%s & %s -> %s" % (aid, UNDERWORLD, look))
+    return e.build(), changes
 
 
 def assets_line(changes, edited):
-    return file_line("AssetTable.bin", changes, edited)
+    return "randomizer: AssetTable.bin: %d changes (fnv1a64 %016x)" % (len(changes), fnv1a64(edited))
 
 
 def show_placements(romfs, names, person_before, edited):
@@ -333,7 +395,6 @@ def main(argv=None):
     ap.add_argument("--force", default="", help="as [fefw] randomize_force, e.g. Anh=Tro,Lin=Kou")
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
-    ap.add_argument("--o-profile", help="write the edited Profile.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
@@ -363,14 +424,6 @@ def main(argv=None):
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
                 fh.write(edited_assets)
-    profile = os.path.join(a.romfs, "GameData", "Profile.bin")
-    if os.path.exists(profile):
-        with open(profile, "rb") as fh:
-            edited_profile, changes = rename_strings(fh.read())
-        print(file_line("Profile.bin", changes, edited_profile))
-        if a.o_profile:
-            with open(a.o_profile, "wb") as fh:
-                fh.write(edited_profile)
     if a.o:
         with open(a.o, "wb") as fh:
             fh.write(edited)

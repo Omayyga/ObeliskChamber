@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gamedata_bin as gb  # noqa: E402
+import gamedata_edit as ge  # noqa: E402
 import inspect_romfs as ir  # noqa: E402
 import randomize_units as ru  # noqa: E402
 
@@ -93,7 +94,7 @@ def person(rows):
     return b.build()
 
 
-def table(b, name, fields, rec_size, rows, write):
+def table(b, name, fields, rec_size, rows, write, label_records=False):
     """Adds a flat table to Builder b: schema, records (write(at, row) fills each), descriptor and object."""
     d = b.data
     schema = len(d)
@@ -108,7 +109,9 @@ def table(b, name, fields, rec_size, rows, write):
         at = len(d)
         d += bytes(rec_size)
         b.strptr(at + 8, row[0])
-        struct.pack_into("<I", d, at + 0x10, 0x10000 | i)
+        struct.pack_into("<II", d, at + 0x10, 0x10000 | i, (3 + i) << 16)
+        if label_records and row[0]:
+            b.labels.append((at, row[0]))
         write(at, row)
     desc = len(d)
     d += bytes(0x40)
@@ -140,7 +143,8 @@ def string_list(b, at, items, width=8):
 
 
 def asset_table(entries, faces):
-    """entries: (key, [[condition strings], ...], look, [keywords]); faces: (FID key, 特殊). Returns AssetTable.bin bytes."""
+    """entries: (key, [[condition strings], ...], look, [keywords]); faces: (FID key, voice, face, 特殊), each labelled as in the game.
+    Returns AssetTable.bin bytes."""
     b = Builder()
     lists = []          # string lists to lay out after the tables: (at, items)
     conds = []          # (at, alternatives)
@@ -151,9 +155,15 @@ def asset_table(entries, faces):
         b.strptr(at + 0x30, look)
         lists.append((at + 0x40, kws))
 
+    def write_face(at, row):
+        b.strptr(at + 0x20, row[1])
+        b.strptr(at + 0x28, row[2])
+        b.data[at + 0x30] = row[3]
+
     table(b, "アセットテーブル", [("条件", "string[,]", 16, 0x20), ("容姿", "data", 16, 0x30), ("キーワード", "string[]", 16, 0x40)],
           0x50, entries, write_entry)
-    table(b, "容姿情報", [("特殊", "u8", 1, 0x20)], 0x28, faces, lambda at, row: b.data.__setitem__(at + 0x20, row[1]))
+    table(b, "容姿情報", [("ボイス", "string", 8, 0x20), ("フェイス", "string", 8, 0x28), ("特殊", "u8", 1, 0x30)], 0x38, faces, write_face,
+          label_records=True)
     for at, alts in conds:
         struct.pack_into("<I", b.data, at, len(alts) | 16 << 16)
         arr = len(b.data)
@@ -164,6 +174,7 @@ def asset_table(entries, faces):
             string_list(b, arr + 16 * i, alt)
     for at, items in lists:
         string_list(b, at, items)
+    b.labels.sort()
     return b.build()
 
 
@@ -308,6 +319,8 @@ class TestMapping(unittest.TestCase):
         for out in ("Ism", "Bal", "Oct", "Ger", "Lan"):   # Eshmel, no model (Balor, Oktar), generic (Gervasio), stock model (Randa)
             self.assertNotIn(out, ru.POOL)
         self.assertEqual(len(ru.LIVING_LOOKS), 7)                 # the pool's Underworld-only looks
+        self.assertEqual(len(ru.UNDERWORLD_FORMS), 75)            # the pool characters with no Underworld form
+        self.assertEqual(len(set(ru.UNDERWORLD_FORMS)), 75)
         self.assertTrue(all(x.endswith("冥闘士") for x in ru.LIVING_LOOKS))
         for kept in ("Ara", "Ban", "Dra", "Kat"):         # portraits on Underworld entries (Arago, Vandahl, Drake); Katarina
             self.assertIn(kept, ru.POOL)
@@ -403,72 +416,104 @@ class TestApply(unittest.TestCase):
                                                                  r"they are \(fnv1a64 [0-9a-f]{16}\)$")
 
 
-class TestLivingLooks(unittest.TestCase):
-    ENTRIES = [
-        ("e0", [["AID_ブレザ"]], None, []),
-        ("e1", [["AID_ブレザ", "SID_冥界兵"], ["AID_ブレザ", "AID_ブレザ冥将"], ["PID_冥将_ブレザ"]], "ブレザ冥闘士", ["SID_冥界兵"]),
-        ("e2", [["AID_ドレイク"]], "ドレイク冥闘士", ["SID_冥界兵"]),
-        ("e3", [["AID_カイ", "SID_冥界兵"]], "カイ冥闘士", ["SID_冥界兵"]),
-    ]
-    FACES = [("FID_ブレザ冥闘士", 1), ("FID_ドレイク冥闘士", 1), ("FID_カイ冥闘士", 1)]
+class TestEditor(unittest.TestCase):
+    def test_round_trip(self):
+        data = person(ROWS)
+        self.assertEqual(ge.Editor(data).build(), data)
 
-    def look(self, data):
+    def test_insert_moves_what_follows(self):
+        data = person(ROWS)
+        b = gb.GameDataBin(data)
+        t = b.table("個人")
+        recs = list(t.records())
+        e = ge.Editor(data)
+        e.insert(recs[3], bytes(0x40))                          # 0x40 bytes before Lind's base record
+        e.set_ptr(recs[3], "PID_新しい")                        # a new pointer to a new string, in the inserted bytes
+        e.set_ptr(recs[3] + 8, "PID_カイ")                      # one to a string the pool already has
+        e.add_label(recs[3], "新しい")
+        out = gb.GameDataBin(e.build())
+        t2 = out.table("個人")
+        # the table still counts its records from the same first one: the inserted bytes now sit where Lind's base record was, and
+        # their key field was just pointed at PID_カイ
+        self.assertEqual([out.key(r) for r in t2.records()][:4], [r[0] for r in ROWS][:3] + ["PID_カイ"])
+        self.assertEqual(out.string(recs[3]), "PID_新しい")
+        self.assertEqual(out.string(recs[3] + 8), "PID_カイ")
+        moved = recs[3] + 0x40
+        self.assertEqual(out.key(moved), "PID_リンド")
+        self.assertEqual(out.string(moved + 0x20), "MPID_Lindo")
+        self.assertIn((recs[3], "新しい"), out.labels)
+        self.assertIn((moved, "PID_リンド"), out.labels)        # labels at or after the insert move
+        self.assertEqual(len(out.ptrs), len(b.ptrs) + 2)
+
+
+class TestUnderworldForms(unittest.TestCase):
+    ENTRIES = [
+        ("e0", [["AID_ブレザ"]], None, []),                                                     # Breza's plain look: no portrait
+        ("e1", [["AID_ブレザ", "SID_冥界兵"], ["PID_冥将_ブレザ"]], "ブレザ冥闘士", ["SID_冥界兵"]),   # the template
+        ("e2", [["AID_ドレイク"]], "ドレイク冥闘士", ["SID_冥界兵"]),                              # Drake: Underworld only
+        ("e3", [["AID_カイ"]], "カイ", []),
+        ("e4", [["AID_カイ", "SID_冥界兵"]], "カイ冥闘士", ["SID_冥界兵"]),                       # Cai: has both
+        ("e5", [["AID_コウカ"]], "コウカ", []),                                                 # Hong Hua: living only
+        ("e6", [["AID_アラゴ"]], "アラゴ大王冥闘士", ["SID_冥界兵"]),
+    ]
+    FACES = [("FID_ブレザ冥闘士", "Bre0", "168", 1), ("FID_ドレイク冥闘士", "Dra0", "166", 1), ("FID_カイ", "Kai0", "017", 0),
+             ("FID_カイ冥闘士", "Kai9", "017", 1), ("FID_コウカ", "Kou0", "107", 0), ("FID_アラゴ大王冥闘士", "Mme9", "170", 1)]
+    LOOKS = ["ブレザ冥闘士", "ドレイク冥闘士", "アラゴ大王冥闘士"]
+
+    def read(self, data):
         b = gb.GameDataBin(data)
         t, f = b.table("アセットテーブル"), b.table("容姿情報")
 
         def strs(at):
             n, arr = b.u32(at) & 0xFFFF, b.ptr(at + 8)
             return [] if arr is None else [b.string(arr + 8 * i) for i in range(n)]
-
-        entries = {}
+        entries = []
         for r in t.records():
             word, arr = b.u32(r + 0x20), b.ptr(r + 0x28)
-            alts = [strs(arr + 16 * i) for i in range(word & 0xFFFF)]
-            entries[b.key(r)] = (alts, strs(r + 0x40))
-        return entries, {b.key(r): b.d[gb.HEADER + r + 0x20] for r in f.records()}
+            entries.append(([strs(arr + 16 * i) for i in range(word & 0xFFFF)], b.string(r + 0x30), strs(r + 0x40)))
+        faces = {b.key(r): (b.string(r + 0x20), b.string(r + 0x28), b.d[gb.HEADER + r + 0x30]) for r in f.records()}
+        return b, entries, faces
 
     def test_builder(self):
-        entries, faces = self.look(asset_table(self.ENTRIES, self.FACES))
-        self.assertEqual(entries["e1"], (self.ENTRIES[1][1], ["SID_冥界兵"]))
-        self.assertEqual(faces["FID_ブレザ冥闘士"], 1)
+        _, entries, faces = self.read(asset_table(self.ENTRIES, self.FACES))
+        self.assertEqual(entries[1], (self.ENTRIES[1][1], "ブレザ冥闘士", ["SID_冥界兵"]))
+        self.assertEqual(faces["FID_カイ冥闘士"], ("Kai9", "017", 1))
 
-    def test_breza(self):
+    def test_forms(self):
         data = asset_table(self.ENTRIES, self.FACES)
-        out, changes = ru.apply_assets(data, ["ブレザ冥闘士"])
-        self.assertEqual(len(out), len(data))
-        entries, faces = self.look(out)
-        self.assertEqual(entries["e1"], ([["AID_ブレザ"], ["AID_ブレザ", "AID_ブレザ冥将"], ["PID_冥将_ブレザ"]], []))
-        self.assertEqual(faces, {"FID_ブレザ冥闘士": 0, "FID_ドレイク冥闘士": 1, "FID_カイ冥闘士": 1})
-        before = self.look(data)[0]
-        for k in ("e0", "e2", "e3"):
-            self.assertEqual(entries[k], before[k])
-        self.assertEqual(changes, ["FID_ブレザ冥闘士: no tint", "ブレザ冥闘士: AID_ブレザ", "ブレザ冥闘士: living model"])
-        self.assertEqual(ru.apply_assets(out, ["ブレザ冥闘士"])[1], [])          # already living: nothing more to do
+        out, changes = ru.apply_assets(data, self.LOOKS, ["コウカ", "カイ"])
+        b, entries, faces = self.read(out)
+        # the living looks: a new untinted portrait entry each; plain looks point at it, without the Underworld keyword
+        self.assertEqual(faces["FID_ブレザ"], ("Bre0", "168", 0))
+        self.assertEqual(faces["FID_ドレイク"], ("Dra0", "166", 0))
+        self.assertEqual(faces["FID_アラゴ大王"], ("Mme0", "170", 0))                      # the generic voice's dry set
+        self.assertEqual(entries[0], ([["AID_ブレザ"]], "ブレザ", []))
+        self.assertEqual(entries[2], ([["AID_ドレイク"]], "ドレイク", []))
+        self.assertEqual(entries[1], (self.ENTRIES[1][1], "ブレザ冥闘士", ["SID_冥界兵"]))  # Breza's Underworld entry stays
+        self.assertEqual(faces["FID_ブレザ冥闘士"], ("Bre0", "168", 1))                     # and so does his tinted portrait
+        # Hong Hua gets an Underworld form; Cai already has one
+        self.assertEqual(faces["FID_コウカ冥闘士"], ("Kou0", "107", 1))
+        self.assertNotIn("FID_カイ冥闘士冥闘士", faces)
+        added = entries[len(self.ENTRIES):]
+        self.assertEqual(added, [([["AID_ドレイク", "SID_冥界兵"]], "ドレイク冥闘士", ["SID_冥界兵"]),
+                                 ([["AID_アラゴ", "SID_冥界兵"]], "アラゴ大王冥闘士", ["SID_冥界兵"]),
+                                 ([["AID_コウカ", "SID_冥界兵"]], "コウカ冥闘士", ["SID_冥界兵"])])
+        self.assertIn("AID_カイ: skipped", changes)
+        # numbering, labels, counts
+        f = b.table("容姿情報")
+        recs = list(f.records())
+        self.assertEqual([b.u32(r + 0x10) for r in recs], [0x10000 | i for i in range(len(recs))])
+        self.assertEqual(sorted(b.u32(r + 0x14) >> 16 for r in recs), list(range(3, 3 + len(recs))))
+        self.assertEqual({n for _, n in b.labels if n.startswith("FID_")}, set(faces))
+        # the rest of the file reads as before
+        b0 = gb.GameDataBin(data)
+        self.assertEqual([b0.key(r) for r in b0.table("容姿情報").records()], [b.key(r) for r in recs][:len(self.FACES)])
 
-    def test_rename(self):
-        # Cohen: a pre-rendered menu portrait exists under FID_コーエン冥闘士, so the look is renamed and the menu draws it live
-        entries = self.ENTRIES + [("e4", [["AID_コーエン"]], "コーエン冥闘士", ["SID_冥界兵"])]
-        faces = self.FACES + [("FID_コーエン冥闘士", 1)]
-        data = asset_table(entries, faces)
-        out, changes = ru.apply_assets(data, ["コーエン冥闘士"])
-        self.assertEqual(len(out), len(data))
-        b = gb.GameDataBin(out)
-        t, f = b.table("アセットテーブル"), b.table("容姿情報")
-        self.assertEqual({b.key(r): b.string(r + 0x30) for r in t.records()}["e4"], "コーエン冥闘生")
-        self.assertEqual({b.key(r): b.d[gb.HEADER + r + 0x20] for r in f.records()}["FID_コーエン冥闘生"], 0)
-        self.assertEqual(sorted(changes[-2:]), ["FID_コーエン冥闘士 -> FID_コーエン冥闘生", "コーエン冥闘士 -> コーエン冥闘生"])   # pool order
-        self.assertEqual(ru.rename_strings(out)[1], [])                 # nothing left to rename
-        _, other = ru.rename_strings(person(ROWS))                       # a file without the name is left alone
-        self.assertEqual(other, [])
-
-    def test_plain_look_with_keyword(self):
-        # Drake's pattern: the plain look already names the portrait; only the keyword and the tint change
-        out, changes = ru.apply_assets(asset_table(self.ENTRIES, self.FACES), ["ドレイク冥闘士"])
-        entries, faces = self.look(out)
-        self.assertEqual(entries["e2"], ([["AID_ドレイク"]], []))
-        self.assertEqual(faces["FID_ドレイク冥闘士"], 0)
-        self.assertEqual(len(changes), 2)
-        self.assertTrue(ru.assets_line(changes, out).startswith("randomizer: AssetTable.bin: 2 changes (FID_ドレイク冥闘士: no tint; "))
+    def test_nothing_to_do(self):
+        data = asset_table(self.ENTRIES, self.FACES)
+        out, changes = ru.apply_assets(data, [], [])
+        self.assertEqual(out, data)
+        self.assertEqual(changes, [])
 
 
 if __name__ == "__main__":

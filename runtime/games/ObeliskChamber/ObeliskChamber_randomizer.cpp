@@ -13,8 +13,8 @@
 // Each is a pointer swapped for one already in the file, so the file keeps its size and layout. Records with no model at all are dragon
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
-// GameData/AssetTable.bin is edited too, so that some Underworld looks (kLivingLooks) show their wearer living: see edit_assets(); and
-// Profile.bin, for a look that is renamed (kRenamedLooks).
+// GameData/AssetTable.bin is edited too, and grows: living and Underworld forms (edit_assets()), so that every pool character looks
+// living in a living slot and Underworld in an Underworld one, as the vanilla lords do in Prologue Ch. 2.
 //
 // tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
@@ -29,6 +29,7 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "nxrt/config.h"
@@ -66,8 +67,9 @@ constexpr const char* kFieldGender = "\xe6\x80\xa7\xe5\x88\xa5";                
 constexpr const char* kFieldReuse = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe6\xb5\x81\xe7\x94\xa8";   // アセット流用
 constexpr const char* kFieldAid = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe3\x83\x95\xe3\x83\xa9\xe3\x82\xb0";   // アセットフラグ
 
-// AssetTable.bin: looks (容姿) whose wearer is shown living (randomize_units.py LIVING_LOOKS): the pool characters whose plain look is
-// Underworld only.
+// AssetTable.bin (randomize_units.py LIVING_LOOKS, UNDERWORLD_FORMS). The engine gives Underworld Army units the keyword SID_冥界兵, and a
+// look entry "AID_x & SID_冥界兵" then gives them their Underworld look. The pool characters whose plain look is Underworld only (Breza,
+// King Arago, Hanno, Vandahl, Drake, Cohen, Mahadu) get a living look for their plain one and keep the Underworld one:
 const char* const kLivingLooks[] = {
     "\xe3\x83\x96\xe3\x83\xac\xe3\x82\xb6\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // ブレザ冥闘士 (Breza)
     "\xe3\x82\xa2\xe3\x83\xa9\xe3\x82\xb4\xe5\xa4\xa7\xe7\x8e\x8b\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // アラゴ大王冥闘士 (Arago)
@@ -77,12 +79,88 @@ const char* const kLivingLooks[] = {
     "\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // コーエン冥闘士 (Cohen)
     "\xe3\x83\x9e\xe3\x83\x8f\xe3\x83\x9e\xe3\x83\x89\xe3\x82\xa5\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // マハマドゥ冥闘士 (Mahadu)
 };
-// Living looks that also have a pre-rendered menu portrait (Layout/Textures/Face*.arc, by FID_* name) with the Underworld tint baked in:
-// renamed in AssetTable.bin and Profile.bin (expression overrides) so that the menu misses the image and draws the portrait live.
-// randomize_units.py RENAMED_LOOKS. Same length in UTF-8, so in place.
-const char* const kRenamedLooks[][2] = {
-    {"\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab", "\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe7\x94\x9f"},   // コーエン冥闘士 -> コーエン冥闘生 (Cohen)
+// The pool characters with no Underworld form, by asset key (AID_<x>), in Person.bin's order: each gets one
+const char* const kUnderworldForms[] = {
+    "\xe3\x83\x94\xe3\x83\xbc\xe3\x83\x86\xe3\x83\xab",   // ピーテル
+    "\xe3\x82\xa6\xe3\x83\xab\xe3\x82\xbf\xe3\x83\xb3\xe3\x83\x89",   // ウルタンド
+    "\xe3\x83\x9e\xe3\x82\xaf\xe3\x82\xb7\xe3\x83\xa0",   // マクシム
+    "\xe3\x82\xb4\xe3\x83\xa9\xe3\x82\xa4\xe3\x82\xa2\xe3\x82\xb9",   // ゴライアス
+    "\xe3\x83\x80\xe3\x83\xb3\xe3\x83\x86",   // ダンテ
+    "\xe3\x82\xa8\xe3\x82\xb9\xe3\x83\xa1\xe3\x83\xa9\xe3\x83\xab\xe3\x83\x80",   // エスメラルダ
+    "\xe3\x83\x9f\xe3\x82\xab\xe3\x82\xa8\xe3\x83\xa9",   // ミカエラ
+    "\xe3\x82\xaa\xe3\x83\xab\xe3\x83\x98\xe3\x83\xab",   // オルヘル
+    "\xe3\x83\x87\xe3\x82\xa3\xe3\x82\xa8\xe3\x82\xb4",   // ディエゴ
+    "\xe3\x83\xad\xe3\x83\xac\xe3\x83\x83\xe3\x82\xbf",   // ロレッタ
+    "\xe3\x82\xbb\xe3\x83\x86\xe3\x82\xb9",   // セテス
+    "\xe3\x83\x8b\xe3\x83\x8d",   // ニネ
+    "\xe3\x83\xaa\xe3\x83\xaa\xe3\x82\xa2\xe3\x83\xb3",   // リリアン
+    "\xe3\x83\xa9\xe3\x82\xa4\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x80\xe3\x83\xbc",   // ライサンダー
+    "\xe3\x83\xab\xe3\x83\xab\xe3\x83\x87\xe3\x82\xa3\xe3\x83\xa4\xe3\x83\xbc",   // ルルディヤー
+    "\xe3\x82\xb7\xe3\x83\xa2\xe3\x83\xb3",   // シモン
+    "\xe3\x83\x95\xe3\x82\xa3\xe3\x82\xa2\xe3\x83\x8a",   // フィアナ
+    "\xe3\x82\xb7\xe3\x83\xad\xe3\x83\x83\xe3\x82\xb3",   // シロッコ
+    "\xe3\x82\xaa\xe3\x83\xaa\xe3\x83\xb3\xe3\x83\x94\xe3\x82\xa2",   // オリンピア
+    "\xe3\x83\xa0\xe3\x82\xa6",   // ムウ
+    "\xe3\x83\x8a\xe3\x82\xb8\xe3\x83\xa3",   // ナジャ
+    "\xe3\x83\x80\xe3\x82\xa4\xe3\x83\x88\xe3\x82\xa6",   // ダイトウ
+    "\xe3\x83\x8f\xe3\x83\xab\xe3\x83\xb4\xe3\x82\xa3\xe3\x83\xb3",   // ハルヴィン
+    "\xe3\x82\xb3\xe3\x82\xa6\xe3\x82\xab",   // コウカ
+    "\xe3\x83\x88\xe3\x83\xad\xe3\x82\xa4\xe3\x82\xa2",   // トロイア
+    "\xe3\x82\xbd\xe3\x83\x86\xe3\x82\xa3\xe3\x82\xb9",   // ソティス
+    "\xe3\x83\x95\xe3\x82\xa9\xe3\x83\x88\xe3\x83\x8a",   // フォトナ
+    "\xe3\x83\xa6\xe3\x83\xbb\xe3\x83\x95\xe3\x82\xa1\xe3\x82\xb9",   // ユ・ファス
+    "\xe3\x83\xa9\xe3\x82\xa4\xe3\x83\xa9\xe3\x83\xbc",   // ライラー
+    "\xe3\x82\xa4\xe3\x82\xb7\xe3\x82\xa8\xe3\x83\x88",   // イシエト
+    "\xe3\x82\xbd\xe3\x83\xac\xe3\x83\xab",   // ソレル
+    "\xe3\x82\xb8\xe3\x83\xa5\xe3\x83\xa9",   // ジュラ
+    "\xe3\x83\x9e\xe3\x83\xbc\xe3\x82\xba",   // マーズ
+    "\xe3\x82\xb9\xe3\x83\x9f\xe3\x83\xab\xe3\x83\x8e\xe3\x82\xb9",   // スミルノス
+    "\xe3\x82\xaf\xe3\x83\xac\xe3\x83\xbc\xe3\x83\xab",   // クレール
+    "\xe3\x82\xab\xe3\x83\xbc\xe3\x83\xa9",   // カーラ
+    "\xe3\x82\xa2\xe3\x82\xa6\xe3\x83\xad\xe3\x83\xa9",   // アウロラ
+    "\xe3\x82\xb0\xe3\x82\xb6\xe3\x83\xa9\xe3\x83\xb3",   // グザラン
+    "\xe3\x83\xa8\xe3\x83\xbc\xe3\x82\xab\xe3\x82\xa4",   // ヨーカイ
+    "\xe3\x82\xa4\xe3\x82\xaa",   // イオ
+    "\xe3\x83\x9a\xe3\x83\x9a",   // ペペ
+    "\xe3\x83\x8e\xe3\x82\xaf\xe3\x83\x81\xe3\x83\xa5\xe3\x83\xa9",   // ノクチュラ
+    "\xe3\x82\xbd\xe3\x83\x95\xe3\x82\xa3\xe3\x82\xa2",   // ソフィア
+    "\xe3\x82\xab\xe3\x82\xbf\xe3\x83\xbc\xe3\x83\x8b\xe3\x83\xa3",   // カターニャ
+    "\xe3\x83\x8c\xe3\x83\x87\xe3\x82\xa3\xe3\x83\xbc\xe3\x83\x8c",   // ヌディーヌ
+    "\xe3\x82\xb6\xe3\x83\xbc\xe3\x82\xb3\xe3\x83\x8d",   // ザーコネ
+    "\xe3\x83\x9e\xe3\x82\xb8\xe3\x83\xbc\xe3\x83\x87",   // マジーデ
+    "\xe3\x83\x99\xe3\x83\xb3\xe3\x83\x87\xe3\x82\xa3\xe3\x83\x83\xe3\x83\x84",   // ベンディッツ
+    "\xe3\x82\xa4\xe3\x83\x8b\xe3\x82\xaa\xe3\x83\x8b",   // イニオニ
+    "\xe3\x82\xb8\xe3\x83\xa3\xe3\x82\xb9\xe3\x83\x9f\xe3\x83\xb3",   // ジャスミン
+    "\xe3\x82\xa2\xe3\x83\xac\xe3\x82\xad\xe3\x82\xb5\xe3\x83\xb3\xe3\x83\x89\xe3\x83\xa9",   // アレキサンドラ
+    "\xe3\x83\x8c\xe3\x83\x83\xe3\x83\x84\xe3\x82\xa9",   // ヌッツォ
+    "\xe3\x82\xbb\xe3\x83\xb3\xe3\x83\x88\xe3\x83\xaa\xe3\x82\xaa\xe3\x83\xb3",   // セントリオン
+    "\xe3\x82\xa2\xe3\x82\xb9\xe3\x83\xaf\xe3\x83\xb3",   // アスワン
+    "\xe3\x82\xaf\xe3\x83\xac\xe3\x82\xaa\xe3\x83\x96\xe3\x83\xad\xe3\x82\xb9",   // クレオブロス
+    "\xe3\x83\x9f\xe3\x83\xa5\xe3\x82\xbd\xe3\x83\xb3",   // ミュソン
+    "\xe3\x83\x8d\xe3\x82\xa4\xe3\x82\xb5\xe3\x83\xb3",   // ネイサン
+    "\xe3\x82\xad\xe3\x83\xaa\xe3\x83\xbc\xe3\x82\xaf",   // キリーク
+    "\xe3\x82\xad\xe3\x83\xad\xe3\x82\xa4\xe3\x82\xab",   // キロイカ
+    "\xe3\x82\xa2\xe3\x83\xb3\xe3\x83\x8a",   // アンナ
+    "\xe3\x82\xb0\xe3\x83\xa9\xe3\x83\x87\xe3\x82\xa3\xe3\x82\xa6\xe3\x82\xb9",   // グラディウス
+    "\xe3\x82\xaf\xe3\x83\xa9\xe3\x83\x97\xe3\x82\xab",   // クラプカ
+    "\xe3\x82\xbf\xe3\x83\x9b\xe3\x82\xa6\xe3\x83\x8b\xe3\x82\xa2",   // タホウニア
+    "\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x88\xe3\x83\xbc\xe3\x83\xab",   // カストール
+    "\xe3\x83\x8e\xe3\x83\xa0\xe3\x83\xb4\xe3\x82\xa7\xe3\x83\x87",   // ノムヴェデ
+    "\xe3\x83\xad\xe3\x83\xb3",   // ロン
+    "\xe3\x82\xac\xe3\x83\xb3\xe3\x82\xb7\xe3\x83\xb3",   // ガンシン
+    "\xe3\x82\xbc\xe3\x83\x8e\xe3\x83\xb3",   // ゼノン
+    "\xe3\x82\xab\xe3\x83\xbc\xe3\x83\xab",   // カール
+    "\xe3\x83\x93\xe3\x82\xb8\xe3\x83\xa7\xe3\x82\xa6",   // ビジョウ
+    "\xe3\x83\x99\xe3\x83\xa9\xe3\x83\x95\xe3\x82\xa3",   // ベラフィ
+    "\xe3\x82\xac\xe3\x83\x96\xe3\x83\xaa\xe3\x82\xa8\xe3\x83\xab",   // ガブリエル
+    "\xe3\x82\xaa\xe3\x83\xab\xe3\x83\x95\xe3\x82\xa7\xe3\x82\xa6\xe3\x82\xb9",   // オルフェウス
+    "\xe3\x82\xab\xe3\x82\xbf\xe3\x83\xaa\xe3\x83\x8a",   // カタリナ
+    "\xe3\x83\x8f\xe3\x83\xb3\xe3\x83\x8b\xe3\x83\x90\xe3\x83\xab",   // ハンニバル
 };
+constexpr const char* kUnderworldSuffix = "\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab";                // 冥闘士
+constexpr const char* kTemplateLook = "\xe3\x83\x96\xe3\x83\xac\xe3\x82\xb6\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab";   // ブレザ冥闘士
+constexpr const char* kTemplateAid = "AID_\xe3\x83\x96\xe3\x83\xac\xe3\x82\xb6";                  // AID_ブレザ
+constexpr const char* kFieldVoice = "\xe3\x83\x9c\xe3\x82\xa4\xe3\x82\xb9";                       // ボイス
 constexpr const char* kUnderworld = "SID_\xe5\x86\xa5\xe7\x95\x8c\xe5\x85\xb5";                     // SID_冥界兵
 constexpr const char* kTableAssets = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe3\x83\x86\xe3\x83\xbc\xe3\x83\x96\xe3\x83\xab";   // アセットテーブル
 constexpr const char* kTableFaces = "\xe5\xae\xb9\xe5\xa7\xbf\xe6\x83\x85\xe5\xa0\xb1";                // 容姿情報
@@ -143,7 +221,7 @@ public:
         const char* name;
     };
     const std::vector<Label>& labels() const { return labels_; }
-    size_t strings() const { return strings_; }   // file offset of the string pool, which runs to the end of the file
+    uint32_t data_size() const { return dsz_; }
 
 private:
     uint32_t rd32(size_t at) const {
@@ -165,7 +243,7 @@ private:
 
 // A flat table (depth 1) found by its label: its records and its schema
 struct Table {
-    uint64_t first = 0, schema = 0;
+    uint64_t obj = 0, first = 0, schema = 0;   // the table object (its label's offset), its first record, its schema
     uint32_t rec_size = 0, count = 0, nfields = 0;
     uint64_t rec(uint32_t i) const { return first + uint64_t(rec_size) * i; }
 };
@@ -181,6 +259,7 @@ bool find_table(const Bin& b, const char* name, Table* t) {
         t->schema = b.u64(desc + 24);
         t->count = b.u32(l.at + 0x10) >> 16;
         t->first = b.u64(l.at + 0x28);
+        t->obj = l.at;
         return t->rec_size >= 0x20 && b.has(t->first, uint64_t(t->rec_size) * t->count) && b.has(t->schema, 0x20ull * t->nfields);
     }
     return false;
@@ -404,121 +483,320 @@ void edit_person(const NxModFile* file, void*) {
 
 bool match_person(const std::string& key) { return key == "/gamedata/person.bin"; }
 
-// Each string of the pool that is `old`, or ends in "_" + old (FID_コーエン冥闘士, ニコ_コーエン冥闘士), spelled with `new` instead.
-// Only the pool changes, in place: every pointer still points where it did. randomize_units.py rename_strings() is the same.
-void rename_strings(const Bin& b, std::vector<uint8_t>& out, std::vector<std::string>* changes) {
-    for (size_t at = b.strings(); at < out.size();) {
-        const auto nul = std::find(out.begin() + static_cast<std::ptrdiff_t>(at), out.end(), uint8_t(0));
-        const size_t end = static_cast<size_t>(nul - out.begin());
-        const std::string text(reinterpret_cast<const char*>(out.data() + at), end - at);
-        for (const auto& r : kRenamedLooks) {
-            const std::string old = r[0], now = r[1];
-            if (old.size() != now.size()) continue;
-            const bool whole = text == old;
-            const bool tail = text.size() > old.size() && text.compare(text.size() - old.size(), old.size(), old) == 0 &&
-                              text[text.size() - old.size() - 1] == '_';
-            if (!whole && !tail) continue;
-            const std::string renamed = text.substr(0, text.size() - old.size()) + now;
-            std::memcpy(out.data() + at, renamed.data(), renamed.size());
-            changes->push_back(text + " -> " + renamed);
+// ---- growing a container: tools/gamedata/gamedata_edit.py Editor, step for step (both must give the same bytes) -------------------------
+// insert() puts raw bytes into the data at a data offset; every pointer-list entry, pointer value and label at or after it moves.
+// set_ptr() makes a u64 a pointer, to a data offset or to a string (reused from the pool when there, else appended in first-use order);
+// new pointers go after the file's own in the pointer list (which the files keep unsorted). build() lays it all out again: pointers
+// into the strings move with the pool.
+class Grow {
+public:
+    // `d` is a file Bin::open accepted
+    Grow(const uint8_t* d, size_t n) {
+        uint32_t dsz = 0, nptr = 0, nlab = 0;
+        std::memcpy(&dsz, d + 4, 4), std::memcpy(&nptr, d + 8, 4), std::memcpy(&nlab, d + 12, 4);
+        head_.assign(d, d + kHeader);
+        data_.assign(d + kHeader, d + kHeader + dsz);
+        const size_t rel = kHeader + dsz, strings = rel + 8ull * nptr + 8ull * nlab;
+        pool_.assign(d + strings, d + n);
+        for (uint32_t i = 0; i < nptr; ++i) {
+            uint64_t p = 0, v = 0;
+            std::memcpy(&p, d + rel + 8ull * i, 8);
+            std::memcpy(&v, data_.data() + p, 8);
+            Val val;
+            if (v < dsz) val.kind = Val::Data, val.v = v;
+            else val.kind = Val::Pool, val.v = v + kHeader - strings;
+            put(p, val);
         }
-        at = end + 1;
+        for (uint32_t i = 0; i < nlab; ++i) {
+            uint32_t at = 0, name = 0;
+            std::memcpy(&at, d + rel + 8ull * nptr + 8ull * i, 4), std::memcpy(&name, d + rel + 8ull * nptr + 8ull * i + 4, 4);
+            labels_.push_back({at, name});
+        }
+        for (size_t i = 0; i < pool_.size();) {
+            const size_t end = static_cast<size_t>(std::find(pool_.begin() + static_cast<std::ptrdiff_t>(i), pool_.end(), uint8_t(0)) -
+                                                   pool_.begin());
+            index_.emplace(std::string(reinterpret_cast<const char*>(pool_.data() + i), end - i), i);
+            i = end + 1;
+        }
     }
-}
+    std::vector<uint8_t>& data() { return data_; }
+    uint32_t u32(uint64_t at) const {
+        uint32_t v = 0;
+        std::memcpy(&v, data_.data() + at, 4);
+        return v;
+    }
+    void set_u32(uint64_t at, uint32_t v) { std::memcpy(data_.data() + at, &v, 4); }
 
-std::string join(const std::vector<std::string>& v) {
-    std::string list;
-    for (const std::string& c : v) list += (list.empty() ? "" : "; ") + c;
-    return list;
-}
+    void insert(uint64_t at, const std::vector<uint8_t>& raw) {
+        const uint64_t n = raw.size();
+        data_.insert(data_.begin() + static_cast<std::ptrdiff_t>(at), raw.begin(), raw.end());
+        auto mv = [&](uint64_t o) { return o >= at ? o + n : o; };
+        std::unordered_map<uint64_t, Val> vals;
+        for (uint64_t& p : order_) {
+            Val v = vals_.at(p);
+            if (v.kind == Val::Data) v.v = mv(v.v);
+            p = mv(p);
+            vals.emplace(p, std::move(v));
+        }
+        vals_ = std::move(vals);
+        for (auto& l : labels_) l.first = static_cast<uint32_t>(mv(l.first));
+        for (auto& l : new_labels_) l.first = mv(l.first);
+    }
+    void set_ptr(uint64_t at, uint64_t target) {
+        Val v;
+        v.kind = Val::Data, v.v = target;
+        put(at, v);
+    }
+    void set_ptr(uint64_t at, const std::string& text) { put(at, string_ref(text)); }
+    void copy_ptr(uint64_t at, uint64_t from) { put(at, vals_.at(from)); }
+    void add_label(uint64_t at, const std::string& text) {
+        string_ref(text);
+        new_labels_.push_back({at, text});
+    }
 
-// ---- living looks: AssetTable.bin ------------------------------------------------------------------------------------------------------
-// For each look L in kLivingLooks, in place (randomize_units.py apply_assets() is the same, step for step):
-//     容姿情報 FID_<L>                       特殊 1 (the Underworld tint on the portrait) -> 0
-//     アセットテーブル entries with 容姿 = L    a 条件 alternative "AID_x & SID_冥界兵" -> "AID_x", so the plain look gets the portrait
-//                                           (Breza's had it only under the Underworld conditions, so whoever wore him got the generic
-//                                           one); a キーワード list of just SID_冥界兵 (the undead model) -> empty
-// Each is a count or a byte, so the file keeps its size and layout.
+    std::vector<uint8_t> build() {
+        std::vector<uint8_t> pool = pool_;
+        std::unordered_map<std::string, size_t> new_at;
+        for (const std::string& t : new_strings_) {
+            new_at.emplace(t, pool.size());
+            pool.insert(pool.end(), t.begin(), t.end());
+            pool.push_back(0);
+        }
+        std::vector<std::pair<uint64_t, uint32_t>> labels;
+        for (const auto& l : labels_) labels.push_back({l.first, l.second});
+        for (const auto& l : new_labels_) {
+            const Val v = string_ref(l.second);
+            labels.push_back({l.first, static_cast<uint32_t>(v.kind == Val::Pool ? v.v : new_at.at(v.text))});
+        }
+        std::stable_sort(labels.begin(), labels.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+        const uint64_t dsz = data_.size(), strings = kHeader + dsz + 8ull * order_.size() + 8ull * labels.size();
+        std::vector<uint8_t> out(head_);
+        out.insert(out.end(), data_.begin(), data_.end());
+        for (uint64_t p : order_) {
+            const Val& v = vals_.at(p);
+            const uint64_t value = v.kind == Val::Data ? v.v : v.kind == Val::Pool ? strings - kHeader + v.v : strings - kHeader + new_at.at(v.text);
+            std::memcpy(out.data() + kHeader + p, &value, 8);
+        }
+        for (uint64_t p : order_) out.insert(out.end(), reinterpret_cast<const uint8_t*>(&p), reinterpret_cast<const uint8_t*>(&p) + 8);
+        for (const auto& l : labels) {
+            const uint32_t at = static_cast<uint32_t>(l.first);
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&at), reinterpret_cast<const uint8_t*>(&at) + 4);
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&l.second), reinterpret_cast<const uint8_t*>(&l.second) + 4);
+        }
+        out.insert(out.end(), pool.begin(), pool.end());
+        const uint32_t hdr[4] = {static_cast<uint32_t>(out.size()), static_cast<uint32_t>(dsz), static_cast<uint32_t>(order_.size()),
+                                 static_cast<uint32_t>(labels.size())};
+        std::memcpy(out.data(), hdr, sizeof hdr);
+        return out;
+    }
+
+private:
+    struct Val {
+        enum Kind { Data, Pool, New } kind = Data;
+        uint64_t v = 0;      // a data offset (Data) or an offset into the pool (Pool)
+        std::string text;    // New: a string appended to the pool
+    };
+    void put(uint64_t at, const Val& v) {
+        if (vals_.find(at) == vals_.end()) order_.push_back(at);
+        vals_[at] = v;
+    }
+    Val string_ref(const std::string& text) {
+        Val v;
+        const auto it = index_.find(text);
+        if (it != index_.end()) {
+            v.kind = Val::Pool, v.v = it->second;
+            return v;
+        }
+        if (std::find(new_strings_.begin(), new_strings_.end(), text) == new_strings_.end()) new_strings_.push_back(text);
+        v.kind = Val::New, v.text = text;
+        return v;
+    }
+    std::vector<uint8_t> head_, data_, pool_;
+    std::vector<uint64_t> order_;                          // pointer offsets, in pointer-list order
+    std::unordered_map<uint64_t, Val> vals_;
+    std::vector<std::pair<uint32_t, uint32_t>> labels_;    // the file's: (data offset, name offset in the pool)
+    std::vector<std::pair<uint64_t, std::string>> new_labels_;
+    std::unordered_map<std::string, size_t> index_;        // text -> its first occurrence in the pool
+    std::vector<std::string> new_strings_;
+};
+
+// ---- living and Underworld forms: AssetTable.bin ---------------------------------------------------------------------------------------
+// randomize_units.py apply_assets(), step for step (its docstring says what and why):
+//   1. each look U of kLivingLooks, L = U without 冥闘士, x its character: a new portrait entry FID_L (a copy of FID_U, 特殊 0; a voice
+//      code ending in 9 ends in 0 instead); the plain look entry "AID_x" gets 容姿 L and loses a keyword list of just SID_冥界兵; and,
+//      unless there is one, a new look entry "AID_x & SID_冥界兵" -> U with that keyword.
+//   2. each AID_x of kUnderworldForms, L its plain look, U = L + 冥闘士: a new portrait entry FID_U (a copy of FID_L, 特殊 1) and a new
+//      look entry "AID_x & SID_冥界兵" -> U with the keyword.
+// New portrait entries follow the last of 容姿情報 (labelled), new look entries the last of アセットテーブル (copies of the vanilla
+// "AID_ブレザ & SID_冥界兵" entry), their condition lists the end of the data.
 void edit_assets(const NxModFile* file, void*) {
     Bin b;
     Table assets, faces;
-    uint32_t f_cond = 0, f_look = 0, f_kw = 0, f_special = 0;
-    if (!b.open(file->data, file->size) || !find_table(b, kTableAssets, &assets) || !find_table(b, kTableFaces, &faces) ||
-        !find_field(b, assets, kFieldCond, 16, &f_cond) || !find_field(b, assets, kFieldLook, 16, &f_look) ||
-        !find_field(b, assets, kFieldKeywords, 16, &f_kw) || !find_field(b, faces, kFieldSpecial, 1, &f_special)) {
+    uint32_t f_cond = 0, f_look = 0, f_kw = 0, f_voice = 0, f_special = 0;
+    if (!b.open(file->data, file->size) || !find_table(b, kTableAssets, &assets) || !find_table(b, kTableFaces, &faces) || !faces.count ||
+        !assets.count || !find_field(b, assets, kFieldCond, 16, &f_cond) || !find_field(b, assets, kFieldLook, 16, &f_look) ||
+        !find_field(b, assets, kFieldKeywords, 16, &f_kw) || !find_field(b, faces, kFieldVoice, 8, &f_voice) ||
+        !find_field(b, faces, kFieldSpecial, 1, &f_special)) {
         NXLOG_W(kTag, "randomizer: %s: not the asset table the randomizer knows: left as it is", file->path);
         return;
     }
-    std::vector<uint8_t> out(file->data, file->data + file->size);
-    std::vector<std::string> changes;
-    // the strings of a string[] value: count in the low 16 bits of its first word, the array of string pointers at +8
+    using Strings = std::vector<std::string>;
+    auto str = [&](uint64_t at) -> std::string {
+        const char* s = b.string(at);
+        return s ? s : "";
+    };
     auto strings = [&](uint64_t at) {
-        std::vector<std::string> v;
+        Strings v;
         if (!b.is_ptr(at + 8)) return v;
         const uint64_t arr = b.u64(at + 8);
-        for (uint32_t i = 0, n = b.u32(at) & 0xFFFF; i < n; ++i) {
-            const char* s = b.string(arr + 8ull * i);
-            v.push_back(s ? s : "");
-        }
+        for (uint32_t i = 0, n = b.u32(at) & 0xFFFF; i < n; ++i) v.push_back(str(arr + 8ull * i));
         return v;
     };
-    auto set_count = [&](uint64_t at, uint16_t n) { std::memcpy(out.data() + kHeader + at, &n, 2); };   // inside the data: b.has vouched
-    for (const char* look : kLivingLooks) {
-        const std::string fid = std::string("FID_") + look;
-        for (uint32_t i = 0; i < faces.count; ++i) {
-            const uint64_t rec = faces.rec(i);
-            const char* key = b.string(rec + 8);
-            if (key && fid == key && b.u8(rec + f_special) == 1) {
-                out[kHeader + rec + f_special] = 0;
-                changes.push_back(fid + ": no tint");
-            }
-        }
-        for (uint32_t i = 0; i < assets.count; ++i) {
-            const uint64_t rec = assets.rec(i);
-            const char* l = b.string(rec + f_look);
-            if (!l || std::strcmp(l, look) != 0) continue;
+    std::vector<uint64_t> entries;
+    std::vector<std::vector<Strings>> conds;
+    for (uint32_t i = 0; i < assets.count; ++i) {
+        const uint64_t rec = assets.rec(i);
+        entries.push_back(rec);
+        std::vector<Strings> alts;
+        if (b.is_ptr(rec + f_cond + 8)) {
             const uint32_t word = b.u32(rec + f_cond);
-            if (b.is_ptr(rec + f_cond + 8)) {
-                const uint64_t arr = b.u64(rec + f_cond + 8);
-                for (uint32_t k = 0; k < (word & 0xFFFF); ++k) {
-                    const uint64_t e = arr + uint64_t(word >> 16) * k;
-                    if (!b.has(e, 16)) break;
-                    const std::vector<std::string> alt = strings(e);
-                    if (alt.size() == 2 && alt[0].rfind("AID_", 0) == 0 && alt[1] == kUnderworld) {
-                        set_count(e, 1);
-                        changes.push_back(std::string(look) + ": " + alt[0]);
-                    }
-                }
-            }
-            const std::vector<std::string> kw = strings(rec + f_kw);
-            if (kw.size() == 1 && kw[0] == kUnderworld) {
-                set_count(rec + f_kw, 0);
-                changes.push_back(std::string(look) + ": living model");
-            }
+            const uint64_t arr = b.u64(rec + f_cond + 8);
+            for (uint32_t k = 0; k < (word & 0xFFFF); ++k) alts.push_back(strings(arr + uint64_t(word >> 16) * k));
         }
+        conds.push_back(std::move(alts));
     }
-    rename_strings(b, out, &changes);
-    NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), join(changes).c_str(), fnv1a64(out));
-    if (!changes.empty()) file->replace(file, out.data(), out.size());
+    auto has_alt = [&](size_t i, const Strings& alt) { return std::find(conds[i].begin(), conds[i].end(), alt) != conds[i].end(); };
+    std::unordered_map<std::string, uint64_t> fids;
+    for (uint32_t i = 0; i < faces.count; ++i)
+        if (const char* k = b.string(faces.rec(i) + 8)) fids.emplace(k, faces.rec(i));
+    const std::string underworld = kUnderworld, suffix = kUnderworldSuffix;
+    int64_t tpl = -1;
+    for (size_t i = 0; i < entries.size() && tpl < 0; ++i)
+        if (str(entries[i] + f_look) == kTemplateLook && has_alt(i, {kTemplateAid, underworld})) tpl = static_cast<int64_t>(i);
+    auto plain_of = [&](const std::string& aid, bool need_look) -> int64_t {
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (has_alt(i, {aid}) && (!need_look || !str(entries[i] + f_look).empty())) return static_cast<int64_t>(i);
+        return -1;
+    };
+    auto has_underworld = [&](const std::string& aid) {
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (has_alt(i, {aid, underworld})) return true;
+        return false;
+    };
+
+    Grow e(file->data, file->size);
+    size_t changes = 0;
+    struct NewFace {
+        uint64_t src;
+        std::string key;
+        uint8_t special;
+        std::string voice;   // empty: keep the source's
+    };
+    std::vector<NewFace> new_faces;
+    std::vector<std::pair<std::string, std::string>> new_looks;   // (AID_x, look)
+    for (const char* look_c : kLivingLooks) {
+        const std::string look = look_c, living = look.substr(0, look.size() - suffix.size());
+        const auto src = fids.find("FID_" + look);
+        std::string aid;
+        for (size_t i = 0; i < entries.size() && aid.empty(); ++i)
+            if (str(entries[i] + f_look) == look)
+                for (const Strings& alt : conds[i])
+                    if (!alt.empty() && alt[0].rfind("AID_", 0) == 0) {
+                        aid = alt[0];
+                        break;
+                    }
+        const int64_t plain = aid.empty() ? -1 : plain_of(aid, false);
+        if (src == fids.end() || plain < 0 || fids.count("FID_" + living)) {
+            ++changes;   // skipped
+            continue;
+        }
+        const std::string voice = str(src->second + f_voice);
+        new_faces.push_back({src->second, "FID_" + living, 0,
+                             !voice.empty() && voice.back() == '9' ? voice.substr(0, voice.size() - 1) + "0" : std::string()});
+        const uint64_t prec = entries[static_cast<size_t>(plain)];
+        e.set_ptr(prec + f_look, living);
+        ++changes;
+        if (strings(prec + f_kw) == Strings{underworld}) {
+            e.set_u32(prec + f_kw, e.u32(prec + f_kw) & 0xFFFF0000u);
+            ++changes;
+        }
+        if (!has_underworld(aid)) new_looks.push_back({aid, look});
+    }
+    for (const char* stem : kUnderworldForms) {
+        const std::string aid = std::string("AID_") + stem;
+        const int64_t plain = plain_of(aid, true);
+        const std::string living = plain < 0 ? std::string() : str(entries[static_cast<size_t>(plain)] + f_look);
+        if (living.empty() || !fids.count("FID_" + living) || fids.count("FID_" + living + suffix) || has_underworld(aid)) {
+            ++changes;   // skipped
+            continue;
+        }
+        new_faces.push_back({fids.at("FID_" + living), "FID_" + living + suffix, 1, std::string()});
+        new_looks.push_back({aid, living + suffix});
+    }
+    if (!new_looks.empty() && tpl < 0) {
+        ++changes;   // no template look entry: no Underworld forms added
+        new_looks.clear();
+    }
+
+    std::unordered_map<std::string, uint64_t> labels;
+    for (const Bin::Label& l : b.labels()) labels[l.name] = l.at;
+    const uint64_t face_end = faces.rec(faces.count - 1) + faces.rec_size, look_end = assets.rec(assets.count - 1) + assets.rec_size,
+                   data_end = b.data_size();
+    std::vector<uint8_t> face_raw, look_raw, aux_raw(32 * new_looks.size(), 0);
+    for (const NewFace& f : new_faces) face_raw.insert(face_raw.end(), file->data + kHeader + f.src, file->data + kHeader + f.src + faces.rec_size);
+    if (!new_looks.empty()) {
+        const uint64_t t = entries[static_cast<size_t>(tpl)];
+        for (size_t i = 0; i < new_looks.size(); ++i)
+            look_raw.insert(look_raw.end(), file->data + kHeader + t, file->data + kHeader + t + assets.rec_size);
+    }
+    // in place first: the record counts of the two tables
+    e.set_u32(labels.at(kTableFaces) + 0x10, uint32_t(faces.count + new_faces.size()) << 16);
+    e.set_u32(labels.at(kTableAssets) + 0x10, uint32_t(assets.count + new_looks.size()) << 16);
+    // the inserts, from the end of the file down
+    e.insert(data_end, aux_raw);
+    e.insert(face_end, face_raw);
+    e.insert(look_end, look_raw);
+    auto now = [&](uint64_t at) {
+        return at + (at >= look_end ? look_raw.size() : 0) + (at >= face_end ? face_raw.size() : 0) + (at >= data_end ? aux_raw.size() : 0);
+    };
+    uint32_t face_row = 0, look_row = 0;
+    for (uint32_t i = 0; i < faces.count; ++i) face_row = std::max(face_row, b.u32(faces.rec(i) + 0x14) >> 16);
+    for (uint32_t i = 0; i < assets.count; ++i) look_row = std::max(look_row, b.u32(assets.rec(i) + 0x14) >> 16);
+    for (size_t i = 0; i < new_faces.size(); ++i) {
+        const NewFace& f = new_faces[i];
+        const uint64_t rec = now(face_end) - face_raw.size() + uint64_t(faces.rec_size) * i;
+        e.set_u32(rec + 0x10, 0x10000u | uint32_t(faces.count + i));
+        e.set_u32(rec + 0x14, uint32_t(face_row + 1 + i) << 16);
+        for (uint32_t o = 0; o < faces.rec_size; o += 8)
+            if (b.is_ptr(f.src + o)) e.copy_ptr(rec + o, now(f.src + o));
+        e.set_ptr(rec + 8, f.key);
+        if (!f.voice.empty()) e.set_ptr(rec + f_voice, f.voice);
+        e.data()[rec + f_special] = f.special;
+        e.add_label(rec, f.key);
+        ++changes;
+    }
+    const uint64_t aux = now(data_end) - aux_raw.size();
+    for (size_t i = 0; i < new_looks.size(); ++i) {
+        const uint64_t rec = look_end + uint64_t(assets.rec_size) * i, lists = aux + 32 * i;
+        e.set_u32(rec + 0x10, 0x10000u | uint32_t(assets.count + i));
+        e.set_u32(rec + 0x14, uint32_t(look_row + 1 + i) << 16);
+        e.set_u32(rec + f_cond, 1u | 16u << 16);
+        e.set_ptr(rec + f_cond + 8, lists);
+        e.set_ptr(rec + f_look, new_looks[i].second);
+        e.set_u32(rec + f_kw, 1u | 8u << 16);
+        e.copy_ptr(rec + f_kw + 8, now(entries[static_cast<size_t>(tpl)] + f_kw + 8));
+        e.set_u32(lists, 2u | 8u << 16);
+        e.set_ptr(lists + 8, lists + 16);
+        e.set_ptr(lists + 16, new_looks[i].first);
+        e.set_ptr(lists + 24, underworld);
+        ++changes;
+    }
+    const std::vector<uint8_t> out = e.build();
+    NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (fnv1a64 %016" PRIx64 ")", changes, fnv1a64(out));
+    if (changes) file->replace(file, out.data(), out.size());
 }
 
 bool match_assets(const std::string& key) { return key == "/gamedata/assettable.bin"; }
-
-// Profile.bin: the expression overrides of a renamed look (会話表情 ニコ_コーエン冥闘士) follow the new name
-void edit_profile(const NxModFile* file, void*) {
-    Bin b;
-    if (!b.open(file->data, file->size)) {
-        NXLOG_W(kTag, "randomizer: %s: not a GameData table file: left as it is", file->path);
-        return;
-    }
-    std::vector<uint8_t> out(file->data, file->data + file->size);
-    std::vector<std::string> changes;
-    rename_strings(b, out, &changes);
-    NXLOG_I(kTag, "randomizer: Profile.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), join(changes).c_str(), fnv1a64(out));
-    if (!changes.empty()) file->replace(file, out.data(), out.size());
-}
-
-bool match_profile(const std::string& key) { return key == "/gamedata/profile.bin"; }
 
 uint64_t new_seed() {
     std::random_device rd;
@@ -549,10 +827,9 @@ void randomizer_install() {
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
-                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr) &&
-                    services::modapi::add_runtime_edit("randomizer", &match_profile, &edit_profile, nullptr);
+                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
-            ok ? " (GameData/Person.bin, AssetTable.bin and Profile.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
+            ok ? " (GameData/Person.bin and AssetTable.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
 }
 
 }  // namespace nxrt::games::ObeliskChamber
