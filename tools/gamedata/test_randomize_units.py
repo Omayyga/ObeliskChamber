@@ -445,6 +445,22 @@ class TestLivingLooks(unittest.TestCase):
         self.assertEqual(changes, ["FID_ブレザ冥闘士: no tint", "ブレザ冥闘士: AID_ブレザ", "ブレザ冥闘士: living model"])
         self.assertEqual(ru.apply_assets(out, ["ブレザ冥闘士"])[1], [])          # already living: nothing more to do
 
+    def test_rename(self):
+        # Cohen: a pre-rendered menu portrait exists under FID_コーエン冥闘士, so the look is renamed and the menu draws it live
+        entries = self.ENTRIES + [("e4", [["AID_コーエン"]], "コーエン冥闘士", ["SID_冥界兵"])]
+        faces = self.FACES + [("FID_コーエン冥闘士", 1)]
+        data = asset_table(entries, faces)
+        out, changes = ru.apply_assets(data, ["コーエン冥闘士"])
+        self.assertEqual(len(out), len(data))
+        b = gb.GameDataBin(out)
+        t, f = b.table("アセットテーブル"), b.table("容姿情報")
+        self.assertEqual({b.key(r): b.string(r + 0x30) for r in t.records()}["e4"], "コーエン冥闘生")
+        self.assertEqual({b.key(r): b.d[gb.HEADER + r + 0x20] for r in f.records()}["FID_コーエン冥闘生"], 0)
+        self.assertEqual(sorted(changes[-2:]), ["FID_コーエン冥闘士 -> FID_コーエン冥闘生", "コーエン冥闘士 -> コーエン冥闘生"])   # pool order
+        self.assertEqual(ru.rename_strings(out)[1], [])                 # nothing left to rename
+        _, other = ru.rename_strings(person(ROWS))                       # a file without the name is left alone
+        self.assertEqual(other, [])
+
     def test_plain_look_with_keyword(self):
         # Drake's pattern: the plain look already names the portrait; only the keyword and the tint change
         out, changes = ru.apply_assets(asset_table(self.ENTRIES, self.FACES), ["ドレイク冥闘士"])

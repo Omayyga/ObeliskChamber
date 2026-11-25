@@ -49,6 +49,10 @@ POOL = """
 # the Underworld tint. The pool characters whose plain look is Underworld only: Breza, King Arago, Hanno, Vandahl, Drake, Cohen, Mahadu.
 LIVING_LOOKS = ["ブレザ冥闘士", "アラゴ大王冥闘士", "ハンノ冥闘士", "ヴァンダル冥闘士", "ドレイク冥闘士", "コーエン冥闘士", "マハマドゥ冥闘士"]
 UNDERWORLD = "SID_冥界兵"
+# Living looks that also have a pre-rendered menu portrait (Layout/Textures/Face*.arc, by FID_* name) with the Underworld tint baked in:
+# the roster, item and profile screens show that image instead of drawing the portrait. Renaming the look (in AssetTable.bin and in the
+# expression overrides of Profile.bin) makes the menu miss it and draw the portrait live, untinted. Same length in UTF-8: in place.
+RENAMED_LOOKS = [("コーエン冥闘士", "コーエン冥闘生")]
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -222,7 +226,7 @@ def summary_line(changed, skipped, edited):
         len(changed), len(skipped), fnv1a64(edited))
 
 
-def apply_assets(data, looks=LIVING_LOOKS):
+def apply_assets(data, looks=LIVING_LOOKS, renames=RENAMED_LOOKS):
     """AssetTable.bin with each look in `looks` shown living, and a list of what changed. For a look L (e.g. ブレザ冥闘士):
 
         容姿情報 FID_<L>                      特殊 (1: the Underworld tint) -> 0
@@ -231,7 +235,7 @@ def apply_assets(data, looks=LIVING_LOOKS):
                                               just SID_冥界兵 (which makes the model undead) -> empty
 
     Every edit is a count or a byte in place: the file keeps its size and layout. The PID_冥将_* costume records that share an entry
-    show living too."""
+    show living too. Then the RENAMED_LOOKS renames (rename_strings())."""
     b = gamedata_bin.GameDataBin(bytes(data))
     out = bytearray(data)
     H = gamedata_bin.HEADER
@@ -268,11 +272,37 @@ def apply_assets(data, looks=LIVING_LOOKS):
             if strings(rec + f_kw) == [UNDERWORLD]:
                 set_count(rec + f_kw, 0)
                 changes.append("%s: living model" % look)
+    if renames:
+        out, renamed = rename_strings(bytes(out), renames)
+        changes += renamed
     return bytes(out), changes
 
 
+def rename_strings(data, renames=RENAMED_LOOKS):
+    """A GameData file with each string that is `old`, or ends in "_" + old (FID_コーエン冥闘士, ニコ_コーエン冥闘士), spelled with `new`
+    instead, and a list of the renamed strings. Only the string pool changes, in place: every pointer still points where it did."""
+    b = gamedata_bin.GameDataBin(bytes(data))
+    out = bytearray(data)
+    changes = []
+    at = b.strings
+    while at < len(data):
+        end = data.index(b"\0", at)
+        text = data[at:end].decode("utf-8", "replace")
+        for old, new in renames:
+            assert len(old.encode()) == len(new.encode())
+            if text == old or text.endswith("_" + old):
+                out[at:end] = (text[:len(text) - len(old)] + new).encode()
+                changes.append("%s -> %s" % (text, text[:len(text) - len(old)] + new))
+        at = end + 1
+    return bytes(out), changes
+
+
+def file_line(name, changes, edited):
+    return "randomizer: %s: %d changes (%s) (fnv1a64 %016x)" % (name, len(changes), "; ".join(changes), fnv1a64(edited))
+
+
 def assets_line(changes, edited):
-    return "randomizer: AssetTable.bin: %d changes (%s) (fnv1a64 %016x)" % (len(changes), "; ".join(changes), fnv1a64(edited))
+    return file_line("AssetTable.bin", changes, edited)
 
 
 def show_placements(romfs, names, person_before, edited):
@@ -303,6 +333,7 @@ def main(argv=None):
     ap.add_argument("--force", default="", help="as [fefw] randomize_force, e.g. Anh=Tro,Lin=Kou")
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
+    ap.add_argument("--o-profile", help="write the edited Profile.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
@@ -332,6 +363,14 @@ def main(argv=None):
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
                 fh.write(edited_assets)
+    profile = os.path.join(a.romfs, "GameData", "Profile.bin")
+    if os.path.exists(profile):
+        with open(profile, "rb") as fh:
+            edited_profile, changes = rename_strings(fh.read())
+        print(file_line("Profile.bin", changes, edited_profile))
+        if a.o_profile:
+            with open(a.o_profile, "wb") as fh:
+                fh.write(edited_profile)
     if a.o:
         with open(a.o, "wb") as fh:
             fh.write(edited)

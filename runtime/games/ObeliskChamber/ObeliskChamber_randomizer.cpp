@@ -13,7 +13,8 @@
 // Each is a pointer swapped for one already in the file, so the file keeps its size and layout. Records with no model at all are dragon
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
-// GameData/AssetTable.bin is edited too, so that some Underworld looks (kLivingLooks) show their wearer living: see edit_assets().
+// GameData/AssetTable.bin is edited too, so that some Underworld looks (kLivingLooks) show their wearer living: see edit_assets(); and
+// Profile.bin, for a look that is renamed (kRenamedLooks).
 //
 // tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
@@ -76,6 +77,12 @@ const char* const kLivingLooks[] = {
     "\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // コーエン冥闘士 (Cohen)
     "\xe3\x83\x9e\xe3\x83\x8f\xe3\x83\x9e\xe3\x83\x89\xe3\x82\xa5\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",   // マハマドゥ冥闘士 (Mahadu)
 };
+// Living looks that also have a pre-rendered menu portrait (Layout/Textures/Face*.arc, by FID_* name) with the Underworld tint baked in:
+// renamed in AssetTable.bin and Profile.bin (expression overrides) so that the menu misses the image and draws the portrait live.
+// randomize_units.py RENAMED_LOOKS. Same length in UTF-8, so in place.
+const char* const kRenamedLooks[][2] = {
+    {"\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab", "\xe3\x82\xb3\xe3\x83\xbc\xe3\x82\xa8\xe3\x83\xb3\xe5\x86\xa5\xe9\x97\x98\xe7\x94\x9f"},   // コーエン冥闘士 -> コーエン冥闘生 (Cohen)
+};
 constexpr const char* kUnderworld = "SID_\xe5\x86\xa5\xe7\x95\x8c\xe5\x85\xb5";                     // SID_冥界兵
 constexpr const char* kTableAssets = "\xe3\x82\xa2\xe3\x82\xbb\xe3\x83\x83\xe3\x83\x88\xe3\x83\x86\xe3\x83\xbc\xe3\x83\x96\xe3\x83\xab";   // アセットテーブル
 constexpr const char* kTableFaces = "\xe5\xae\xb9\xe5\xa7\xbf\xe6\x83\x85\xe5\xa0\xb1";                // 容姿情報
@@ -136,6 +143,7 @@ public:
         const char* name;
     };
     const std::vector<Label>& labels() const { return labels_; }
+    size_t strings() const { return strings_; }   // file offset of the string pool, which runs to the end of the file
 
 private:
     uint32_t rd32(size_t at) const {
@@ -396,6 +404,34 @@ void edit_person(const NxModFile* file, void*) {
 
 bool match_person(const std::string& key) { return key == "/gamedata/person.bin"; }
 
+// Each string of the pool that is `old`, or ends in "_" + old (FID_コーエン冥闘士, ニコ_コーエン冥闘士), spelled with `new` instead.
+// Only the pool changes, in place: every pointer still points where it did. randomize_units.py rename_strings() is the same.
+void rename_strings(const Bin& b, std::vector<uint8_t>& out, std::vector<std::string>* changes) {
+    for (size_t at = b.strings(); at < out.size();) {
+        const auto nul = std::find(out.begin() + static_cast<std::ptrdiff_t>(at), out.end(), uint8_t(0));
+        const size_t end = static_cast<size_t>(nul - out.begin());
+        const std::string text(reinterpret_cast<const char*>(out.data() + at), end - at);
+        for (const auto& r : kRenamedLooks) {
+            const std::string old = r[0], now = r[1];
+            if (old.size() != now.size()) continue;
+            const bool whole = text == old;
+            const bool tail = text.size() > old.size() && text.compare(text.size() - old.size(), old.size(), old) == 0 &&
+                              text[text.size() - old.size() - 1] == '_';
+            if (!whole && !tail) continue;
+            const std::string renamed = text.substr(0, text.size() - old.size()) + now;
+            std::memcpy(out.data() + at, renamed.data(), renamed.size());
+            changes->push_back(text + " -> " + renamed);
+        }
+        at = end + 1;
+    }
+}
+
+std::string join(const std::vector<std::string>& v) {
+    std::string list;
+    for (const std::string& c : v) list += (list.empty() ? "" : "; ") + c;
+    return list;
+}
+
 // ---- living looks: AssetTable.bin ------------------------------------------------------------------------------------------------------
 // For each look L in kLivingLooks, in place (randomize_units.py apply_assets() is the same, step for step):
 //     容姿情報 FID_<L>                       特殊 1 (the Underworld tint on the portrait) -> 0
@@ -461,13 +497,28 @@ void edit_assets(const NxModFile* file, void*) {
             }
         }
     }
-    std::string list;
-    for (const std::string& c : changes) list += (list.empty() ? "" : "; ") + c;
-    NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), list.c_str(), fnv1a64(out));
+    rename_strings(b, out, &changes);
+    NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), join(changes).c_str(), fnv1a64(out));
     if (!changes.empty()) file->replace(file, out.data(), out.size());
 }
 
 bool match_assets(const std::string& key) { return key == "/gamedata/assettable.bin"; }
+
+// Profile.bin: the expression overrides of a renamed look (会話表情 ニコ_コーエン冥闘士) follow the new name
+void edit_profile(const NxModFile* file, void*) {
+    Bin b;
+    if (!b.open(file->data, file->size)) {
+        NXLOG_W(kTag, "randomizer: %s: not a GameData table file: left as it is", file->path);
+        return;
+    }
+    std::vector<uint8_t> out(file->data, file->data + file->size);
+    std::vector<std::string> changes;
+    rename_strings(b, out, &changes);
+    NXLOG_I(kTag, "randomizer: Profile.bin: %zu changes (%s) (fnv1a64 %016" PRIx64 ")", changes.size(), join(changes).c_str(), fnv1a64(out));
+    if (!changes.empty()) file->replace(file, out.data(), out.size());
+}
+
+bool match_profile(const std::string& key) { return key == "/gamedata/profile.bin"; }
 
 uint64_t new_seed() {
     std::random_device rd;
@@ -498,9 +549,10 @@ void randomizer_install() {
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
-                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr);
+                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr) &&
+                    services::modapi::add_runtime_edit("randomizer", &match_profile, &edit_profile, nullptr);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
-            ok ? " (GameData/Person.bin and AssetTable.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
+            ok ? " (GameData/Person.bin, AssetTable.bin and Profile.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
 }
 
 }  // namespace nxrt::games::ObeliskChamber
