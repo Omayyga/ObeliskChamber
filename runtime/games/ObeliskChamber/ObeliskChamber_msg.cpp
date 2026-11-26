@@ -9,6 +9,10 @@
 // style (TSY1); ATO1 (attribute offsets, per attribute) is copied as it is. Another section (AOCM in this game: a 16-bit count, then a byte
 // a message) that holds one entry a message gets MID_Sys_Yes's again; otherwise it is copied as it is (logged). A file with an ATR1 string area after its records, or a label
 // table with another hash, is left as it is, and our dialog then falls back to the overlay's prompt.
+//
+// The unit randomizer adds names the same way (msg_names_install) to each language's Msg/<language>/Person.msbt.zst, after MPID_Leda:
+// Katarina, who is in its pool, has a name ID (MPID_Katarina) but no text in any language. A name starts with the control tags
+// MPID_Leda's text starts with (Spanish and Italian names begin with one).
 #include "ObeliskChamber_game.h"
 
 #include <zstd.h>
@@ -27,18 +31,34 @@
 namespace nxrt::games::ObeliskChamber {
 namespace {
 constexpr const char* kTag = "fefw.msg";
-constexpr const char* kAnchor = "MID_Sys_Yes";   // the yes / no dialogs' own label: the file every dialog can read
-
+enum class Lang { En, Zh, Ja, Ko };
 struct Msg {
     const char* label;
     const char* en;
     const char* zh;
+    const char* ja = nullptr;   // nullptr: the English text
+    const char* ko = nullptr;
+    const char* text(Lang l) const { return l == Lang::Zh ? zh : l == Lang::Ja && ja ? ja : l == Lang::Ko && ko ? ko : en; }
 };
 const Msg kMsgs[] = {
     {kQuitMid, "Quit the game?\nProgress since your last save will be lost.", "要退出游戏吗？\n上次存档之后的进度将会丢失。"},
 };
+// The randomizer's names (msg_names_install): Katarina is in its pool, and has a name ID but no text in any language
+const Msg kNames[] = {
+    {"MPID_Katarina", "Katarina", "卡塔琳娜", "カタリナ", "카타리나"},
+};
 
-std::atomic<int> g_files{0}, g_skipped{0};
+// One kind of edit: messages added after an anchor label (whose attributes and style they copy) in the files its match names
+struct Job {
+    const char* what;            // for the log
+    const char* anchor;
+    const Msg* msgs;
+    uint32_t count;
+    bool lead_tags;              // each text starts with the control tags the anchor's text starts with
+    std::atomic<int> files{0}, skipped{0};
+};
+Job g_system{"our messages", "MID_Sys_Yes", kMsgs, sizeof kMsgs / sizeof kMsgs[0], false};   // the yes / no dialogs' own label
+Job g_names{"the randomizer's names", "MPID_Leda", kNames, sizeof kNames / sizeof kNames[0], true};
 
 struct Rd {
     const uint8_t* p;
@@ -112,7 +132,7 @@ uint32_t label_hash(const std::string& s, uint32_t slots) {
 struct Section { char magic[5] = {}; size_t at = 0, size = 0; };   // at: the data (after the 16-byte section header)
 
 // The file with our messages added, or empty when it is not one to change (no anchor, ours already there, or a layout not handled).
-std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::string* why, std::string* notes = nullptr) {
+std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, Lang lang, const Job& job, std::string* why, std::string* notes = nullptr) {
     if (n < 0x20 || std::memcmp(p, "MsgStdBn", 8) != 0) { *why = "not an MSBT file"; return {}; }
     Rd r{p, n, p[8] == 0xfe && p[9] == 0xff};
     const int enc = p[0x0c];
@@ -161,11 +181,11 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
     if (!r.ok || slots == 0 || msgs == 0) return {};   // not a file we can read: left alone (the dialogs' file is checked below)
     int anchor = -1;
     for (const Label& l : labels) {
-        if (l.name == kAnchor) anchor = static_cast<int>(l.index);
-        for (const Msg& m : kMsgs)
-            if (l.name == m.label) { *why = "ours already there"; return {}; }
+        if (l.name == job.anchor) anchor = static_cast<int>(l.index);
+        for (uint32_t i = 0; i < job.count; ++i)
+            if (l.name == job.msgs[i].label) { *why = "ours already there"; return {}; }
     }
-    if (anchor < 0) return {};   // not the dialogs' file: nothing to say
+    if (anchor < 0) return {};   // not the file with the anchor: nothing to say
     if (hash_other) { *why = "the label table uses another hash"; return {}; }
     if (static_cast<uint32_t>(anchor) >= msgs) { *why = "the anchor's index is out of range"; return {}; }
     uint32_t attr_size = 0;
@@ -223,8 +243,24 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
     if (tsy && tsy->size != size_t(msgs) * 4) { *why = "TSY1 is not one entry a message"; return {}; }
     if (txt->size < 4 + size_t(msgs) * 4) { *why = "TXT2 too short"; return {}; }
 
-    const uint32_t add = sizeof kMsgs / sizeof kMsgs[0];
-    for (uint32_t i = 0; i < add; ++i) labels.push_back({kMsgs[i].label, msgs + i});
+    const uint32_t add = job.count;
+    for (uint32_t i = 0; i < add; ++i) labels.push_back({job.msgs[i].label, msgs + i});
+    // the control tags the anchor's text starts with (0x0E, group, type, parameter size in bytes, each a code unit; then the parameters)
+    std::vector<uint8_t> lead;
+    if (job.lead_tags) {
+        const size_t unit = enc == 1 ? 2 : enc == 2 ? 4 : 1;
+        const size_t a = txt->at + r.u32(txt->at + 4 + size_t(anchor) * 4);
+        const size_t z = uint32_t(anchor) + 1 < msgs ? txt->at + r.u32(txt->at + 8 + size_t(anchor) * 4) : txt->at + txt->size;
+        Rd t{p, z, r.be};
+        auto unit_at = [&](size_t at) -> uint32_t { return unit == 1 ? (at < z ? p[at] : 0u) : unit == 2 ? t.u16(at) : t.u32(at); };
+        size_t q = a;
+        while (q + 4 * unit <= z && unit_at(q) == 0x0e) {
+            const size_t len = 4 * unit + unit_at(q + 3 * unit);
+            if (q + len > z) break;
+            q += len;
+        }
+        if (a <= q && q <= n) lead.assign(p + a, p + q);
+    }
     Wr w{{}, r.be};
     w.b.assign(p, p + 0x20);
     auto section = [&](const char* magic, const std::vector<uint8_t>& data) {
@@ -282,7 +318,8 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
             d.b.insert(d.b.end(), p + s.at + 4 + size_t(msgs) * 4, p + s.at + s.size);
             for (uint32_t i = 0; i < add; ++i) {
                 d.put_u32(offs_at + i * 4, static_cast<uint32_t>(d.b.size()));
-                put_text(d, enc, zh ? kMsgs[i].zh : kMsgs[i].en);
+                d.b.insert(d.b.end(), lead.begin(), lead.end());
+                put_text(d, enc, job.msgs[i].text(lang));
             }
         } else if (std::strcmp(s.magic, "ATO1") != 0) {
             // A section this does not know (Fortune's Weave's System files have AOCM): one entry a message, with or without a count first,
@@ -293,19 +330,19 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, bool zh, std::stri
                 d.u32(msgs + add);
                 d.b.insert(d.b.end(), p + s.at + 4, p + s.at + s.size);
                 for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + 4 + anchor * stride, p + s.at + 4 + (anchor + 1) * stride);
-                if (notes) *notes += std::string(" ") + s.magic + ": a count and " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+                if (notes) *notes += std::string(" ") + s.magic + ": a count and " + std::to_string(stride) + " bytes a message, the anchor's copied;";
             } else if (s.size >= 2 && r.u16(s.at) == msgs && (s.size - 2) % msgs == 0 && (s.size - 2) / msgs >= 1 && (s.size - 2) / msgs <= 64) {
                 // a 16-bit count first (Fortune's Weave's AOCM: 1148 messages, one byte each)
                 const size_t stride = (s.size - 2) / msgs;
                 d.u16(static_cast<uint16_t>(msgs + add));
                 d.b.insert(d.b.end(), p + s.at + 2, p + s.at + s.size);
                 for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + 2 + anchor * stride, p + s.at + 2 + (anchor + 1) * stride);
-                if (notes) *notes += std::string(" ") + s.magic + ": a 16-bit count and " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+                if (notes) *notes += std::string(" ") + s.magic + ": a 16-bit count and " + std::to_string(stride) + " bytes a message, the anchor's copied;";
             } else if (s.size % msgs == 0 && s.size / msgs >= 1 && s.size / msgs <= 64) {
                 const size_t stride = s.size / msgs;
                 d.b.assign(p + s.at, p + s.at + s.size);
                 for (uint32_t i = 0; i < add; ++i) d.b.insert(d.b.end(), p + s.at + anchor * stride, p + s.at + (anchor + 1) * stride);
-                if (notes) *notes += std::string(" ") + s.magic + ": " + std::to_string(stride) + " bytes a message, MID_Sys_Yes's copied;";
+                if (notes) *notes += std::string(" ") + s.magic + ": " + std::to_string(stride) + " bytes a message, the anchor's copied;";
             } else {
                 d.b.assign(p + s.at, p + s.at + s.size);
                 if (notes) {
@@ -335,11 +372,18 @@ bool ends_with(const std::string& s, const char* tail) {
 bool match_msbt(const std::string& key) {
     return key.rfind("/msg/", 0) == 0 && (ends_with(key, "/system.msbt") || ends_with(key, "/system.msbt.zst"));
 }
-void edit_msbt(const NxModFile* f, void*) {
+bool match_person(const std::string& key) {
+    return key.rfind("/msg/", 0) == 0 && (ends_with(key, "/person.msbt") || ends_with(key, "/person.msbt.zst"));
+}
+void edit_msbt(const NxModFile* f, void* user) {
+    Job& job = *static_cast<Job*>(user);
     std::string path = f->path ? f->path : "", why;
     std::string lower = path;
     for (char& ch : lower) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    const bool zh = lower.find("zh") != std::string::npos;   // Msg/CNzh, Msg/TWzh
+    const Lang lang = lower.find("zh") != std::string::npos     ? Lang::Zh   // Msg/CNzh, Msg/TWzh
+                      : lower.find("/jpja/") != std::string::npos ? Lang::Ja
+                      : lower.find("/krko/") != std::string::npos ? Lang::Ko
+                                                                  : Lang::En;
     // zstd-compressed files (.msbt.zst): edited inside, compressed again
     const bool zst = f->size >= 4 && f->data[0] == 0x28 && f->data[1] == 0xb5 && f->data[2] == 0x2f && f->data[3] == 0xfd;
     std::vector<uint8_t> plain;
@@ -359,11 +403,11 @@ void edit_msbt(const NxModFile* f, void*) {
     const uint8_t* src = zst ? plain.data() : f->data;
     const size_t src_n = zst ? plain.size() : static_cast<size_t>(f->size);
     std::string notes;
-    std::vector<uint8_t> out = add_messages(src, src_n, zh, &why, &notes);
+    std::vector<uint8_t> out = add_messages(src, src_n, lang, job, &why, &notes);
     if (out.empty()) {
         if (!why.empty() && why != "not an MSBT file") {
-            g_skipped.fetch_add(1);
-            NXLOG_W(kTag, "%s: our messages not added (%s)", path.c_str(), why.c_str());
+            job.skipped.fetch_add(1);
+            NXLOG_W(kTag, "%s: %s not added (%s)", path.c_str(), job.what, why.c_str());
         }
         return;
     }
@@ -378,17 +422,22 @@ void edit_msbt(const NxModFile* f, void*) {
         out.swap(comp);
     }
     f->replace(f, out.data(), out.size());
-    if (g_files.fetch_add(1) == 0)
-        NXLOG_I(kTag, "%s: our messages added (%llu -> %zu bytes; other sections:%s); the other languages' files get them too", path.c_str(),
+    if (job.files.fetch_add(1) == 0)
+        NXLOG_I(kTag, "%s: %s added (%llu -> %zu bytes; other sections:%s); the other languages' files get them too", path.c_str(), job.what,
                 static_cast<unsigned long long>(f->size), out.size(), notes.empty() ? " none" : notes.c_str());
 }
 }  // namespace
 
 void msg_install() {
-    if (!services::modapi::add_runtime_edit("messages", &match_msbt, &edit_msbt, nullptr))
+    if (!services::modapi::add_runtime_edit("messages", &match_msbt, &edit_msbt, &g_system))
         NXLOG_W(kTag, "too late to add our messages: the System menu's Quit Game uses the overlay's prompt");
 }
 
-bool msg_ready() { return g_files.load() > 0; }
+void msg_names_install() {
+    if (!services::modapi::add_runtime_edit("randomizer", &match_person, &edit_msbt, &g_names))
+        NXLOG_W(kTag, "too late to add the randomizer's names: Katarina has none");
+}
+
+bool msg_ready() { return g_system.files.load() > 0; }
 
 }  // namespace nxrt::games::ObeliskChamber

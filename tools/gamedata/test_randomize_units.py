@@ -568,6 +568,19 @@ class TestCutscenes(unittest.TestCase):
         self.assertEqual(entries[len(self.ENTRIES):], [([["AID_レダ", "AID_カイ冥将"]], "レダ冥闘士本人", ["SID_冥界兵"]),
                                                        ([["AID_カイ", "AID_レダ冥将"]], "カイ冥闘士本人", ["SID_冥界兵"])])
 
+    def test_voiceless_replacement(self):
+        # Katarina has no voice: the portrait the cutscene names loses its voice too, and the copy keeps Leda's
+        faces = self.FACES + [("FID_カタリナ", None, "184", 5)]
+        entries = self.ENTRIES + [("e9", [["AID_カタリナ"]], "カタリナ", [])]
+        data = asset_table(entries, faces)
+        out, changes = ru.apply_assets(data, [], ["カタリナ"], {"AID_レダ": "AID_カタリナ"}, ["カイ冥闘士", "レダ冥闘士"])
+        b, _, got = self.read(out)
+        self.assertEqual(got["FID_レダ冥闘士"], (None, "184", 1))
+        self.assertEqual(got["FID_レダ冥闘士本人"], ("Led9", "023", 1))
+        self.assertEqual(got["FID_カタリナ冥闘士"], (None, "184", 1))
+        self.assertIn("FID_レダ冥闘士 shows カタリナ冥闘士", changes)
+        self.assertNotIn(next(r for r in b.table("容姿情報").records() if b.key(r) == "FID_レダ冥闘士") + 0x20, b.ptrs)
+
     def test_no_mapping(self):
         data = asset_table(self.ENTRIES, self.FACES)
         self.assertEqual(ru.apply_assets(data, [], [], None), (data, []))

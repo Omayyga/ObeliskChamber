@@ -576,6 +576,10 @@ public:
         for (const auto& p : pairs) vals.push_back(vals_.at(p.second));
         for (size_t i = 0; i < pairs.size(); ++i) put(pairs[i].first, vals[i]);
     }
+    // the u64 at `at` is no longer a pointer (it leaves the pointer list; its bytes stay)
+    void clear_ptr(uint64_t at) {
+        if (vals_.erase(at)) order_.erase(std::find(order_.begin(), order_.end(), at));
+    }
     void add_label(uint64_t at, const std::string& text) {
         string_ref(text);
         new_labels_.push_back({at, text});
@@ -655,7 +659,7 @@ private:
 //   2. each AID_x of kUnderworldForms, L its plain look, U = L + 冥闘士: a new portrait entry FID_U (a copy of FID_L, 特殊 1) and a new
 //      look entry "AID_x & SID_冥界兵" -> U with the keyword.
 //   3. each look U of kCutsceneFaces whose character x is replaced by r, V = r's Underworld look: a new portrait entry FID_U本人 (a copy
-//      of FID_U), every look entry showing U shows U本人, and FID_U takes the content of FID_V (all but its key).
+//      of FID_U), every look entry showing U shows U本人, and FID_U takes the content of FID_V (all but its key; no voice when V has none).
 //   4. each condition "AID_x & F" (F a chapter flag, AID_…冥将) of an entry that also has "AID_x & SID_冥界兵", x replaced by r: F
 //      becomes SID_冥界兵 there, and, once per F, a new look entry "AID_r & F" -> r's Underworld look (U本人 for a U of step 3).
 // New portrait entries follow the last of 容姿情報 (labelled), new look entries the last of アセットテーブル (copies of the vanilla
@@ -821,9 +825,7 @@ void edit_assets(const NxModFile* file, void*) {
         const std::string v = underworld_look(sw->second);
         NewFace src;
         const auto dst = fids.find("FID_" + u);
-        bool ok = !v.empty() && face_source(v, &src) && dst != fids.end() && !fids.count("FID_" + u + own);
-        for (uint32_t o = 0x20; ok && o < faces.rec_size; o += 8) ok = b.is_ptr(src.src + o) == b.is_ptr(dst->second + o);
-        if (!ok) {
+        if (v.empty() || !face_source(v, &src) || dst == fids.end() || fids.count("FID_" + u + own)) {
             ++changes;   // skipped
             continue;
         }
@@ -903,14 +905,18 @@ void edit_assets(const NxModFile* file, void*) {
         e.add_label(rec, f.key);
         ++changes;
     }
-    // 3, the overwrites: every source is read before any is written (a lord may play another lord)
+    // 3, the overwrites: every source is read before any is written (a lord may play another lord). A field the source has no pointer
+    // in (Katarina has no voice) stops being one.
     std::vector<std::pair<uint64_t, uint64_t>> copies;
+    std::vector<uint64_t> clears;
     for (const Overwrite& w : overwrite) {
         std::memcpy(e.data().data() + now(w.dst) + 0x20, file->data + kHeader + w.src.src + 0x20, faces.rec_size - 0x20);
         for (uint32_t o = 0x20; o < faces.rec_size; o += 8)
             if (b.is_ptr(w.src.src + o)) copies.push_back({now(w.dst) + o, now(w.src.src + o)});
+            else if (b.is_ptr(w.dst + o)) clears.push_back(now(w.dst) + o);
     }
     e.copy_ptrs(copies);
+    for (uint64_t at : clears) e.clear_ptr(at);
     for (const Overwrite& w : overwrite) {
         if (!w.src.voice.empty()) e.set_ptr(now(w.dst) + f_voice, w.src.voice);
         if (w.src.special >= 0) e.data()[now(w.dst) + f_special] = static_cast<uint8_t>(w.src.special);
@@ -971,6 +977,7 @@ void randomizer_install() {
                     err.c_str());
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
+    msg_names_install();   // Katarina's name: she has a name ID but no text (ObeliskChamber_msg.cpp)
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
                     services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),

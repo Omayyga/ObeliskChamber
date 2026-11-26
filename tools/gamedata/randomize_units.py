@@ -265,8 +265,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
        特殊 1 (the tint), and a new look entry "AID_x & SID_冥界兵" -> U with the keyword.
     3. Each look U of `cutscene_faces` (カイ冥闘士), x the character whose "AID_x & SID_冥界兵" entry shows it, when x's slot is replaced
        by r: V = r's Underworld look (after 1 and 2). A new portrait entry FID_U本人, a copy of FID_U; every look entry showing U
-       shows U本人 instead; and FID_U takes the content of FID_V (all but its key: voice, portrait, tint, eye and face centres), so the
-       cutscene line that names U shows r.
+       shows U本人 instead; and FID_U takes the content of FID_V (all but its key: voice, portrait, tint, eye and face centres; no
+       voice when V has none), so the cutscene line that names U shows r.
     4. Each condition "AID_x & F" (F = AID_…冥将, a chapter flag) of an entry that also has "AID_x & SID_冥界兵", when x's slot is
        replaced by r: F in the condition becomes SID_冥界兵 (the condition now repeats the other), and, once per F, a new look entry
        "AID_r & F" -> r's Underworld look (as in 3, U本人 for a U of step 3) with the keyword.
@@ -361,8 +361,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         v = underworld_look(swaps[aid])
         src = face_source(v) if v else None
         dst = fids.get("FID_" + u)
-        if src is None or dst is None or "FID_" + u + OWN_COPY in fids or any(
-                (src[0] + o in b.ptrs) != (dst + o in b.ptrs) for o in range(0x20, faces.rec_size, 8)):
+        if src is None or dst is None or "FID_" + u + OWN_COPY in fids:
             changes.append("%s: skipped" % u)
             continue
         new_faces.append((dst, "FID_" + u + OWN_COPY, None, None))
@@ -430,12 +429,19 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             e.data[rec + f_special] = special
         e.add_label(rec, key)
         changes.append("%s (%s)" % (key, "copy" if special is None else "tint" if special else "no tint"))
-    # 3, the overwrites: every source is read before any is written (a lord may play another lord)
-    copies = []
+    # 3, the overwrites: every source is read before any is written (a lord may play another lord). A field the source has no
+    # pointer in (Katarina has no voice) stops being one.
+    copies, clears = [], []
     for dst, u, v, (src, special, voice) in overwrite:
         e.data[now(dst) + 0x20:now(dst) + faces.rec_size] = b.d[H + src + 0x20:H + src + faces.rec_size]
-        copies += [(now(dst) + o, now(src + o)) for o in range(0x20, faces.rec_size, 8) if src + o in b.ptrs]
+        for o in range(0x20, faces.rec_size, 8):
+            if src + o in b.ptrs:
+                copies.append((now(dst) + o, now(src + o)))
+            elif dst + o in b.ptrs:
+                clears.append(now(dst) + o)
     e.copy_ptrs(copies)
+    for at in clears:
+        e.clear_ptr(at)
     for dst, u, v, (src, special, voice) in overwrite:
         if voice is not None:
             e.set_ptr(now(dst) + f_voice, voice)
