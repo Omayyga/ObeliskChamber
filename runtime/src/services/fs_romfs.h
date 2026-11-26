@@ -18,10 +18,12 @@ namespace nxrt::services::fs {
 
 // Edits of files while the image is laid out (code mods, nxrt/mod_api.h edit_file). A file whose path `wants` accepts is read whole and
 // handed to `edit`; when that returns true the image serves the changed bytes from memory, with their new size. Paths are image
-// paths ("/GameData/Job.bin"). Files over max_size are left alone.
+// paths ("/GameData/Job.bin"). Files over max_size are left alone. Files are edited in path order, except that those `late` accepts
+// (when it is set) come after all the others, in path order too: an edit that uses what another file's edit worked out.
 struct RomfsEdits {
     std::function<bool(const std::string& path)> wants;
     std::function<bool(const std::string& path, std::vector<uint8_t>& data)> edit;
+    std::function<bool(const std::string& path)> late;
     uint64_t max_size = 256ull << 20;
 };
 

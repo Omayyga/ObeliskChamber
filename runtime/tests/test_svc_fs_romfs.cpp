@@ -837,6 +837,30 @@ NXTEST(romfs_edits_replace_content_and_size) {
                      {"/z.bin", false, z}});
 }
 
+// Files are edited in path order, but those `late` names come after all the others (the randomizer's AssetTable.bin edit needs the
+// mapping its Person.bin edit makes); a file that is not wanted is never asked about.
+NXTEST(romfs_edits_late_files_last) {
+    TempTree base;
+    write_host(base.root, {{"/GameData/AssetTable.bin", false, pattern(10, 1)}, {"/GameData/Person.bin", false, pattern(10, 2)},
+                           {"/Msg/A.bin", false, pattern(10, 3)}, {"/a.bin", false, pattern(10, 4)}});
+    RomfsEdits edits;
+    std::vector<std::string> asked, late_asked;
+    edits.wants = [](const std::string& path) { return path != "/a.bin"; };
+    edits.late = [&](const std::string& path) {
+        late_asked.push_back(path);
+        return path == "/GameData/AssetTable.bin";
+    };
+    edits.edit = [&](const std::string& path, std::vector<uint8_t>&) {
+        asked.push_back(path);
+        return false;
+    };
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(base.root), &err, {}, &edits));
+    CHECK(asked == (std::vector<std::string>{"/GameData/Person.bin", "/Msg/A.bin", "/GameData/AssetTable.bin"}));
+    CHECK(late_asked == (std::vector<std::string>{"/GameData/AssetTable.bin", "/GameData/Person.bin", "/Msg/A.bin"}));
+}
+
 // An overlay file where the game has a folder replaces the folder.
 NXTEST(romfs_overlay_file_replaces_folder) {
     TempTree base, mod;

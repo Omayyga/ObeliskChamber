@@ -418,11 +418,18 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
     std::sort(dirs.begin(), dirs.end(), by_path);
     std::sort(files.begin(), files.end(), by_path);
 
-    // Edits by code mods: the file as it stands after the overlays, changed in memory. Its size is the edited one from here on.
+    // Edits by code mods: the file as it stands after the overlays, changed in memory. Its size is the edited one from here on. In path
+    // order, the files edits->late names last.
     uint32_t edited = 0;
     if (edits && edits->wants && edits->edit) {
+        std::vector<Node*> order;
+        std::vector<Node*> late;
         for (Node* f : files) {
             if (!edits->wants(f->path)) continue;
+            (edits->late && edits->late(f->path) ? late : order).push_back(f);
+        }
+        order.insert(order.end(), late.begin(), late.end());
+        for (Node* f : order) {
             if (f->size > edits->max_size) {
                 NXLOG_W("fs", "romfs: %s is too large to be edited by a mod (%llu bytes): served as it is", f->path.c_str(),
                         static_cast<unsigned long long>(f->size));

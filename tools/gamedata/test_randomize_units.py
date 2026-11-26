@@ -516,5 +516,67 @@ class TestUnderworldForms(unittest.TestCase):
         self.assertEqual(changes, [])
 
 
+class TestCutscenes(unittest.TestCase):
+    """Steps 3 and 4 of apply_assets: the portraits Prologue Ch. 2's cutscene names, and the chapter flags (AID_x冥将)."""
+    read = TestUnderworldForms.read
+    ENTRIES = [
+        ("e0", [["AID_ブレザ"]], None, []),
+        ("e1", [["AID_ブレザ", "SID_冥界兵"], ["PID_冥将_ブレザ"]], "ブレザ冥闘士", ["SID_冥界兵"]),   # the template
+        ("e2", [["AID_カイ"]], "カイ", []),
+        ("e3", [["AID_カイ", "SID_冥界兵"], ["AID_カイ", "AID_カイ冥将"], ["PID_冥将_カイ"]], "カイ冥闘士", ["SID_冥界兵"]),
+        ("e4", [["AID_レダ"]], "レダ", []),
+        ("e5", [["AID_レダ", "SID_冥界兵"], ["AID_レダ", "AID_レダ冥将"]], "レダ冥闘士", ["SID_冥界兵"]),
+        ("e6", [], "レダ冥闘士", ["SID_冥界兵"]),                                                 # a named look entry (レダ冥将)
+        ("e7", [["AID_コウカ"]], "コウカ", []),                                                 # Hong Hua: living only
+        ("e8", [["AID_ダグザ", "AID_ダグザ竜_冥将"]], "ダグザ竜冥闘士", []),                         # no SID_冥界兵 beside it: not a flag
+    ]
+    FACES = [("FID_ブレザ冥闘士", "Bre0", "168", 1), ("FID_カイ", "Kai0", "017", 0), ("FID_カイ冥闘士", "Kai9", "017", 1),
+             ("FID_レダ", "Led0", "023", 0), ("FID_レダ冥闘士", "Led9", "023", 1), ("FID_コウカ", "Kou0", "107", 0)]
+
+    def test_lord_played_by_another(self):
+        data = asset_table(self.ENTRIES, self.FACES)
+        swaps = {"AID_カイ": "AID_コウカ", "AID_コウカ": "AID_ダグザ", "AID_ダグザ": "AID_カイ"}
+        out, changes = ru.apply_assets(data, [], ["コウカ"], swaps, ["カイ冥闘士", "レダ冥闘士"])
+        b, entries, faces = self.read(out)
+        # the cutscene's FID_カイ冥闘士 shows Hong Hua's new Underworld portrait; Cai's own, for his look in battle, is a copy
+        self.assertEqual(faces["FID_カイ冥闘士"], ("Kou0", "107", 1))
+        self.assertEqual(faces["FID_カイ冥闘士本人"], ("Kai9", "017", 1))
+        self.assertEqual(faces["FID_コウカ冥闘士"], ("Kou0", "107", 1))
+        self.assertEqual(entries[3], ([["AID_カイ", "SID_冥界兵"], ["AID_カイ", "SID_冥界兵"], ["PID_冥将_カイ"]], "カイ冥闘士本人",
+                                      ["SID_冥界兵"]))
+        # Leda's slot is not replaced: her portrait, flag and looks stay
+        self.assertEqual(faces["FID_レダ冥闘士"], ("Led9", "023", 1))
+        self.assertNotIn("FID_レダ冥闘士本人", faces)
+        self.assertEqual(entries[5:7], [(self.ENTRIES[5][1], "レダ冥闘士", ["SID_冥界兵"]), ([], "レダ冥闘士", ["SID_冥界兵"])])
+        self.assertEqual(entries[8], (self.ENTRIES[8][1], "ダグザ竜冥闘士", []))
+        # whoever plays Cai is Underworld while his flag is set
+        self.assertEqual(entries[len(self.ENTRIES):], [([["AID_コウカ", "SID_冥界兵"]], "コウカ冥闘士", ["SID_冥界兵"]),
+                                                       ([["AID_コウカ", "AID_カイ冥将"]], "コウカ冥闘士", ["SID_冥界兵"])])
+        self.assertIn("FID_カイ冥闘士 shows コウカ冥闘士", changes)
+        self.assertEqual({n for _, n in b.labels if n.startswith("FID_")}, set(faces))
+
+    def test_lords_swap(self):
+        # Cai and Leda play each other: each portrait shows the other's vanilla one, read before either was written
+        data = asset_table(self.ENTRIES, self.FACES)
+        out, changes = ru.apply_assets(data, [], [], {"AID_カイ": "AID_レダ", "AID_レダ": "AID_カイ"}, ["カイ冥闘士", "レダ冥闘士"])
+        b, entries, faces = self.read(out)
+        self.assertEqual(faces["FID_カイ冥闘士"], ("Led9", "023", 1))
+        self.assertEqual(faces["FID_レダ冥闘士"], ("Kai9", "017", 1))
+        self.assertEqual(faces["FID_カイ冥闘士本人"], ("Kai9", "017", 1))
+        self.assertEqual(faces["FID_レダ冥闘士本人"], ("Led9", "023", 1))
+        self.assertEqual([x[1] for x in entries[3:7]], ["カイ冥闘士本人", "レダ", "レダ冥闘士本人", "レダ冥闘士本人"])
+        self.assertEqual(entries[len(self.ENTRIES):], [([["AID_レダ", "AID_カイ冥将"]], "レダ冥闘士本人", ["SID_冥界兵"]),
+                                                       ([["AID_カイ", "AID_レダ冥将"]], "カイ冥闘士本人", ["SID_冥界兵"])])
+
+    def test_no_mapping(self):
+        data = asset_table(self.ENTRIES, self.FACES)
+        self.assertEqual(ru.apply_assets(data, [], [], None), (data, []))
+
+    def test_asset_swaps(self):
+        p = ru.Person(person(ROWS))
+        kai, tro, lin = p.find("Kai"), p.find("Tro"), p.find("Lin")
+        self.assertEqual(ru.asset_swaps([(kai, tro), (tro, kai), (lin, lin)]), {"AID_カイ": "AID_トロイア", "AID_トロイア": "AID_カイ"})
+
+
 if __name__ == "__main__":
     unittest.main()

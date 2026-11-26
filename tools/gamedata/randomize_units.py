@@ -60,6 +60,18 @@ UNDERWORLD_FORMS = """
     イニオニ ジャスミン アレキサンドラ ヌッツォ セントリオン アスワン クレオブロス ミュソン ネイサン キリーク キロイカ アンナ グラディウス クラプカ タホウニア カストール ノムヴェデ ロン ガンシン ゼノン カール ビジョウ
     ベラフィ ガブリエル オルフェウス カタリナ ハンニバル
 """.split()
+# Underworld looks the cutscenes name. Prologue Ch. 2's cutscene and death quotes (Msg/<language>/0_ISM_Battle.msbt, Die.msbt) give
+# the four lords' lines an explicit portrait: one of these 容姿 names, in each line's attributes (ATR1, the same in every language). No
+# other line names an Underworld portrait. The portrait entry FID_<name> is made to show the Underworld portrait of the character who
+# now plays that lord, and the look entries that named it, the lord's own Underworld look in battle, take a copy of it, FID_<name>本人.
+CUTSCENE_FACES = ["カイ冥闘士", "ディートリヒ冥闘士", "セオドラ冥闘士", "レダ冥闘士"]
+OWN_COPY = "本人"
+# Chapter flags. A vanilla Underworld look entry may also match "AID_x & AID_x冥将": a flag the story timeline sets while x's slot is
+# Underworld (GameData/Timeline_Part0_Ism.bin sets AID_リンド冥将 and the four lords' for Prologue Ch. 2 and clears them after), so that x
+# is Underworld everywhere then, cutscenes included, where no unit carries SID_冥界兵. The flag is named after the slot, the look after
+# whoever plays it: each such condition is made to need SID_冥界兵 instead, and a new look entry "AID_<replacement> & AID_x冥将" gives
+# the replacement's Underworld look.
+FLAG_SUFFIX = "冥将"
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -91,9 +103,10 @@ def fnv1a64(data):
 class Character:
     """An identifier and its base record: the values a replacement hands over."""
 
-    def __init__(self, ident, rec, key, name_ptr, aid_ptr, key_ptr, gender, mpid):
+    def __init__(self, ident, rec, key, name_ptr, aid_ptr, key_ptr, gender, mpid, aid=None):
         self.ident, self.rec, self.key = ident, rec, key
         self.name_ptr, self.aid_ptr, self.key_ptr, self.gender, self.mpid = name_ptr, aid_ptr, key_ptr, gender, mpid
+        self.aid = aid          # the model's asset key, AID_カイ
 
     def label(self):
         """How the log names a character: identifier and name ID, e.g. Kai(Kai), Tro(Troja)."""
@@ -114,7 +127,8 @@ class Person:
             if self.b.ptr(rec + self.f[F_AID]) is None or self.b.ptr(rec + self.f[F_REUSE]) is not None:
                 continue
             c = Character(ident, rec, self.b.key(rec), self.b.ptr(rec + self.f[F_NAME]), self.b.ptr(rec + self.f[F_AID]),
-                          self.b.ptr(rec + 8), self.b.d[gamedata_bin.HEADER + rec + self.f[F_GENDER]], self.b.string(rec + self.f[F_NAME]))
+                          self.b.ptr(rec + 8), self.b.d[gamedata_bin.HEADER + rec + self.f[F_GENDER]], self.b.string(rec + self.f[F_NAME]),
+                          self.b.string(rec + self.f[F_AID]))
             self.chars.append(c)
             self.by_ident[ident] = c
 
@@ -221,6 +235,11 @@ def apply(data, mapping):
     return bytes(out), changed, skipped
 
 
+def asset_swaps(mapping):
+    """{original's asset key: replacement's}, for apply_assets(): AID_リンド -> AID_ソレル when Lind's slot wears Solel."""
+    return {o.aid: r.aid for o, r in mapping if o.ident != r.ident and o.aid and r.aid}
+
+
 def mapping_lines(seed, mapping):
     """The log's mapping: a line with the seed and the number of pairs, then the pairs, PAIRS_PER_LINE to a line."""
     pairs = ["%s -> %s" % (o.label(), r.label()) for o, r in mapping]
@@ -233,9 +252,9 @@ def summary_line(changed, skipped, edited):
         len(changed), len(skipped), fnv1a64(edited))
 
 
-def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
+def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, cutscene_faces=CUTSCENE_FACES):
     """AssetTable.bin with living and Underworld forms, and a list of what changed. The file grows (gamedata_edit.Editor); the runtime
-    does the same in edit_assets(), step for step, so the bytes must match.
+    does the same in edit_assets(), step for step, so the bytes must match. `swaps` is asset_swaps(mapping): steps 3 and 4 need it.
 
     1. Each look U in `looks` (e.g. ドレイク冥闘士), L = U without 冥闘士 (ドレイク), x its character's asset key (AID_ドレイク):
          a new portrait entry FID_L, a copy of FID_U with 特殊 0 (no Underworld tint; a voice code ending in 9, the Underworld set,
@@ -244,6 +263,13 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
          keyword, so that an Underworld slot still shows him as the vanilla game does.
     2. Each AID_x of `forms`: L = the 容姿 of its plain look entry, U = L + 冥闘士: a new portrait entry FID_U, a copy of FID_L with
        特殊 1 (the tint), and a new look entry "AID_x & SID_冥界兵" -> U with the keyword.
+    3. Each look U of `cutscene_faces` (カイ冥闘士), x the character whose "AID_x & SID_冥界兵" entry shows it, when x's slot is replaced
+       by r: V = r's Underworld look (after 1 and 2). A new portrait entry FID_U本人, a copy of FID_U; every look entry showing U
+       shows U本人 instead; and FID_U takes the content of FID_V (all but its key: voice, portrait, tint, eye and face centres), so the
+       cutscene line that names U shows r.
+    4. Each condition "AID_x & F" (F = AID_…冥将, a chapter flag) of an entry that also has "AID_x & SID_冥界兵", when x's slot is
+       replaced by r: F in the condition becomes SID_冥界兵 (the condition now repeats the other), and, once per F, a new look entry
+       "AID_r & F" -> r's Underworld look (as in 3, U本人 for a U of step 3) with the keyword.
 
     New portrait entries go after the last of 容姿情報 (with a label each, as every entry has), new look entries after the last of
     アセットテーブル: later entries win, so an Underworld entry overrides the plain one, as Cai's does. A new look entry is a copy of
@@ -253,6 +279,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
     assets, faces = b.table("アセットテーブル"), b.table("容姿情報")
     f_cond, f_look, f_kw = (assets.field(n).off for n in ("条件", "容姿", "キーワード"))
     f_voice, f_special = faces.field("ボイス").off, faces.field("特殊").off
+    swaps = swaps or {}
     changes = []
 
     def strings(at):
@@ -276,8 +303,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
     def has_underworld(aid):
         return any([aid, UNDERWORLD] in conds[r] for r in entries)
 
-    new_faces = []      # (source portrait entry, new key, 特殊, voice or None to keep)
-    new_looks = []      # (AID_x, look)
+    new_faces = []      # (source portrait entry, new key, 特殊 or None to keep, voice or None to keep)
+    new_looks = []      # (AID_x, second condition, look)
     for look in looks:
         living = look[:-len("冥闘士")]
         src = fids.get("FID_" + look)
@@ -295,7 +322,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
             e.u32(plain + f_kw, e.u32(plain + f_kw) & 0xFFFF0000)
             changes.append("%s: living model" % aid)
         if not has_underworld(aid):
-            new_looks.append((aid, look))
+            new_looks.append((aid, UNDERWORLD, look))
     for stem in forms:
         aid = "AID_" + stem
         plain = next((r for r in entries if [aid] in conds[r] and b.string(r + f_look)), None)
@@ -304,7 +331,66 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
             changes.append("%s: skipped" % aid)
             continue
         new_faces.append((fids["FID_" + living], "FID_" + living + "冥闘士", 1, None))
-        new_looks.append((aid, living + "冥闘士"))
+        new_looks.append((aid, UNDERWORLD, living + "冥闘士"))
+
+    def underworld_look(aid):
+        """aid's Underworld look after steps 1 and 2: its new look entry's, else that of the last "aid & SID_冥界兵" entry with one."""
+        for a, second, look in new_looks:
+            if a == aid and second == UNDERWORLD:
+                return look
+        found = None
+        for r in entries:
+            if [aid, UNDERWORLD] in conds[r] and b.string(r + f_look):
+                found = b.string(r + f_look)
+        return found
+
+    def face_source(look):
+        """(portrait entry, 特殊, voice) that FID_<look> is or is made from (None: keep the entry's), or None when there is none."""
+        if "FID_" + look in fids:
+            return fids["FID_" + look], None, None
+        return next(((src, special, voice) for src, key, special, voice in new_faces if key == "FID_" + look), None)
+
+    # 3. the portraits the cutscenes name
+    renamed = {}        # look -> the name of its copy
+    overwrite = []      # (portrait entry to overwrite, its look, the look it now shows, (source, 特殊, voice))
+    for u in cutscene_faces:
+        aid = next((alt[0] for r in entries if b.string(r + f_look) == u for alt in conds[r] if len(alt) == 2 and alt[1] == UNDERWORLD),
+                   None)
+        if aid not in swaps:
+            continue
+        v = underworld_look(swaps[aid])
+        src = face_source(v) if v else None
+        dst = fids.get("FID_" + u)
+        if src is None or dst is None or "FID_" + u + OWN_COPY in fids or any(
+                (src[0] + o in b.ptrs) != (dst + o in b.ptrs) for o in range(0x20, faces.rec_size, 8)):
+            changes.append("%s: skipped" % u)
+            continue
+        new_faces.append((dst, "FID_" + u + OWN_COPY, None, None))
+        renamed[u] = u + OWN_COPY
+        overwrite.append((dst, u, v, src))
+    for r in entries:
+        look = b.string(r + f_look)
+        if look in renamed:
+            e.set_ptr(r + f_look, renamed[look])
+            changes.append("%s -> %s" % (look, renamed[look]))
+    # 4. the chapter flags
+    flags = set()
+    for r in entries:
+        word, arr = b.u32(r + f_cond), b.ptr(r + f_cond + 8)
+        for k, alt in enumerate(conds[r]):
+            if not (len(alt) == 2 and alt[0].startswith("AID_") and not alt[0].endswith(FLAG_SUFFIX) and alt[0] in swaps
+                    and alt[1].startswith("AID_") and alt[1].endswith(FLAG_SUFFIX) and [alt[0], UNDERWORLD] in conds[r]):
+                continue
+            e.set_ptr(b.ptr(arr + (word >> 16) * k + 8) + 8, UNDERWORLD)
+            changes.append("%s & %s: needs %s" % (alt[0], alt[1], UNDERWORLD))
+            if alt[1] in flags:
+                continue
+            flags.add(alt[1])
+            v = underworld_look(swaps[alt[0]])
+            if v is None:
+                changes.append("%s: skipped" % alt[1])
+                continue
+            new_looks.append((swaps[alt[0]], alt[1], renamed.get(v, v)))
     if new_looks and template is None:
         changes.append("no template look entry: no Underworld forms added")
         new_looks = []
@@ -340,12 +426,25 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
         e.set_ptr(rec + 8, key)
         if voice is not None:
             e.set_ptr(rec + f_voice, voice)
-        e.data[rec + f_special] = special
+        if special is not None:
+            e.data[rec + f_special] = special
         e.add_label(rec, key)
-        changes.append("%s (%s)" % (key, "tint" if special else "no tint"))
+        changes.append("%s (%s)" % (key, "copy" if special is None else "tint" if special else "no tint"))
+    # 3, the overwrites: every source is read before any is written (a lord may play another lord)
+    copies = []
+    for dst, u, v, (src, special, voice) in overwrite:
+        e.data[now(dst) + 0x20:now(dst) + faces.rec_size] = b.d[H + src + 0x20:H + src + faces.rec_size]
+        copies += [(now(dst) + o, now(src + o)) for o in range(0x20, faces.rec_size, 8) if src + o in b.ptrs]
+    e.copy_ptrs(copies)
+    for dst, u, v, (src, special, voice) in overwrite:
+        if voice is not None:
+            e.set_ptr(now(dst) + f_voice, voice)
+        if special is not None:
+            e.data[now(dst) + f_special] = special
+        changes.append("FID_%s shows %s" % (u, v))
     look_row = max(b.u32(r + 0x14) >> 16 for r in entries)
     aux = now(data_end) - len(aux_raw)
-    for i, (aid, look) in enumerate(new_looks):
+    for i, (aid, second, look) in enumerate(new_looks):
         rec = look_end + assets.rec_size * i
         lists = aux + 32 * i
         e.u32(rec + 0x10, 0x10000 | (len(entries) + i))
@@ -358,8 +457,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS):
         e.u32(lists, 2 | 8 << 16)
         e.set_ptr(lists + 8, lists + 16)
         e.set_ptr(lists + 16, aid)
-        e.set_ptr(lists + 24, UNDERWORLD)
-        changes.append("%s & %s -> %s" % (aid, UNDERWORLD, look))
+        e.set_ptr(lists + 24, second)
+        changes.append("%s & %s -> %s" % (aid, second, look))
     return e.build(), changes
 
 
@@ -419,7 +518,7 @@ def main(argv=None):
     assets = os.path.join(a.romfs, "GameData", "AssetTable.bin")
     if os.path.exists(assets):
         with open(assets, "rb") as fh:
-            edited_assets, changes = apply_assets(fh.read())
+            edited_assets, changes = apply_assets(fh.read(), swaps=asset_swaps(mapping))
         print(assets_line(changes, edited_assets))
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:

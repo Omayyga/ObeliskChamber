@@ -8,6 +8,7 @@ name offset into the strings) sorted by data offset, and the strings come last. 
                          moves by len(raw) (a pointer to `at` itself moves too: it pointed at what now follows the new bytes)
     set_ptr(at, target)  the u64 at data offset `at` becomes a pointer: to a data offset (int), or to a string (str); the string is
                          reused when the pool already has it, else appended to the pool
+    copy_ptr(at, from)   the u64 at `at` points where the pointer at `from` does (copy_ptrs: several, all read before any is written)
     add_label(at, name)  a label for the object at data offset `at`
     build()              the file: header, data, the pointer list (the file's order, new pointers last), the labels in offset
                          order, the strings
@@ -64,6 +65,12 @@ class Editor:
     def copy_ptr(self, at, from_at):
         """The u64 at `at` becomes a pointer to what the pointer at `from_at` points to."""
         self.vals[at] = self.vals[from_at]
+
+    def copy_ptrs(self, pairs):
+        """copy_ptr for each (at, from_at), every source read before any is written."""
+        vals = [self.vals[f] for _, f in pairs]
+        for (at, _), v in zip(pairs, vals):
+            self.vals[at] = v
 
     def string_ref(self, text):
         """The first string of the pool that is exactly `text`, or a new one appended to the pool."""

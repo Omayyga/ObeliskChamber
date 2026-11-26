@@ -77,6 +77,7 @@ struct Editor {
     const Mod* owner;            // the mod whose nxmod_early / nxmod_init registered it, or null
     bool (*match)(const std::string& key) = nullptr;   // a runtime edit (add_runtime_edit): matches by pattern instead of key
     std::string owner_name;      // a runtime edit's owner, for the log
+    bool late = false;           // a runtime edit whose file is edited after all the others (add_runtime_edit's `late`)
 };
 
 // A panel a mod added to the Mods window and the menu's Mods tab (add_panel, version 5; EmblemWeave's version 4)
@@ -586,7 +587,14 @@ bool file_edit_wanted(const std::string& image_path) {
     return std::any_of(st().editors.begin(), st().editors.end(), [&](const Editor& e) { return editor_matches(e, key); });
 }
 
-bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user) {
+bool file_edit_late(const std::string& image_path) {
+    const std::string key = edit_key(image_path.c_str());
+    std::lock_guard<std::mutex> lk(st().mu);
+    return std::any_of(st().editors.begin(), st().editors.end(), [&](const Editor& e) { return e.late && editor_matches(e, key); });
+}
+
+bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user,
+                      bool late) {
     if (!match || !fn) return false;
     std::lock_guard<std::mutex> lk(st().mu);
     if (st().edits_closed) {
@@ -599,6 +607,7 @@ bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), 
     e.owner = nullptr;
     e.match = match;
     e.owner_name = owner ? owner : "runtime";
+    e.late = late;
     // runtime edits first: a code mod's edit of the same file sees the result
     const auto it = std::find_if(st().editors.begin(), st().editors.end(), [](const Editor& x) { return !x.match; });
     st().editors.insert(it, std::move(e));

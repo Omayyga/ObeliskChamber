@@ -14,7 +14,9 @@
 // forms (their class is the model) and are left alone. The 識別子 stays (the game tells the routes apart by it).
 //
 // GameData/AssetTable.bin is edited too, and grows: living and Underworld forms (edit_assets()), so that every pool character looks
-// living in a living slot and Underworld in an Underworld one, as the vanilla lords do in Prologue Ch. 2.
+// living in a living slot and Underworld in an Underworld one, as the vanilla lords do in Prologue Ch. 2, cutscenes included (the
+// portraits Prologue Ch. 2's cutscene names, and the chapter flags AID_x冥将). That part needs the mapping, so AssetTable.bin is edited
+// after the other files (add_runtime_edit's late), once edit_person has made it.
 //
 // tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
@@ -168,6 +170,16 @@ constexpr const char* kFieldCond = "\xe6\x9d\xa1\xe4\xbb\xb6";                  
 constexpr const char* kFieldLook = "\xe5\xae\xb9\xe5\xa7\xbf";                                       // 容姿
 constexpr const char* kFieldKeywords = "\xe3\x82\xad\xe3\x83\xbc\xe3\x83\xaf\xe3\x83\xbc\xe3\x83\x89";   // キーワード
 constexpr const char* kFieldSpecial = "\xe7\x89\xb9\xe6\xae\x8a";                                    // 特殊
+// The Underworld looks Prologue Ch. 2's cutscene and death quotes name outright (randomize_units.py CUTSCENE_FACES): カイ冥闘士,
+// ディートリヒ冥闘士, セオドラ冥闘士, レダ冥闘士. Their battle looks take a copy, FID_<look>本人.
+const char* const kCutsceneFaces[] = {
+    "\xe3\x82\xab\xe3\x82\xa4\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",
+    "\xe3\x83\x87\xe3\x82\xa3\xe3\x83\xbc\xe3\x83\x88\xe3\x83\xaa\xe3\x83\x92\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",
+    "\xe3\x82\xbb\xe3\x82\xaa\xe3\x83\x89\xe3\x83\xa9\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",
+    "\xe3\x83\xac\xe3\x83\x80\xe5\x86\xa5\xe9\x97\x98\xe5\xa3\xab",
+};
+constexpr const char* kOwnCopy = "\xe6\x9c\xac\xe4\xba\xba";        // 本人
+constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a chapter flag: AID_リンド冥将)
 
 constexpr size_t kHeader = 0x20;
 constexpr uint32_t kTableVersion = 0x20251201;
@@ -178,6 +190,10 @@ struct Settings {
     std::string force;
 };
 Settings g_set;
+// The mapping by asset key (AID_リンド -> AID_ソレル), made by edit_person for edit_assets (randomize_units.py asset_swaps). Both run on
+// the thread that builds the RomFS image, Person.bin first (edit_assets is a late edit).
+std::unordered_map<std::string, std::string> g_swaps;
+bool g_mapped = false;
 
 // ---- the container ----------------------------------------------------------------------------------------------------------------------
 // Offsets are data offsets (from 0x20), as the file's pointers are. Every read is bounds-checked: a file that does not look right is left alone.
@@ -298,7 +314,7 @@ bool find_person(const Bin& b, PersonTable* t, std::string* why) {
 
 // ---- characters and the mapping ---------------------------------------------------------------------------------------------------------
 struct Character {
-    std::string ident, key, mpid;
+    std::string ident, key, mpid, aid;   // aid: the model's asset key, AID_カイ
     uint64_t name_ptr = 0, aid_ptr = 0, key_ptr = 0;
     uint8_t gender = 0;
     std::string label() const {
@@ -322,6 +338,7 @@ std::vector<Character> characters(const Bin& b, const PersonTable& t) {
         c.mpid = b.string(rec + t.f_name) ? b.string(rec + t.f_name) : "";
         c.name_ptr = b.is_ptr(rec + t.f_name) ? b.u64(rec + t.f_name) : 0;
         c.aid_ptr = b.u64(rec + t.f_aid);
+        c.aid = b.string(rec + t.f_aid) ? b.string(rec + t.f_aid) : "";
         c.key_ptr = b.u64(rec + 8);
         c.gender = b.u8(rec + t.f_gender);
         out.push_back(std::move(c));
@@ -443,6 +460,10 @@ void edit_person(const NxModFile* file, void*) {
     }
     const std::vector<Character> cs = characters(b, t);
     const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force);
+    g_swaps.clear();
+    for (const auto& [o, rep] : mapping)
+        if (o->ident != rep->ident && !o->aid.empty() && !rep->aid.empty()) g_swaps[o->aid] = rep->aid;
+    g_mapped = true;
     NXLOG_I(kTag, "randomizer: seed %" PRIu64 ": %zu pairs", g_set.seed, mapping.size());
     for (size_t i = 0; i < mapping.size(); i += kPairsPerLine) {
         std::string line;
@@ -549,6 +570,12 @@ public:
     }
     void set_ptr(uint64_t at, const std::string& text) { put(at, string_ref(text)); }
     void copy_ptr(uint64_t at, uint64_t from) { put(at, vals_.at(from)); }
+    // copy_ptr for each (at, from), every source read before any is written
+    void copy_ptrs(const std::vector<std::pair<uint64_t, uint64_t>>& pairs) {
+        std::vector<Val> vals;
+        for (const auto& p : pairs) vals.push_back(vals_.at(p.second));
+        for (size_t i = 0; i < pairs.size(); ++i) put(pairs[i].first, vals[i]);
+    }
     void add_label(uint64_t at, const std::string& text) {
         string_ref(text);
         new_labels_.push_back({at, text});
@@ -627,8 +654,12 @@ private:
 //      unless there is one, a new look entry "AID_x & SID_冥界兵" -> U with that keyword.
 //   2. each AID_x of kUnderworldForms, L its plain look, U = L + 冥闘士: a new portrait entry FID_U (a copy of FID_L, 特殊 1) and a new
 //      look entry "AID_x & SID_冥界兵" -> U with the keyword.
+//   3. each look U of kCutsceneFaces whose character x is replaced by r, V = r's Underworld look: a new portrait entry FID_U本人 (a copy
+//      of FID_U), every look entry showing U shows U本人, and FID_U takes the content of FID_V (all but its key).
+//   4. each condition "AID_x & F" (F a chapter flag, AID_…冥将) of an entry that also has "AID_x & SID_冥界兵", x replaced by r: F
+//      becomes SID_冥界兵 there, and, once per F, a new look entry "AID_r & F" -> r's Underworld look (U本人 for a U of step 3).
 // New portrait entries follow the last of 容姿情報 (labelled), new look entries the last of アセットテーブル (copies of the vanilla
-// "AID_ブレザ & SID_冥界兵" entry), their condition lists the end of the data.
+// "AID_ブレザ & SID_冥界兵" entry), their condition lists the end of the data. Steps 3 and 4 need the mapping (g_swaps).
 void edit_assets(const NxModFile* file, void*) {
     Bin b;
     Table assets, faces;
@@ -640,6 +671,10 @@ void edit_assets(const NxModFile* file, void*) {
         NXLOG_W(kTag, "randomizer: %s: not the asset table the randomizer knows: left as it is", file->path);
         return;
     }
+    if (!g_mapped)
+        NXLOG_W(kTag, "randomizer: %s: edited before Person.bin, so without the mapping: the cutscenes' Underworld portraits and the "
+                      "chapter flags are left as they are", file->path);
+    const std::unordered_map<std::string, std::string> swaps = g_mapped ? g_swaps : std::unordered_map<std::string, std::string>();
     using Strings = std::vector<std::string>;
     auto str = [&](uint64_t at) -> std::string {
         const char* s = b.string(at);
@@ -669,7 +704,10 @@ void edit_assets(const NxModFile* file, void*) {
     std::unordered_map<std::string, uint64_t> fids;
     for (uint32_t i = 0; i < faces.count; ++i)
         if (const char* k = b.string(faces.rec(i) + 8)) fids.emplace(k, faces.rec(i));
-    const std::string underworld = kUnderworld, suffix = kUnderworldSuffix;
+    const std::string underworld = kUnderworld, suffix = kUnderworldSuffix, own = kOwnCopy, flag_suffix = kFlagSuffix;
+    auto ends_with = [](const std::string& s, const std::string& end) {
+        return s.size() >= end.size() && s.compare(s.size() - end.size(), end.size(), end) == 0;
+    };
     int64_t tpl = -1;
     for (size_t i = 0; i < entries.size() && tpl < 0; ++i)
         if (str(entries[i] + f_look) == kTemplateLook && has_alt(i, {kTemplateAid, underworld})) tpl = static_cast<int64_t>(i);
@@ -689,11 +727,14 @@ void edit_assets(const NxModFile* file, void*) {
     struct NewFace {
         uint64_t src;
         std::string key;
-        uint8_t special;
+        int special;         // -1: keep the source's
         std::string voice;   // empty: keep the source's
     };
+    struct NewLook {
+        std::string aid, second, look;   // the condition "aid & second" -> look
+    };
     std::vector<NewFace> new_faces;
-    std::vector<std::pair<std::string, std::string>> new_looks;   // (AID_x, look)
+    std::vector<NewLook> new_looks;
     for (const char* look_c : kLivingLooks) {
         const std::string look = look_c, living = look.substr(0, look.size() - suffix.size());
         const auto src = fids.find("FID_" + look);
@@ -720,7 +761,7 @@ void edit_assets(const NxModFile* file, void*) {
             e.set_u32(prec + f_kw, e.u32(prec + f_kw) & 0xFFFF0000u);
             ++changes;
         }
-        if (!has_underworld(aid)) new_looks.push_back({aid, look});
+        if (!has_underworld(aid)) new_looks.push_back({aid, underworld, look});
     }
     for (const char* stem : kUnderworldForms) {
         const std::string aid = std::string("AID_") + stem;
@@ -731,7 +772,94 @@ void edit_assets(const NxModFile* file, void*) {
             continue;
         }
         new_faces.push_back({fids.at("FID_" + living), "FID_" + living + suffix, 1, std::string()});
-        new_looks.push_back({aid, living + suffix});
+        new_looks.push_back({aid, underworld, living + suffix});
+    }
+    // aid's Underworld look after steps 1 and 2: its new look entry's, else that of the last "aid & SID_冥界兵" entry with one
+    auto underworld_look = [&](const std::string& aid) {
+        for (const NewLook& l : new_looks)
+            if (l.aid == aid && l.second == underworld) return l.look;
+        std::string found;
+        for (size_t i = 0; i < entries.size(); ++i)
+            if (has_alt(i, {aid, underworld}) && !str(entries[i] + f_look).empty()) found = str(entries[i] + f_look);
+        return found;
+    };
+    // the portrait entry FID_<look> is or is made from: (entry, 特殊 or -1, voice or ""); false when there is none
+    auto face_source = [&](const std::string& look, NewFace* out) {
+        const auto it = fids.find("FID_" + look);
+        if (it != fids.end()) {
+            *out = {it->second, "", -1, ""};
+            return true;
+        }
+        for (const NewFace& f : new_faces)
+            if (f.key == "FID_" + look) {
+                *out = f;
+                return true;
+            }
+        return false;
+    };
+
+    // 3. the portraits the cutscenes name
+    std::unordered_map<std::string, std::string> renamed;   // look -> the name of its copy
+    struct Overwrite {
+        uint64_t dst;          // the portrait entry FID_<look>
+        std::string look, shows;
+        NewFace src;
+    };
+    std::vector<Overwrite> overwrite;
+    for (const char* u_c : kCutsceneFaces) {
+        const std::string u = u_c;
+        std::string aid;
+        for (size_t i = 0; i < entries.size() && aid.empty(); ++i)
+            if (str(entries[i] + f_look) == u)
+                for (const Strings& alt : conds[i])
+                    if (alt.size() == 2 && alt[1] == underworld) {
+                        aid = alt[0];
+                        break;
+                    }
+        const auto sw = swaps.find(aid);
+        if (aid.empty() || sw == swaps.end()) continue;
+        const std::string v = underworld_look(sw->second);
+        NewFace src;
+        const auto dst = fids.find("FID_" + u);
+        bool ok = !v.empty() && face_source(v, &src) && dst != fids.end() && !fids.count("FID_" + u + own);
+        for (uint32_t o = 0x20; ok && o < faces.rec_size; o += 8) ok = b.is_ptr(src.src + o) == b.is_ptr(dst->second + o);
+        if (!ok) {
+            ++changes;   // skipped
+            continue;
+        }
+        new_faces.push_back({dst->second, "FID_" + u + own, -1, std::string()});
+        renamed[u] = u + own;
+        overwrite.push_back({dst->second, u, v, src});
+    }
+    for (uint64_t rec : entries) {
+        const auto it = renamed.find(str(rec + f_look));
+        if (it == renamed.end()) continue;
+        e.set_ptr(rec + f_look, it->second);
+        ++changes;
+    }
+    // 4. the chapter flags
+    std::vector<std::string> flags;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const uint64_t rec = entries[i];
+        const uint32_t word = b.u32(rec + f_cond);
+        const uint64_t arr = b.u64(rec + f_cond + 8);
+        for (size_t k = 0; k < conds[i].size(); ++k) {
+            const Strings& alt = conds[i][k];
+            if (alt.size() != 2 || alt[0].rfind("AID_", 0) != 0 || ends_with(alt[0], flag_suffix) || !swaps.count(alt[0]) ||
+                alt[1].rfind("AID_", 0) != 0 || !ends_with(alt[1], flag_suffix) || !has_alt(i, {alt[0], underworld}))
+                continue;
+            e.set_ptr(b.u64(arr + uint64_t(word >> 16) * k + 8) + 8, underworld);
+            ++changes;
+            if (std::find(flags.begin(), flags.end(), alt[1]) != flags.end()) continue;
+            flags.push_back(alt[1]);
+            const std::string v = underworld_look(swaps.at(alt[0]));
+            if (v.empty()) {
+                ++changes;   // skipped
+                continue;
+            }
+            const auto rn = renamed.find(v);
+            new_looks.push_back({swaps.at(alt[0]), alt[1], rn == renamed.end() ? v : rn->second});
+        }
     }
     if (!new_looks.empty() && tpl < 0) {
         ++changes;   // no template look entry: no Underworld forms added
@@ -771,9 +899,23 @@ void edit_assets(const NxModFile* file, void*) {
             if (b.is_ptr(f.src + o)) e.copy_ptr(rec + o, now(f.src + o));
         e.set_ptr(rec + 8, f.key);
         if (!f.voice.empty()) e.set_ptr(rec + f_voice, f.voice);
-        e.data()[rec + f_special] = f.special;
+        if (f.special >= 0) e.data()[rec + f_special] = static_cast<uint8_t>(f.special);
         e.add_label(rec, f.key);
         ++changes;
+    }
+    // 3, the overwrites: every source is read before any is written (a lord may play another lord)
+    std::vector<std::pair<uint64_t, uint64_t>> copies;
+    for (const Overwrite& w : overwrite) {
+        std::memcpy(e.data().data() + now(w.dst) + 0x20, file->data + kHeader + w.src.src + 0x20, faces.rec_size - 0x20);
+        for (uint32_t o = 0x20; o < faces.rec_size; o += 8)
+            if (b.is_ptr(w.src.src + o)) copies.push_back({now(w.dst) + o, now(w.src.src + o)});
+    }
+    e.copy_ptrs(copies);
+    for (const Overwrite& w : overwrite) {
+        if (!w.src.voice.empty()) e.set_ptr(now(w.dst) + f_voice, w.src.voice);
+        if (w.src.special >= 0) e.data()[now(w.dst) + f_special] = static_cast<uint8_t>(w.src.special);
+        ++changes;
+        NXLOG_I(kTag, "randomizer: AssetTable.bin: FID_%s shows %s", w.look.c_str(), w.shows.c_str());
     }
     const uint64_t aux = now(data_end) - aux_raw.size();
     for (size_t i = 0; i < new_looks.size(); ++i) {
@@ -782,14 +924,17 @@ void edit_assets(const NxModFile* file, void*) {
         e.set_u32(rec + 0x14, uint32_t(look_row + 1 + i) << 16);
         e.set_u32(rec + f_cond, 1u | 16u << 16);
         e.set_ptr(rec + f_cond + 8, lists);
-        e.set_ptr(rec + f_look, new_looks[i].second);
+        e.set_ptr(rec + f_look, new_looks[i].look);
         e.set_u32(rec + f_kw, 1u | 8u << 16);
         e.copy_ptr(rec + f_kw + 8, now(entries[static_cast<size_t>(tpl)] + f_kw + 8));
         e.set_u32(lists, 2u | 8u << 16);
         e.set_ptr(lists + 8, lists + 16);
-        e.set_ptr(lists + 16, new_looks[i].first);
-        e.set_ptr(lists + 24, underworld);
+        e.set_ptr(lists + 16, new_looks[i].aid);
+        e.set_ptr(lists + 24, new_looks[i].second);
         ++changes;
+        if (new_looks[i].second != underworld)
+            NXLOG_I(kTag, "randomizer: AssetTable.bin: %s & %s -> %s", new_looks[i].aid.c_str(), new_looks[i].second.c_str(),
+                    new_looks[i].look.c_str());
     }
     const std::vector<uint8_t> out = e.build();
     NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (fnv1a64 %016" PRIx64 ")", changes, fnv1a64(out));
@@ -827,7 +972,7 @@ void randomizer_install() {
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
-                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr);
+                    services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
             ok ? " (GameData/Person.bin and AssetTable.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
 }

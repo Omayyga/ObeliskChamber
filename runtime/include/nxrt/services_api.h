@@ -89,8 +89,11 @@ std::string notice();
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
 // A file edit of the runtime or the game module itself (not a mod), with the same NxModFile interface: match gets the image path in lower
 // case ("/graphics/settings/x.set") and says whether fn edits it. Runs before the code mods' edits of the same file. Register before the
-// RomFS image is built (play mode install); false when it is too late.
-bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user);
+// RomFS image is built (play mode install); false when it is too late. Files are edited in path order; late = true puts the files this
+// edit matches after all the others (an edit that needs what another file's edit worked out). file_edit_late: some late edit matches.
+bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user,
+                      bool late = false);
+bool file_edit_late(const std::string& image_path);
 }  // namespace modapi
 
 // ---- acc (acc.cpp) ----------------------------------------------------------------------------------------------------------------
