@@ -21,6 +21,8 @@
 // tools/gamedata/randomize_units.py is the same thing in Python: given the logged seed it prints the same mapping lines and checksum.
 #include "ObeliskChamber_game.h"
 
+#include <zstd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
@@ -180,6 +182,18 @@ const char* const kCutsceneFaces[] = {
 };
 constexpr const char* kOwnCopy = "\xe6\x9c\xac\xe4\xba\xba";        // 本人
 constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a chapter flag: AID_リンド冥将)
+
+// Red eyes (randomize_units.py EYE_RIGS, EYE_SLOTS). The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eye slots named in
+// a list in the executable: 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r, any case. These pool characters' portrait rigs name
+// theirs without the 00_ (Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion), so the
+// slots are renamed (edit_eye_rig): a prefix, or for Eye_Highlight the name the list has.
+const char* const kEyeRigs[] = {"007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"};
+struct EyeSlot {
+    const char* lower;   // the slot's name, lower case
+    const char* to;      // a prefix (ends in _) or the new name
+};
+const EyeSlot kEyeSlots[] = {{"eye", "00_"},      {"eye_w", "00_"},   {"eye_hi", "00_"},   {"eye_l", "00_"},   {"eye_r", "00_"},
+                             {"eye_w_l", "00_"},  {"eye_w_r", "00_"}, {"eye_hi_l", "00_"}, {"eye_hi_r", "00_"}, {"eye_highlight", "00_Eye_Hi"}};
 
 constexpr size_t kHeader = 0x20;
 constexpr uint32_t kTableVersion = 0x20251201;
@@ -949,6 +963,147 @@ void edit_assets(const NxModFile* file, void*) {
 
 bool match_assets(const std::string& key) { return key == "/gamedata/assettable.bin"; }
 
+// ---- red eyes: the portrait rigs -------------------------------------------------------------------------------------------------------
+// randomize_units.py rename_eye_slots(), step for step: a Spine 4.1 binary skeleton (big-endian, variable-length integers, strings with
+// their length + 1 first) read as far as its slots, and the eye slots' names replaced. Empty when it is not one, already has a 00_eye slot,
+// or a new name is taken.
+std::vector<uint8_t> rename_eye_slots(const std::vector<uint8_t>& d, std::vector<std::pair<std::string, std::string>>* renames) {
+    size_t p = 0;
+    bool ok = true;
+    auto take = [&](size_t n) {
+        if (!ok || p + n > d.size()) ok = false;
+        else p += n;
+    };
+    auto varint = [&]() {
+        uint32_t v = 0;
+        for (int shift = 0; ok; shift += 7) {
+            if (p >= d.size()) {
+                ok = false;
+                break;
+            }
+            const uint8_t b = d[p++];
+            v |= uint32_t(b & 0x7F) << shift;
+            if (!(b & 0x80) || shift >= 28) break;
+        }
+        return v;
+    };
+    auto string = [&]() {
+        const uint32_t n = varint();
+        if (!ok || n <= 1) return std::string();
+        const size_t at = p;
+        take(n - 1);
+        return ok ? std::string(reinterpret_cast<const char*>(d.data() + at), n - 1) : std::string();
+    };
+    auto lower = [](std::string t) {
+        for (char& c : t) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+        return t;
+    };
+    take(8);   // hash
+    if (string().rfind("4.1.", 0) != 0) return {};
+    take(16);  // x, y, width, height
+    const bool nonessential = ok && p < d.size() && d[p] != 0;
+    take(1);
+    if (nonessential) {
+        take(4);
+        string();
+        string();
+    }
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) string();   // the string table
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {           // bones
+        string();
+        if (i) varint();
+        take(32);   // rotation, x, y, scale x, y, shear x, y, length
+        varint();   // transform mode
+        take(1);    // skin required
+        if (nonessential) take(4);
+    }
+    struct Slot {
+        std::string name;
+        size_t at, end;
+    };
+    std::vector<Slot> slots;
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
+        const size_t at = p;
+        std::string name = string();
+        slots.push_back({std::move(name), at, p});
+        varint();   // bone
+        take(8);    // colour, dark colour
+        varint();   // attachment
+        varint();   // blend mode
+    }
+    if (!ok) return {};
+    std::vector<std::string> names;
+    for (const Slot& s : slots) names.push_back(lower(s.name));
+    for (const char* x : {"00_eye", "00_eye_l", "00_eye_r"})
+        if (std::find(names.begin(), names.end(), x) != names.end()) return {};
+    struct Rename {
+        size_t at, end;
+        std::string from, to;
+    };
+    std::vector<Rename> rs;
+    for (const Slot& s : slots) {
+        const std::string l = lower(s.name);
+        for (const EyeSlot& e : kEyeSlots) {
+            if (l != e.lower) continue;
+            const std::string to = std::string(e.to).back() == '_' ? e.to + s.name : e.to;
+            if (std::find(names.begin(), names.end(), lower(to)) != names.end()) return {};
+            rs.push_back({s.at, s.end, s.name, to});
+        }
+    }
+    std::vector<uint8_t> out(d);
+    for (size_t i = rs.size(); i-- > 0;) {
+        std::vector<uint8_t> enc;
+        for (uint32_t n = static_cast<uint32_t>(rs[i].to.size()) + 1;;) {
+            enc.push_back(static_cast<uint8_t>((n & 0x7F) | (n > 0x7F ? 0x80 : 0)));
+            n >>= 7;
+            if (!n) break;
+        }
+        enc.insert(enc.end(), rs[i].to.begin(), rs[i].to.end());
+        out.erase(out.begin() + static_cast<std::ptrdiff_t>(rs[i].at), out.begin() + static_cast<std::ptrdiff_t>(rs[i].end));
+        out.insert(out.begin() + static_cast<std::ptrdiff_t>(rs[i].at), enc.begin(), enc.end());
+    }
+    for (const Rename& r : rs) renames->push_back({r.from, r.to});
+    return out;
+}
+
+// "/ui/face/099/099.skel.zst" for a folder of kEyeRigs: that folder
+const char* eye_rig(const std::string& key) {
+    for (const char* n : kEyeRigs)
+        if (key == std::string("/ui/face/") + n + "/" + n + ".skel.zst") return n;
+    return nullptr;
+}
+bool match_eye_rig(const std::string& key) { return eye_rig(key) != nullptr; }
+
+void edit_eye_rig(const NxModFile* file, void*) {
+    std::string key = file->path ? file->path : "";
+    for (char& c : key) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+    const char* n = eye_rig(key);
+    const unsigned long long size = ZSTD_getFrameContentSize(file->data, static_cast<size_t>(file->size));
+    if (!n || size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN || size > (64ull << 20)) {
+        NXLOG_W(kTag, "randomizer: %s: not a zstd frame with its size: left as it is", file->path);
+        return;
+    }
+    std::vector<uint8_t> skel(static_cast<size_t>(size));
+    const size_t got = ZSTD_decompress(skel.data(), skel.size(), file->data, static_cast<size_t>(file->size));
+    if (ZSTD_isError(got) || got != size) {
+        NXLOG_W(kTag, "randomizer: %s: does not decompress: left as it is", file->path);
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> renames;
+    const std::vector<uint8_t> out = rename_eye_slots(skel, &renames);
+    std::string what;
+    for (const auto& [from, to] : renames) what += (what.empty() ? "" : ", ") + from + " -> " + to;
+    NXLOG_I(kTag, "randomizer: UI/Face/%s/%s.skel.zst: %s", n, n, what.empty() ? "left as it is" : what.c_str());
+    if (out.empty() || renames.empty()) return;
+    std::vector<uint8_t> comp(ZSTD_compressBound(out.size()));
+    const size_t csize = ZSTD_compress(comp.data(), comp.size(), out.data(), out.size(), 3);
+    if (ZSTD_isError(csize)) {
+        NXLOG_W(kTag, "randomizer: %s: does not compress again: left as it is", file->path);
+        return;
+    }
+    file->replace(file, comp.data(), csize);
+}
+
 uint64_t new_seed() {
     std::random_device rd;
     uint64_t s = (uint64_t(rd()) << 32) ^ rd() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -978,6 +1133,8 @@ void randomizer_install() {
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
     msg_names_install();   // Katarina's name: she has a name ID but no text (ObeliskChamber_msg.cpp)
+    if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
+        NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
                     services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),

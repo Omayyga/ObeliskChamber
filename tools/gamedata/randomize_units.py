@@ -72,6 +72,15 @@ OWN_COPY = "本人"
 # whoever plays it: each such condition is made to need SID_冥界兵 instead, and a new look entry "AID_<replacement> & AID_x冥将" gives
 # the replacement's Underworld look.
 FLAG_SUFFIX = "冥将"
+# Red eyes. The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eyes it finds by slot name, from a list in the executable:
+# 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r (any case). These pool characters' portrait rigs (UI/Face/<n>/<n>.skel.zst, Spine
+# 4.1 binary) name their eye slots without the 00_ (Eye, Eye_W, Eye_Hi; Eye_Highlight in two), so their Underworld portraits keep their
+# own eye colour: Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion. None of them is
+# Underworld in the game. rename_eye_slots() gives those slots the names the list has; slots are found by position everywhere else in
+# the file (animations, skins, draw order), so nothing else changes.
+EYE_RIGS = ["007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"]
+EYE_SLOTS = {"eye": "00_", "eye_w": "00_", "eye_hi": "00_", "eye_l": "00_", "eye_r": "00_", "eye_w_l": "00_", "eye_w_r": "00_",
+             "eye_hi_l": "00_", "eye_hi_r": "00_", "eye_highlight": "00_Eye_Hi"}    # a prefix (ends in _), or the new name
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -472,6 +481,97 @@ def assets_line(changes, edited):
     return "randomizer: AssetTable.bin: %d changes (fnv1a64 %016x)" % (len(changes), fnv1a64(edited))
 
 
+class _SkelReader:
+    """Spine binary (4.1): big-endian, with variable-length integers and length-prefixed strings."""
+
+    def __init__(self, d):
+        self.d, self.p = d, 0
+
+    def take(self, n):
+        if self.p + n > len(self.d):
+            raise ValueError("past the end")
+        v = self.d[self.p:self.p + n]
+        self.p += n
+        return v
+
+    def varint(self):
+        v, shift = 0, 0
+        while True:
+            b = self.take(1)[0]
+            v |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80 or shift > 28:
+                return v
+
+    def string(self):
+        n = self.varint()
+        return None if n == 0 else self.take(n - 1).decode("utf-8", "surrogateescape") if n > 1 else ""
+
+
+def _skel_string(text):
+    raw = text.encode("utf-8")
+    n, out = len(raw) + 1, bytearray()
+    while True:
+        out.append((n & 0x7F) | (0x80 if n > 0x7F else 0))
+        n >>= 7
+        if not n:
+            return bytes(out) + raw
+
+
+def rename_eye_slots(data):
+    """A Spine 4.1 skeleton with its eye slots named as the Underworld effect looks for them (EYE_SLOTS), and [(old, new)]; the data
+    as it is and [] when it is not a 4.1 skeleton, already has a 00_eye slot, or a new name is taken. The runtime does the same."""
+    r = _SkelReader(data)
+    try:
+        r.take(8)                                   # hash
+        if not (r.string() or "").startswith("4.1."):
+            return data, []
+        r.take(16)                                  # x, y, width, height
+        nonessential = r.take(1)[0] != 0
+        if nonessential:
+            r.take(4)
+            r.string()
+            r.string()
+        for _ in range(r.varint()):                 # the string table
+            r.string()
+        for i in range(r.varint()):                 # bones
+            r.string()
+            if i:
+                r.varint()
+            r.take(32)                              # rotation, x, y, scale x, y, shear x, y, length
+            r.varint()                              # transform mode
+            r.take(1)                               # skin required
+            if nonessential:
+                r.take(4)
+        slots = []                                  # (name, start, end of its string)
+        for _ in range(r.varint()):
+            at = r.p
+            name = r.string()
+            slots.append((name, at, r.p))
+            r.varint()                              # bone
+            r.take(8)                               # colour, dark colour
+            r.varint()                              # attachment
+            r.varint()                              # blend mode
+    except (ValueError, IndexError, UnicodeDecodeError):
+        return data, []
+    names = {(n or "").lower() for n, _, _ in slots}
+    if names & {"00_eye", "00_eye_l", "00_eye_r"}:
+        return data, []
+    renames = []
+    for name, at, end in slots:
+        new = EYE_SLOTS.get((name or "").lower())
+        if new is None:
+            continue
+        new = new + name if new.endswith("_") else new
+        if new.lower() in names:
+            return data, []
+        renames.append((at, end, name, new))
+    out = bytearray(data)
+    for at, end, _, new in reversed(renames):
+        out[at:end] = _skel_string(new)
+    return bytes(out), [(old, new) for _, _, old, new in renames]
+
+
 def show_placements(romfs, names, person_before, edited):
     after = Person(edited)
     for n in names:
@@ -501,6 +601,7 @@ def main(argv=None):
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
+    ap.add_argument("--o-rigs", help="write the portrait rigs with their eye slots renamed (EYE_RIGS) here, as <n>.skel, uncompressed")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
@@ -529,6 +630,19 @@ def main(argv=None):
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
                 fh.write(edited_assets)
+    for n in EYE_RIGS:
+        path = os.path.join(a.romfs, "UI", "Face", n, n + ".skel.zst")
+        if not os.path.exists(path):
+            continue
+        import inspect_romfs
+        with open(path, "rb") as fh:
+            skel = inspect_romfs.unzstd(fh.read())
+        edited_skel, renames = rename_eye_slots(skel)
+        print("randomizer: UI/Face/%s/%s.skel.zst: %s" % (n, n, ", ".join("%s -> %s" % x for x in renames) or "left as it is"))
+        if a.o_rigs:
+            os.makedirs(a.o_rigs, exist_ok=True)
+            with open(os.path.join(a.o_rigs, n + ".skel"), "wb") as fh:
+                fh.write(edited_skel)
     if a.o:
         with open(a.o, "wb") as fh:
             fh.write(edited)

@@ -591,5 +591,43 @@ class TestCutscenes(unittest.TestCase):
         self.assertEqual(ru.asset_swaps([(kai, tro), (tro, kai), (lin, lin)]), {"AID_カイ": "AID_トロイア", "AID_トロイア": "AID_カイ"})
 
 
+def skeleton(slots, version="4.1.24", nonessential=True, bones=2):
+    """A Spine binary skeleton up to its slots (then a byte the edit must keep): slot names as given, each on bone 0."""
+    s = ru._skel_string
+    out = b"\x11" * 8 + s(version) + struct.pack(">4f", 0, 0, 100, 100) + bytes([nonessential])
+    if nonessential:
+        out += struct.pack(">f", 30) + s("./images/") + s("")
+    out += bytes([2]) + s("00_Eye") + s("x")                       # the string table (attachment names)
+    out += bytes([bones])
+    for i in range(bones):
+        out += s("bone%d" % i) + (bytes([0]) if i else b"") + bytes(32) + bytes([0, 1]) + (b"\xff" * 4 if nonessential else b"")
+    out += bytes([len(slots)])
+    for name in slots:
+        out += s(name) + bytes([0]) + b"\xff" * 8 + bytes([1, 0])
+    return out + b"\x7e"
+
+
+class TestEyeSlots(unittest.TestCase):
+    def test_rename(self):
+        data = skeleton(["Body", "Eye_W", "Eye", "Eye_Highlight", "EyeShadow", "Bear_Eye", "Eye_L"])
+        out, renames = ru.rename_eye_slots(data)
+        self.assertEqual(renames, [("Eye_W", "00_Eye_W"), ("Eye", "00_Eye"), ("Eye_Highlight", "00_Eye_Hi"), ("Eye_L", "00_Eye_L")])
+        self.assertEqual(out, skeleton(["Body", "00_Eye_W", "00_Eye", "00_Eye_Hi", "EyeShadow", "Bear_Eye", "00_Eye_L"]))
+
+    def test_long_name(self):
+        # a name of 127 bytes or more takes two bytes of length
+        long = "x" * 130
+        data = skeleton([long, "Eye"], nonessential=False)
+        out, renames = ru.rename_eye_slots(data)
+        self.assertEqual(out, skeleton([long, "00_Eye"], nonessential=False))
+
+    def test_left_alone(self):
+        for data in (skeleton(["00_Eye", "Eye_W"]),            # already has the names the effect looks for
+                     skeleton(["Eye", "00_eye_w", "Eye_W"]),   # a new name is taken
+                     skeleton(["Eye"], version="4.2.01"),      # another format
+                     skeleton(["Eye"])[:40]):                  # cut short
+            self.assertEqual(ru.rename_eye_slots(data), (data, []))
+
+
 if __name__ == "__main__":
     unittest.main()
