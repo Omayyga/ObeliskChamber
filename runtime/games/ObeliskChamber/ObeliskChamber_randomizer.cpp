@@ -207,6 +207,8 @@ Settings g_set;
 // The mapping by asset key (AID_リンド -> AID_ソレル), made by edit_person for edit_assets (randomize_units.py asset_swaps). Both run on
 // the thread that builds the RomFS image, Person.bin first (edit_assets is a late edit).
 std::unordered_map<std::string, std::string> g_swaps;
+// Level-up speakers (randomize_units.py speaker_renames): a replacement's lines name the slot that wears its look (クラプカ -> ライラー)
+std::unordered_map<std::string, std::string> g_speakers;
 bool g_mapped = false;
 
 // ---- the container ----------------------------------------------------------------------------------------------------------------------
@@ -475,8 +477,12 @@ void edit_person(const NxModFile* file, void*) {
     const std::vector<Character> cs = characters(b, t);
     const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force);
     g_swaps.clear();
-    for (const auto& [o, rep] : mapping)
+    g_speakers.clear();
+    for (const auto& [o, rep] : mapping) {
         if (o->ident != rep->ident && !o->aid.empty() && !rep->aid.empty()) g_swaps[o->aid] = rep->aid;
+        if (o->ident != rep->ident && o->key.rfind("PID_", 0) == 0 && rep->key.rfind("PID_", 0) == 0)
+            g_speakers[rep->key.substr(4)] = o->key.substr(4);
+    }
     g_mapped = true;
     NXLOG_I(kTag, "randomizer: seed %" PRIu64 ": %zu pairs", g_set.seed, mapping.size());
     for (size_t i = 0; i < mapping.size(); i += kPairsPerLine) {
@@ -1104,6 +1110,116 @@ void edit_eye_rig(const NxModFile* file, void*) {
     file->replace(file, comp.data(), csize);
 }
 
+// ---- level-up speakers: Msg/<language>/Levelup.msbt -----------------------------------------------------------------------------------
+// randomize_units.py rewrite_speakers(), step for step. A level-up line (MID_LevelUp_<voice>_NN) is picked by the unit's voice code, which
+// follows its look, but names its speaker in attribute field 3 (クラプカ), and the game shows that speaker's slot, which wears someone else.
+// Each line naming a speaker of g_speakers names the slot that wears its look instead: a string the ATR1 string area already has (its
+// first), else one appended to it; ATR1 grows and the sections after it move. Empty when nothing changes or the file is not laid out so.
+constexpr size_t kSpeakerField = 12;   // the speaker's string offset in an ATR1 record
+
+std::vector<uint8_t> rewrite_speakers(const std::vector<uint8_t>& d, const std::unordered_map<std::string, std::string>& renames, int* changed) {
+    *changed = 0;
+    auto u32 = [&](const std::vector<uint8_t>& b, size_t at) {
+        uint32_t v = 0;
+        std::memcpy(&v, b.data() + at, 4);
+        return v;
+    };
+    if (d.size() < 0x20 || std::memcmp(d.data(), "MsgStdBn\xff\xfe", 10) != 0 || d[0xC] != 0) return {};
+    uint16_t nsec = 0;
+    std::memcpy(&nsec, d.data() + 0xE, 2);
+    size_t p = 0x20, at = 0, size = 0;
+    bool found = false;
+    for (uint16_t i = 0; i < nsec; ++i) {
+        if (p + 16 > d.size()) return {};
+        const uint32_t n = u32(d, p + 4);
+        if (std::memcmp(d.data() + p, "ATR1", 4) == 0) at = p, size = n, found = true;
+        p = (p + 16 + n + 15) & ~size_t(15);
+    }
+    if (!found || at + 16 + size > d.size()) return {};
+    std::vector<uint8_t> area(d.begin() + static_cast<std::ptrdiff_t>(at + 16), d.begin() + static_cast<std::ptrdiff_t>(at + 16 + size));
+    if (area.size() < 8) return {};
+    const uint64_t count = u32(area, 0), rec = u32(area, 4), recs_end = 8 + count * rec;
+    if (rec < kSpeakerField + 4 || recs_end > area.size()) return {};
+    std::unordered_map<std::string, size_t> starts;   // text -> its first offset in the string area
+    for (size_t i = recs_end; i < area.size();) {
+        const auto z = std::find(area.begin() + static_cast<std::ptrdiff_t>(i), area.end(), uint8_t(0));
+        if (z == area.end()) return {};
+        const size_t end = static_cast<size_t>(z - area.begin());
+        starts.emplace(std::string(reinterpret_cast<const char*>(area.data() + i), end - i), i);
+        i = end + 1;
+    }
+    for (uint64_t k = 0; k < count; ++k) {
+        const size_t f = static_cast<size_t>(8 + k * rec + kSpeakerField);
+        const uint32_t v = u32(area, f);
+        if (v == 0 || v == 0xFFFFFFFFu) continue;
+        if (v < recs_end || v >= area.size() || (v > recs_end && area[v - 1] != 0)) {
+            *changed = 0;
+            return {};
+        }
+        const auto z = std::find(area.begin() + v, area.end(), uint8_t(0));
+        const std::string old(reinterpret_cast<const char*>(area.data() + v), static_cast<size_t>(z - area.begin()) - v);
+        const auto it = renames.find(old);
+        if (it == renames.end() || it->second == old) continue;
+        auto s = starts.find(it->second);
+        if (s == starts.end()) {
+            s = starts.emplace(it->second, area.size()).first;
+            area.insert(area.end(), it->second.begin(), it->second.end());
+            area.push_back(0);
+        }
+        const uint32_t nv = static_cast<uint32_t>(s->second);
+        std::memcpy(area.data() + f, &nv, 4);
+        ++*changed;
+    }
+    if (!*changed) return {};
+    std::vector<uint8_t> out(d.begin(), d.begin() + static_cast<std::ptrdiff_t>(at + 16));
+    const uint32_t asz = static_cast<uint32_t>(area.size());
+    std::memcpy(out.data() + at + 4, &asz, 4);
+    out.insert(out.end(), area.begin(), area.end());
+    while (out.size() % 16) out.push_back(0xAB);
+    out.insert(out.end(), d.begin() + static_cast<std::ptrdiff_t>(std::min(d.size(), (at + 16 + size + 15) & ~size_t(15))), d.end());
+    const uint32_t total = static_cast<uint32_t>(out.size());
+    std::memcpy(out.data() + 0x12, &total, 4);
+    return out;
+}
+
+// "/msg/<language>/levelup.msbt.zst": the language, as the path spells it
+bool match_levelup(const std::string& key) {
+    const std::string tail = "/levelup.msbt.zst";
+    return key.rfind("/msg/", 0) == 0 && key.size() > tail.size() + 5 && key.compare(key.size() - tail.size(), tail.size(), tail) == 0 &&
+           key.find('/', 5) == key.size() - tail.size();
+}
+
+void edit_levelup(const NxModFile* file, void*) {
+    std::string path = file->path ? file->path : "";
+    if (!path.empty() && path[0] == '/') path.erase(0, 1);
+    if (!g_mapped) {
+        NXLOG_W(kTag, "randomizer: %s: edited before Person.bin, so without the mapping: level-up speakers left as they are", path.c_str());
+        return;
+    }
+    const unsigned long long size = ZSTD_getFrameContentSize(file->data, static_cast<size_t>(file->size));
+    if (size == ZSTD_CONTENTSIZE_ERROR || size == ZSTD_CONTENTSIZE_UNKNOWN || size > (64ull << 20)) {
+        NXLOG_W(kTag, "randomizer: %s: not a zstd frame with its size: left as it is", path.c_str());
+        return;
+    }
+    std::vector<uint8_t> msbt(static_cast<size_t>(size));
+    const size_t got = ZSTD_decompress(msbt.data(), msbt.size(), file->data, static_cast<size_t>(file->size));
+    if (ZSTD_isError(got) || got != size) {
+        NXLOG_W(kTag, "randomizer: %s: does not decompress: left as it is", path.c_str());
+        return;
+    }
+    int changed = 0;
+    const std::vector<uint8_t> out = rewrite_speakers(msbt, g_speakers, &changed);
+    NXLOG_I(kTag, "randomizer: %s: %d level-up lines name the unit that wears their look", path.c_str(), changed);
+    if (out.empty()) return;
+    std::vector<uint8_t> comp(ZSTD_compressBound(out.size()));
+    const size_t csize = ZSTD_compress(comp.data(), comp.size(), out.data(), out.size(), 3);
+    if (ZSTD_isError(csize)) {
+        NXLOG_W(kTag, "randomizer: %s: does not compress again: left as it is", path.c_str());
+        return;
+    }
+    file->replace(file, comp.data(), csize);
+}
+
 uint64_t new_seed() {
     std::random_device rd;
     uint64_t s = (uint64_t(rd()) << 32) ^ rd() ^ uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -1135,6 +1251,8 @@ void randomizer_install() {
     msg_names_install();   // Katarina's name: she has a name ID but no text (ObeliskChamber_msg.cpp)
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
+    if (!services::modapi::add_runtime_edit("randomizer", &match_levelup, &edit_levelup, nullptr, true))
+        NXLOG_W(kTag, "randomizer: too late to rewrite the level-up speakers");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
                     services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),

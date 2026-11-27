@@ -81,6 +81,10 @@ FLAG_SUFFIX = "冥将"
 EYE_RIGS = ["007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"]
 EYE_SLOTS = {"eye": "00_", "eye_w": "00_", "eye_hi": "00_", "eye_l": "00_", "eye_r": "00_", "eye_w_l": "00_", "eye_w_r": "00_",
              "eye_hi_l": "00_", "eye_hi_r": "00_", "eye_highlight": "00_Eye_Hi"}    # a prefix (ends in _), or the new name
+# Level-up lines (Msg/<language>/Levelup.msbt, MID_LevelUp_<voice>_NN) are picked by the unit's voice code, which follows its look; but
+# each line names its speaker (attribute field 3, e.g. クラプカ), and the game shows the speaker's slot (PID_クラプカ), which wears someone
+# else. speaker_renames() / rewrite_speakers() name the slot that now wears that look instead, so the speaker is the unit on screen.
+SPEAKER_FIELD = 12          # byte offset of the speaker's string offset in an ATR1 record
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -247,6 +251,77 @@ def apply(data, mapping):
 def asset_swaps(mapping):
     """{original's asset key: replacement's}, for apply_assets(): AID_リンド -> AID_ソレル when Lind's slot wears Solel."""
     return {o.aid: r.aid for o, r in mapping if o.ident != r.ident and o.aid and r.aid}
+
+
+def speaker_renames(mapping):
+    """{speaker: new speaker} for level-up lines: a replacement's lines name the slot that wears its look (クラプカ -> ライラー when Lyrah's
+    slot wears Krapka). Speakers are base PIDs without PID_."""
+    out = {}
+    for o, r in mapping:
+        if o.ident != r.ident and o.key.startswith("PID_") and r.key.startswith("PID_"):
+            out[r.key[4:]] = o.key[4:]
+    return out
+
+
+def rewrite_speakers(data, renames):
+    """An MSBT file (uncompressed) whose lines naming a speaker of `renames` name the new one, and how many lines changed; the data as it
+    is and 0 when nothing changes or the file is not laid out as Levelup.msbt is (UTF-8, ATR1 with a string area that every speaker
+    field points into). A new speaker's string is one the string area already has (its first), else one appended to it; ATR1 grows,
+    the sections after it move. The runtime does the same (edit_levelup)."""
+    if len(data) < 0x20 or data[:8] != b"MsgStdBn" or data[8:10] != b"\xff\xfe" or data[0xC] != 0:
+        return data, 0
+    nsec = struct.unpack_from("<H", data, 0xE)[0]
+    p, atr = 0x20, None
+    for _ in range(nsec):
+        if p + 16 > len(data):
+            return data, 0
+        size = struct.unpack_from("<I", data, p + 4)[0]
+        if data[p:p + 4] == b"ATR1":
+            atr = (p, size)
+        p = (p + 16 + size + 15) & ~15
+    if atr is None or atr[0] + 16 + atr[1] > len(data):
+        return data, 0
+    at, size = atr
+    area = bytearray(data[at + 16:at + 16 + size])
+    if len(area) < 8:
+        return data, 0
+    count, rec = struct.unpack_from("<II", area, 0)
+    recs_end = 8 + count * rec
+    if rec < SPEAKER_FIELD + 4 or recs_end > len(area):
+        return data, 0
+    starts, i = {}, recs_end                    # text -> its first offset in the string area
+    while i < len(area):
+        end = area.find(b"\0", i)
+        if end < 0:
+            return data, 0
+        starts.setdefault(bytes(area[i:end]), i)
+        i = end + 1
+    changed = 0
+    for k in range(count):
+        f = 8 + k * rec + SPEAKER_FIELD
+        v = struct.unpack_from("<I", area, f)[0]
+        if v == 0 or v == 0xFFFFFFFF:
+            continue
+        if not recs_end <= v < len(area) or (v > recs_end and area[v - 1] != 0):
+            return data, 0
+        old = bytes(area[v:area.index(b"\0", v)]).decode("utf-8", "surrogateescape")
+        new = renames.get(old)
+        if new is None or new == old:
+            continue
+        raw = new.encode("utf-8")
+        if raw not in starts:
+            starts[raw] = len(area)
+            area += raw + b"\0"
+        struct.pack_into("<I", area, f, starts[raw])
+        changed += 1
+    if not changed:
+        return data, 0
+    out = bytearray(data[:at])
+    out += data[at:at + 4] + struct.pack("<I", len(area)) + data[at + 8:at + 16] + area
+    out += b"\xab" * (-len(out) % 16)
+    out += data[(at + 16 + size + 15) & ~15:]
+    struct.pack_into("<I", out, 0x12, len(out))
+    return bytes(out), changed
 
 
 def mapping_lines(seed, mapping):
@@ -601,6 +676,7 @@ def main(argv=None):
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
+    ap.add_argument("--o-msg", help="write each language's Levelup.msbt with the speakers rewritten here, as <language>.msbt, uncompressed")
     ap.add_argument("--o-rigs", help="write the portrait rigs with their eye slots renamed (EYE_RIGS) here, as <n>.skel, uncompressed")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
@@ -630,6 +706,21 @@ def main(argv=None):
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
                 fh.write(edited_assets)
+    renames = speaker_renames(mapping)
+    msg_dir = os.path.join(a.romfs, "Msg")
+    for lang in sorted(os.listdir(msg_dir)) if os.path.isdir(msg_dir) else []:
+        path = os.path.join(msg_dir, lang, "Levelup.msbt.zst")
+        if not os.path.exists(path):
+            continue
+        import inspect_romfs
+        with open(path, "rb") as fh:
+            msbt = inspect_romfs.unzstd(fh.read())
+        edited_msbt, n_lines = rewrite_speakers(msbt, renames)
+        print("randomizer: Msg/%s/Levelup.msbt.zst: %d level-up lines name the unit that wears their look" % (lang, n_lines))
+        if a.o_msg:
+            os.makedirs(a.o_msg, exist_ok=True)
+            with open(os.path.join(a.o_msg, lang + ".msbt"), "wb") as fh:
+                fh.write(edited_msbt)
     for n in EYE_RIGS:
         path = os.path.join(a.romfs, "UI", "Face", n, n + ".skel.zst")
         if not os.path.exists(path):

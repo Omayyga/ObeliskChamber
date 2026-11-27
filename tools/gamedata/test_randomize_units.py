@@ -629,5 +629,82 @@ class TestEyeSlots(unittest.TestCase):
             self.assertEqual(ru.rename_eye_slots(data), (data, []))
 
 
+def msbt(speakers, rec=20, tail=b"TAILDATA"):
+    """An MSBT file like Levelup.msbt: LBL1 (filler), ATR1 with a record a line whose field 3 is the offset of its speaker's string in
+    the area after the records (0 for none), and TXT2 (filler, `tail`)."""
+    area = bytearray()
+    recs = bytearray()
+    base = 8 + rec * len(speakers)
+    for sp in speakers:
+        r = bytearray(rec)
+        if sp is not None:
+            struct.pack_into("<I", r, 12, base + len(area))
+            area += sp.encode() + b"\0"
+        recs += r
+    atr = struct.pack("<II", len(speakers), rec) + recs + area
+
+    def section(magic, data):
+        out = magic + struct.pack("<I", len(data)) + bytes(8) + data
+        return out + b"\xab" * (-len(out) % 16)
+    body = section(b"LBL1", b"labels..") + section(b"ATR1", bytes(atr)) + section(b"TXT2", tail)
+    head = bytearray(b"MsgStdBn\xff\xfe" + bytes(22))
+    head[0xC] = 0
+    struct.pack_into("<H", head, 0xE, 3)
+    struct.pack_into("<I", head, 0x12, 0x20 + len(body))
+    return bytes(head) + body
+
+
+class TestSpeakers(unittest.TestCase):
+    def speakers(self, data):
+        p, atr = 0x20, None
+        for _ in range(struct.unpack_from("<H", data, 0xE)[0]):
+            size = struct.unpack_from("<I", data, p + 4)[0]
+            if data[p:p + 4] == b"ATR1":
+                atr = data[p + 16:p + 16 + size]
+            p = (p + 16 + size + 15) & ~15
+        n, rec = struct.unpack_from("<II", atr, 0)
+        out = []
+        for k in range(n):
+            v = struct.unpack_from("<I", atr, 8 + k * rec + 12)[0]
+            out.append(None if v == 0 else atr[v:atr.index(b"\0", v)].decode())
+        return out
+
+    def test_rewrite(self):
+        data = msbt(["クラプカ", "クラプカ", None, "カイ", "ライラー"])
+        out, n = ru.rewrite_speakers(data, {"クラプカ": "ライラー", "カイ": "マーナ", "ハンノ": "カイ"})
+        self.assertEqual(n, 3)
+        self.assertEqual(self.speakers(out), ["ライラー", "ライラー", None, "マーナ", "ライラー"])
+        self.assertEqual(struct.unpack_from("<I", out, 0x12)[0], len(out))
+        self.assertEqual(len(out) % 16, 0)
+        self.assertTrue(out.endswith(b"TAILDATA" + b"\xab" * 8))       # TXT2 moved, kept whole
+        self.assertEqual(len(out) - len(data), 16)                     # マーナ appended (10 bytes): one more 16-byte line
+        p, magics = 0x20, []
+        for _ in range(3):
+            magics.append(out[p:p + 4])
+            p = (p + 16 + struct.unpack_from("<I", out, p + 4)[0] + 15) & ~15
+        self.assertEqual((magics, p), ([b"LBL1", b"ATR1", b"TXT2"], len(out)))
+
+    def test_reuse(self):
+        # ライラー is already in the area: no growth
+        data = msbt(["クラプカ", "ライラー"])
+        out, n = ru.rewrite_speakers(data, {"クラプカ": "ライラー"})
+        self.assertEqual((n, len(out)), (1, len(data)))
+        self.assertEqual(self.speakers(out), ["ライラー", "ライラー"])
+
+    def test_left_alone(self):
+        data = msbt(["イシュマール", None])
+        self.assertEqual(ru.rewrite_speakers(data, {"クラプカ": "ライラー"}), (data, 0))
+        self.assertEqual(ru.rewrite_speakers(data[:40], {"イシュマール": "x"}), (data[:40], 0))
+        utf16 = bytearray(data)
+        utf16[0xC] = 1
+        self.assertEqual(ru.rewrite_speakers(bytes(utf16), {"イシュマール": "x"}), (bytes(utf16), 0))
+
+    def test_renames(self):
+        p = ru.Person(person(ROWS))
+        kai, tro, lin = p.find("Kai"), p.find("Tro"), p.find("Lin")
+        # Troy's slot wears Cai: Cai's lines name トロイア; Lind keeps his own
+        self.assertEqual(ru.speaker_renames([(tro, kai), (kai, lin), (lin, lin)]), {"カイ": "トロイア", "リンド": "カイ"})
+
+
 if __name__ == "__main__":
     unittest.main()
