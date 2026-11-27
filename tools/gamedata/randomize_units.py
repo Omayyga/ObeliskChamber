@@ -120,6 +120,12 @@ KASUMI_EGG = ("女", "B", "B", 2, 3)
 # face in her folder and her sex's voice (the hooded entries' Ism4M/F has no sound or quotes). Eshmel's rigs and entries stay as they are.
 KASUMI_LOOK = "カスミ"
 KASUMI_FACE = "900"                     # no 9xx folder exists in UI/Face
+# Its Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/<KASUMI_FACE_UW>: the same, with its clipping switched off. Only
+# Eshmel's rigs clip (slot Hood_Clipping clips the whole head up to Hood_Clipping_End; AHood_ and DHood_Clipping too), the game never
+# draws them with an effect, and the Underworld effect draws a clipped head as one lavender blob. A slot named ..._Clipping starts with
+# no attachment there, so no clip is active.
+KASUMI_FACE_UW = "901"
+CLIP_SLOT_SUFFIX = "_Clipping"
 KASUMI_RIGS = {"男": "015", "女": "016"}
 RIG_FILES = ("atlas.zst", "bntx.zst", "skel.zst", "spdb")
 ATLAS_KEY = bytes.fromhex("2d7a777e3f502160")   # an atlas is XOR-scrambled; these are the key's first bytes (each rig's "<n>.png\n")
@@ -545,8 +551,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
        "AID_r & F" -> r's Underworld look (as in 3, U本人 for a U of step 3) with the keyword.
 
     5. With `kasumi` (a KasumiLook: the second Eshmel is in), after step 2: FID_カスミ and FID_カスミ冥闘士 (特殊 1), copies of the
-       Eshmel portrait entry the draw names (kasumi.portrait()) with the face in UI/Face/<KASUMI_FACE> (its own rig: kasumi_rig_file)
-       and its sex's voice; look entries "AID_カスミ" -> カスミ and "AID_カスミ & SID_冥界兵" -> カスミ冥闘士 (steps 3 and 4 then treat it as
+       Eshmel portrait entry the draw names (kasumi.portrait()) with the face in UI/Face/<KASUMI_FACE> (its own rig: kasumi_rig_file;
+       the Underworld one in <KASUMI_FACE_UW>, without clipping) and its sex's voice; look entries "AID_カスミ" -> カスミ and "AID_カスミ & SID_冥界兵" -> カスミ冥闘士 (steps 3 and 4 then treat it as
        anyone's; an overwrite takes the face too); and in every look entry, beside Eshmel's alternatives, kasumi_alternatives(): the
        entry's condition list is rebuilt at the end of the data, its own alternatives first.
 
@@ -624,9 +630,9 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         if not face or "_" not in face or "FID_" + KASUMI_LOOK in fids or "FID_" + KASUMI_LOOK + "冥闘士" in fids:
             changes.append("FID_%s: skipped" % KASUMI_LOOK)
         else:
-            face = KASUMI_FACE + face[face.index("_"):]
-            new_faces.append((src, "FID_" + KASUMI_LOOK, 0, kasumi.voice(), face))
-            new_faces.append((src, "FID_" + KASUMI_LOOK + "冥闘士", 1, kasumi.voice(), face))
+            skin = face[face.index("_"):]
+            new_faces.append((src, "FID_" + KASUMI_LOOK, 0, kasumi.voice(), KASUMI_FACE + skin))
+            new_faces.append((src, "FID_" + KASUMI_LOOK + "冥闘士", 1, kasumi.voice(), KASUMI_FACE_UW + skin))
             new_looks.append(([KASUMI_AID], KASUMI_LOOK, False))
             new_looks.append(([KASUMI_AID, UNDERWORLD], KASUMI_LOOK + "冥闘士", True))
         for i, r in enumerate(entries):
@@ -958,12 +964,13 @@ def _skel_slot_colours(data):
         return None
 
 
-def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE):
+def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False):
     """One file of the second Eshmel's portrait rig (kind: one of RIG_FILES; .zst ones handed over decompressed), made from rig `src`'s
     (015 or 016) and a one-line note; (None, why) when the file is not laid out as expected. The folder name sits in fixed-length places:
     the atlas's first line "<src>.png" (the atlas is XOR-scrambled: the bytes change by src ^ dst), the BNTX texture name (a 16-bit
     length 3, the name, NUL), the .spdb paths "<src>/<src>.atlas" and "<src>/<src>.skel". The skeleton has no name but takes the colours:
-    every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's."""
+    every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's; with
+    unclip, every slot whose name ends _Clipping (CLIP_SLOT_SUFFIX) has its setup attachment (the varint after the colours) set to none."""
     out = bytearray(data)
     if kind == "atlas.zst":
         if bytes(x ^ y for x, y in zip(data[:8], ATLAS_KEY)) != (src + ".png\n").encode():
@@ -993,8 +1000,21 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE):
                 if name.endswith(suffix) and colours and colours[k]:
                     out[at:at + 4] = colours[k]
                     counts[k] += 1
-        return bytes(out), "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
+        note = "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
             x for k in range(3) for x in (counts[k], colours[k].hex() if colours and colours[k] else "none"))
+        if unclip:
+            unclipped = []
+            for name, at in reversed(slots):            # from the end: a shorter varint moves what follows
+                if not name.endswith(CLIP_SLOT_SUFFIX):
+                    continue
+                p = at + 8
+                end = p
+                while end < len(out) and out[end] & 0x80:
+                    end += 1
+                out[p:end + 1] = b"\0"
+                unclipped.append(name)
+            note += "; clipping off: %s" % (", ".join(reversed(unclipped)) or "none")
+        return bytes(out), note
     return None, "not a rig file"
 
 
@@ -1032,8 +1052,8 @@ def main(argv=None):
     ap.add_argument("--o-msg", help="write each language's Levelup.msbt and Die.msbt with the speakers rewritten here, as "
                                     "<language>_<name>.msbt, uncompressed")
     ap.add_argument("--o-rigs", help="write the portrait rigs with their eye slots renamed (EYE_RIGS) here, as <n>.skel, uncompressed")
-    ap.add_argument("--o-kasumi", help="write the second Eshmel's portrait rig (UI/Face/900) here, as 900.atlas, 900.bntx, 900.skel, "
-                                       "900.spdb, uncompressed")
+    ap.add_argument("--o-kasumi", help="write the second Eshmel's portrait rigs (UI/Face/900, 901) here, as 900.atlas, 900.bntx, "
+                                       "900.skel, 900.spdb and the same for 901, uncompressed")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
@@ -1085,16 +1105,18 @@ def main(argv=None):
     if look and os.path.exists(assets):
         import inspect_romfs
         colours = kasumi_colours(vanilla_assets, look)
-        for kind in RIG_FILES:
-            src = look.rig()
-            with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
-                raw = fh.read()
-            edited_file, note = kasumi_rig_file(kind, inspect_romfs.unzstd(raw) if kind.endswith(".zst") else raw, src, colours)
-            print("randomizer: UI/Face/%s/%s.%s: from %s: %s" % (KASUMI_FACE, KASUMI_FACE, kind, src, note))
-            if a.o_kasumi and edited_file is not None:
-                os.makedirs(a.o_kasumi, exist_ok=True)
-                with open(os.path.join(a.o_kasumi, KASUMI_FACE + "." + kind.replace(".zst", "")), "wb") as fh:
-                    fh.write(edited_file)
+        for dst, unclip in ((KASUMI_FACE, False), (KASUMI_FACE_UW, True)):
+            for kind in RIG_FILES:
+                src = look.rig()
+                with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
+                    raw = fh.read()
+                edited_file, note = kasumi_rig_file(kind, inspect_romfs.unzstd(raw) if kind.endswith(".zst") else raw, src, colours,
+                                                    dst, unclip)
+                print("randomizer: UI/Face/%s/%s.%s: from %s: %s" % (dst, dst, kind, src, note))
+                if a.o_kasumi and edited_file is not None:
+                    os.makedirs(a.o_kasumi, exist_ok=True)
+                    with open(os.path.join(a.o_kasumi, dst + "." + kind.replace(".zst", "")), "wb") as fh:
+                        fh.write(edited_file)
     for n in EYE_RIGS:
         path = os.path.join(a.romfs, "UI", "Face", n, n + ".skel.zst")
         if not os.path.exists(path):

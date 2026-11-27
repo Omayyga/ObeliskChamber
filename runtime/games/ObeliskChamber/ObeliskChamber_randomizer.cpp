@@ -224,6 +224,11 @@ constexpr uint64_t kKasumiSalt = 0x4B4153554D49ull;                             
 // UI/Face/900 (add_runtime_copy) with her colours written into those slots, and portrait entries FID_カスミ, FID_カスミ冥闘士 using it.
 constexpr const char* kKasumiLook = "\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x9f";                                 // カスミ
 constexpr const char* kKasumiFace = "900";
+// The Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/901: the same, with its clipping switched off (only Eshmel's
+// rigs clip, the game never draws them with an effect, and the Underworld effect draws a clipped head as one lavender blob): every slot
+// named ..._Clipping starts with no attachment.
+constexpr const char* kKasumiFaceUw = "901";
+constexpr const char* kClipSlotSuffix = "_Clipping";
 const char* const kRigFiles[] = {"atlas.zst", "bntx.zst", "skel.zst", "spdb"};
 constexpr uint8_t kAtlasKey[8] = {0x2d, 0x7a, 0x77, 0x7e, 0x3f, 0x50, 0x21, 0x60};   // an atlas's XOR key, first bytes
 const char* const kTintSlots[] = {"_Skin", "_Lip", "_Hair"};                         // the game's order: skin, lip, hair
@@ -984,9 +989,9 @@ void edit_assets(const NxModFile* file, void*) {
         if (face.find('_') == std::string::npos || fids.count("FID_" + look) || fids.count("FID_" + look + suffix)) {
             ++changes;   // skipped
         } else {
-            face = kKasumiFace + face.substr(face.find('_'));
-            new_faces.push_back({src->second, "FID_" + look, 0, g_kasumi.voice(), face});
-            new_faces.push_back({src->second, "FID_" + look + suffix, 1, g_kasumi.voice(), face});
+            const std::string skin = face.substr(face.find('_'));
+            new_faces.push_back({src->second, "FID_" + look, 0, g_kasumi.voice(), kKasumiFace + skin});
+            new_faces.push_back({src->second, "FID_" + look + suffix, 1, g_kasumi.voice(), kKasumiFaceUw + skin});
             new_looks.push_back({{kKasumiAid}, look, false});
             new_looks.push_back({{kKasumiAid, underworld}, look + suffix, true});
         }
@@ -1436,8 +1441,8 @@ bool skel_slot_colours(const std::vector<uint8_t>& d, std::vector<std::pair<std:
     return ok;
 }
 
-std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<uint8_t>& d, const std::string& src, std::string* note) {
-    const std::string dst = kKasumiFace;
+std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<uint8_t>& d, const std::string& src, const std::string& dst,
+                                     bool unclip, std::string* note) {
     std::vector<uint8_t> out = d;
     auto count = [](const std::vector<uint8_t>& hay, const std::string& needle, size_t* first) {
         size_t n = 0;
@@ -1508,18 +1513,41 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
         };
         *note = "slots coloured: skin " + std::to_string(counts[0]) + " (" + hex(g_kasumi_colours[0]) + "), lip " + std::to_string(counts[1]) +
                 " (" + hex(g_kasumi_colours[1]) + "), hair " + std::to_string(counts[2]) + " (" + hex(g_kasumi_colours[2]) + ")";
+        if (unclip) {
+            const std::string clip = kClipSlotSuffix;
+            std::vector<std::string> unclipped;
+            for (size_t i = slots.size(); i-- > 0;) {   // from the end: a shorter varint moves what follows
+                const std::string& name = slots[i].first;
+                if (name.size() < clip.size() || name.compare(name.size() - clip.size(), clip.size(), clip) != 0) continue;
+                const size_t p = slots[i].second + 8;
+                size_t end = p;
+                while (end < out.size() && (out[end] & 0x80)) ++end;
+                if (end >= out.size()) continue;
+                out.erase(out.begin() + static_cast<std::ptrdiff_t>(p), out.begin() + static_cast<std::ptrdiff_t>(end + 1));
+                out.insert(out.begin() + static_cast<std::ptrdiff_t>(p), uint8_t(0));
+                unclipped.insert(unclipped.begin(), name);
+            }
+            std::string list;
+            for (const std::string& n : unclipped) list += (list.empty() ? "" : ", ") + n;
+            *note += "; clipping off: " + (list.empty() ? std::string("none") : list);
+        }
         return out;
     }
     *note = "not a rig file";
     return {};
 }
 
-// "/ui/face/900/900.<kind>": the kind; empty for another file
-std::string kasumi_rig_kind(const std::string& key) {
-    const std::string pre = std::string("/ui/face/") + kKasumiFace + "/" + kKasumiFace + ".";
-    if (key.rfind(pre, 0) != 0) return std::string();
-    const std::string kind = key.substr(pre.size());
-    return std::any_of(std::begin(kRigFiles), std::end(kRigFiles), [&](const char* k) { return kind == k; }) ? kind : std::string();
+// "/ui/face/900/900.<kind>" or 901: the kind, and *dst the folder; empty for another file
+std::string kasumi_rig_kind(const std::string& key, std::string* dst = nullptr) {
+    for (const char* folder : {kKasumiFace, kKasumiFaceUw}) {
+        const std::string pre = std::string("/ui/face/") + folder + "/" + folder + ".";
+        if (key.rfind(pre, 0) != 0) continue;
+        const std::string kind = key.substr(pre.size());
+        if (std::none_of(std::begin(kRigFiles), std::end(kRigFiles), [&](const char* k) { return kind == k; })) return std::string();
+        if (dst) *dst = folder;
+        return kind;
+    }
+    return std::string();
 }
 bool match_kasumi_rig(const std::string& key) {
     const std::string kind = kasumi_rig_kind(key);
@@ -1530,7 +1558,8 @@ bool match_kasumi_skel(const std::string& key) { return kasumi_rig_kind(key) == 
 void edit_kasumi_rig(const NxModFile* file, void*) {
     std::string key = file->path ? file->path : "";
     for (char& c : key) c = static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
-    const std::string kind = kasumi_rig_kind(key);
+    std::string dst;
+    const std::string kind = kasumi_rig_kind(key, &dst);
     const bool zst = kind.size() > 4 && kind.compare(kind.size() - 4, 4, ".zst") == 0;
     std::vector<uint8_t> data(file->data, file->data + file->size);
     if (zst) {
@@ -1549,8 +1578,8 @@ void edit_kasumi_rig(const NxModFile* file, void*) {
     if (kind == "skel.zst" && !g_kasumi_coloured)
         NXLOG_W(kTag, "randomizer: %s: edited before AssetTable.bin, so without the colours", file->path);
     std::string note;
-    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), &note);
-    NXLOG_I(kTag, "randomizer: UI/Face/%s/%s.%s: from %s: %s", kKasumiFace, kKasumiFace, kind.c_str(), g_kasumi.rig().c_str(), note.c_str());
+    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), dst, dst == kKasumiFaceUw, &note);
+    NXLOG_I(kTag, "randomizer: UI/Face/%s/%s.%s: from %s: %s", dst.c_str(), dst.c_str(), kind.c_str(), g_kasumi.rig().c_str(), note.c_str());
     if (out.empty()) return;
     if (zst) {
         std::vector<uint8_t> comp(ZSTD_compressBound(out.size()));
@@ -1759,13 +1788,14 @@ void randomizer_install() {
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
     if (g_set.eshmel) {
-        // the second Eshmel's portrait rig: copies of 015's or 016's four files in UI/Face/900, edited as they load (the skeleton after
-        // AssetTable.bin, whose edit reads the colours)
-        const std::string src = g_kasumi.rig(), dst = kKasumiFace;
+        // the second Eshmel's portrait rigs: copies of 015's or 016's four files in UI/Face/900 and 901 (Underworld, no clipping),
+        // edited as they load (the skeletons after AssetTable.bin, whose edit reads the colours)
+        const std::string src = g_kasumi.rig();
         bool ok = true;
-        for (const char* kind : kRigFiles)
-            ok = services::modapi::add_runtime_copy("randomizer", "/UI/Face/" + src + "/" + src + "." + kind,
-                                                    "/UI/Face/" + dst + "/" + dst + "." + kind) && ok;
+        for (const std::string dst : {kKasumiFace, kKasumiFaceUw})
+            for (const char* kind : kRigFiles)
+                ok = services::modapi::add_runtime_copy("randomizer", "/UI/Face/" + src + "/" + src + "." + kind,
+                                                        "/UI/Face/" + dst + "/" + dst + "." + kind) && ok;
         ok = services::modapi::add_runtime_edit("randomizer", &match_kasumi_rig, &edit_kasumi_rig, nullptr) && ok;
         ok = services::modapi::add_runtime_edit("randomizer", &match_kasumi_skel, &edit_kasumi_rig, nullptr, true) && ok;
         if (!ok) NXLOG_W(kTag, "randomizer: too late to add the second Eshmel's portrait rig");

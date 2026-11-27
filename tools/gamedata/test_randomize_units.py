@@ -826,12 +826,12 @@ class TestKasumi(unittest.TestCase):
 
     def test_assets(self):
         data = asset_table(self.ENTRIES, self.FACES)
-        for look, face in ((self.EGG, ("Ism0F", "900_BHoodOn")), (ru.KasumiLook("男", "C", "A", 1, 1), ("Ism0M", "900_CHoodOff"))):
+        for look, face in ((self.EGG, ("Ism0F", "BHoodOn")), (ru.KasumiLook("男", "C", "A", 1, 1), ("Ism0M", "CHoodOff"))):
             out, changes = ru.apply_assets(data, [], [], {"AID_リンド": "AID_カスミ"}, [], kasumi=look)
             b, entries, faces = self.read(out)
             # its own portraits: copies of the Eshmel one its draw names, in its own rig, with its sex's voice
-            self.assertEqual(faces["FID_カスミ"], face + (0,))
-            self.assertEqual(faces["FID_カスミ冥闘士"], face + (1,))
+            self.assertEqual(faces["FID_カスミ"], (face[0], "900_" + face[1], 0))
+            self.assertEqual(faces["FID_カスミ冥闘士"], (face[0], "901_" + face[1], 1))           # its own rig, without clipping
             self.assertEqual(faces["FID_イシュマール女Bフード"], ("Ism4F", "016_BHoodOn", 0))          # Eshmel's stay as they are
             self.assertFalse([k for k in faces if k.startswith("FID_イシュマール") and k.endswith("冥闘士")])
             self.assertEqual({n for _, n in b.labels if n.startswith("FID_")}, set(faces))
@@ -853,7 +853,7 @@ class TestKasumi(unittest.TestCase):
         lord = asset_table(self.ENTRIES + [("e9", [["AID_カイ"]], "カイ", []), ("e10", [["AID_カイ", "SID_冥界兵"]], "カイ冥闘士", ["SID_冥界兵"])],
                            self.FACES + [("FID_カイ", "Kai0", "017", 0), ("FID_カイ冥闘士", "Kai9", "017", 1)])
         _, _, faces = self.read(ru.apply_assets(lord, [], [], {"AID_カイ": "AID_カスミ"}, ["カイ冥闘士"], kasumi=self.EGG)[0])
-        self.assertEqual(faces["FID_カイ冥闘士"], ("Ism0F", "900_BHoodOn", 1))
+        self.assertEqual(faces["FID_カイ冥闘士"], ("Ism0F", "901_BHoodOn", 1))
         self.assertEqual(faces["FID_カイ冥闘士本人"], ("Kai9", "017", 1))
         self.assertEqual(ru.apply_assets(data, [], [], None, []), (data, []))                  # off: nothing
 
@@ -907,6 +907,20 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual(len(out), len(skel))
         self.assertEqual(note, "slots coloured: skin 1 (dcba9eff), lip 1 (da9681ff), hair 1 (9bc0d1ff)")
         self.assertEqual(ru.kasumi_rig_file("skel.zst", skeleton(["x_Hair"], version="4.2.01"), "016", colours)[0], None)
+        # the Underworld rig: every ..._Clipping slot starts with no attachment (the varint after the colours); the rest as before
+        clipped = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"])
+        out, note = ru.kasumi_rig_file("skel.zst", clipped, "016", colours, "901", unclip=True)
+        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping")
+        at = dict(ru._skel_slot_colours(out))
+        self.assertEqual((out[at["Hood_Clipping"] + 8], out[at["A_TopHair_Hair"] + 8], out[at["Hood_Clipping_End"] + 8]), (0, 1, 1))
+        self.assertEqual(len(out), len(clipped))
+        long_att = bytearray(clipped)                       # an attachment index of two bytes becomes one
+        first = ru._skel_slot_colours(clipped)[0][1] + 8
+        long_att[first:first + 1] = b"\x81\x02"
+        out, _ = ru.kasumi_rig_file("skel.zst", bytes(long_att), "016", colours, "901", unclip=True)
+        self.assertEqual(len(out), len(long_att) - 1)
+        self.assertEqual(out[ru._skel_slot_colours(out)[0][1] + 8], 0)
+        self.assertEqual(ru.kasumi_rig_file("spdb", spdb, "016", dst="901")[0], b"\x0d\x00\x00\x00901/901.atlas\x0c\x00\x00\x00901/901.skel")
 
     def test_look_helpers(self):
         self.assertEqual((self.EGG.portrait(), self.EGG.voice(), self.EGG.rig()), ("イシュマール女Bフード", "Ism0F", "016"))
