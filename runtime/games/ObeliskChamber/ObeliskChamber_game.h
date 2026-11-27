@@ -137,7 +137,7 @@ void menu_ask_quit();
 // our text. msg_install before the game's file system is set up; msg_ready once a file got them.
 constexpr const char* kQuitMid = "MID_ObeliskChamber_Quit_Confirm";
 void msg_install();
-// The unit randomizer's names (Katarina's) in each language's Msg/<language>/Person.msbt: randomizer_install calls it when it is on.
+// The unit randomizer's names (Katarina's, the second Eshmel's Kasumi) in each language's Msg/<language>/Person.msbt: randomizer_install calls it when it is on.
 void msg_names_install();
 bool msg_ready();
 // ObeliskChamber_optmenu.cpp: the recomp's settings as a screen of the game's own Options class, opened by that entry ([fefw] native_options)

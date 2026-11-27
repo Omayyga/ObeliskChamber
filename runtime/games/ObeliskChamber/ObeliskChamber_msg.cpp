@@ -11,7 +11,8 @@
 // table with another hash, is left as it is, and our dialog then falls back to the overlay's prompt.
 //
 // The unit randomizer adds names the same way (msg_names_install) to each language's Msg/<language>/Person.msbt.zst, after MPID_Leda:
-// Katarina, who is in its pool, has a name ID (MPID_Katarina) but no text in any language. A name starts with the control tags
+// Katarina, who is in its pool, has a name ID (MPID_Katarina) but no text in any language; the second Eshmel ([fefw] randomize_eshmel)
+// has a name ID of its own, MPID_Kasumi (as Persona 5 Royal spells her: かすみ, 카스미, 霞). A name starts with the control tags
 // MPID_Leda's text starts with (Spanish and Italian names begin with one).
 #include "ObeliskChamber_game.h"
 
@@ -43,9 +44,11 @@ struct Msg {
 const Msg kMsgs[] = {
     {kQuitMid, "Quit the game?\nProgress since your last save will be lost.", "要退出游戏吗？\n上次存档之后的进度将会丢失。"},
 };
-// The randomizer's names (msg_names_install): Katarina is in its pool, and has a name ID but no text in any language
+// The randomizer's names (msg_names_install): Katarina is in its pool, and has a name ID but no text in any language; the second
+// Eshmel's name ID is new
 const Msg kNames[] = {
     {"MPID_Katarina", "Katarina", "卡塔琳娜", "カタリナ", "카타리나"},
+    {"MPID_Kasumi", "Kasumi", "霞", "かすみ", "카스미"},
 };
 
 // One kind of edit: messages added after an anchor label (whose attributes and style they copy) in the files its match names
@@ -435,7 +438,7 @@ void msg_install() {
 
 void msg_names_install() {
     if (!services::modapi::add_runtime_edit("randomizer", &match_person, &edit_msbt, &g_names))
-        NXLOG_W(kTag, "too late to add the randomizer's names: Katarina has none");
+        NXLOG_W(kTag, "too late to add the randomizer's names: Katarina and Kasumi have none");
 }
 
 bool msg_ready() { return g_system.files.load() > 0; }

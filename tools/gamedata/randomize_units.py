@@ -92,6 +92,29 @@ SPEAKER_FIELD = 12          # byte offset of the speaker's string offset in an A
 QUOTE_FILES = ["Levelup", "Die"]
 QUOTE_PREFIXES = ("MID_LevelUp_", "MID_LevelUp_Min_", "MID_LevelUp_Max_", "MID_Skill_LevelUp_", "MID_Skill_LevelUp_Max_", "MID_DIE_",
                   "MID_RETREAT_")
+# The second Eshmel ([fefw] randomize_eshmel, experimental). Eshmel's own slot is never replaced: the game hands the player's avatar
+# settings (sex, hairstyle, outfit, skin and hair colours, all look conditions on AID_イシュマール) to a look only through Eshmel's own
+# record, so with that record wearing someone else both the creator and every copy of the look break. Instead a second Eshmel joins the
+# pool as a look of its own: KASUMI_AID, a look key no vanilla entry has, with the parts drawn from the seed (draw_kasumi). Every vanilla
+# look entry with an AID_イシュマール alternative gets an alternative for KASUMI_AID beside it, the drawn parts already satisfied
+# (kasumi_alternatives), so the entries keep their order. It has no slot of its own, so Kumos (KASUMI_SLOT, never placed on a map) joins
+# as a slot only. In Person.bin its slot takes KASUMI_MPID and KASUMI_AID (strings the file grows by) and the drawn sex as 性別.
+KASUMI_IDENT = "Ksm"                    # how randomize_force and the log name it
+KASUMI_MPID = "MPID_Kasumi"             # its name ID: Kasumi (ObeliskChamber_msg.cpp adds the text)
+KASUMI_AID = "AID_カスミ"
+KASUMI_SLOT = "Kon"                     # Kumos: a slot only while the second Eshmel is in
+KASUMI_SLOT_FORM = "コン・ムー"            # his asset key: he has no Underworld form, and gets one (as UNDERWORLD_FORMS) while he is in.
+                                        # His own look is never handed out, but randomize_force may put it on someone (Lin=Kon).
+ESHMEL_AID = "AID_イシュマール"
+ESHMEL_HOOD = "AID_イシュマールフード"     # a story variable (Variable.bin) in vanilla: the hooded look
+ESHMEL_STORY = ("AID_イシュマール浮遊", "!イシュマール支援")   # story-only alternatives left out: the floating form, no shadow in Parts 1-2
+SEXES, HEADS, BODIES, SKINS, HAIRS = ("男", "女"), "ABCD", "ABCDE", 12, 16      # the creator's lists, in data order
+# The easter egg: 1 draw in KASUMI_EGG_ODDS is hooded, with the owner's own Eshmel (female, hairstyle B, outfit B, skin 2, hair 3). The
+# hooded portrait entries have voice Ism4M/F, which has no sound or quotes: its portrait is a copy, FID_<KASUMI_HOOD>, with voice Ism0F.
+KASUMI_EGG_ODDS = 50
+KASUMI_EGG = ("女", "B", "B", 2, 3)
+KASUMI_HOOD = "カスミ"                   # the hooded look's portrait entry FID_カスミ, and FID_カスミ冥闘士
+KASUMI_SALT = 0x4B4153554D49            # "KASUMI": the look's generator is the seed's, apart from the shuffle's
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -127,6 +150,7 @@ class Character:
         self.ident, self.rec, self.key = ident, rec, key
         self.name_ptr, self.aid_ptr, self.key_ptr, self.gender, self.mpid = name_ptr, aid_ptr, key_ptr, gender, mpid
         self.aid = aid          # the model's asset key, AID_カイ
+        self.look = None        # the second Eshmel: its KasumiLook (it has no record: rec, the pointers and key are None / "")
 
     def label(self):
         """How the log names a character: identifier and name ID, e.g. Kai(Kai), Tro(Troja)."""
@@ -163,6 +187,88 @@ class Person:
         return None
 
 
+class KasumiLook:
+    """The second Eshmel's parts: sex (男 / 女), hairstyle (A-D), outfit (A-E), skin (1-12), hair colour (1-16), and the hood."""
+
+    def __init__(self, sex, head, body, skin, hair, hood=False):
+        self.sex, self.head, self.body, self.skin, self.hair, self.hood = sex, head, body, skin, hair, hood
+
+    def terms(self):
+        """The avatar conditions this look satisfies."""
+        t = {self.sex, "頭部" + self.head, "身体" + self.body, "肌色%d" % self.skin, "髪色%d" % self.hair}
+        return t | {ESHMEL_HOOD} if self.hood else t
+
+    def gender(self):
+        return 1 if self.sex == "男" else 2
+
+    def underworld(self):
+        """Its Underworld look (容姿)."""
+        return (KASUMI_HOOD if self.hood else "イシュマール" + self.sex + self.head) + "冥闘士"
+
+    def describe(self):
+        return "%s 頭部%s 身体%s 肌色%d 髪色%d%s" % (self.sex, self.head, self.body, self.skin, self.hair, " フード" if self.hood else "")
+
+
+def is_avatar_term(term):
+    """A condition the player's avatar settings decide: 男, 女, 頭部A-D, 身体A-E, 肌色N, 髪色N, the hood."""
+    if term in SEXES or term == ESHMEL_HOOD:
+        return True
+    for pre, values in (("頭部", HEADS), ("身体", BODIES)):
+        if term.startswith(pre) and term[len(pre):] in values and len(term) == len(pre) + 1:
+            return True
+    for pre in ("肌色", "髪色"):
+        if term.startswith(pre) and term[len(pre):].isascii() and term[len(pre):].isdigit():
+            return True
+    return False
+
+
+def draw_kasumi(seed, hood=False):
+    """The second Eshmel's look for a seed: 1 in KASUMI_EGG_ODDS (or always, with hood) the easter egg, else every part at random."""
+    rng = SplitMix64(seed ^ KASUMI_SALT)
+    if rng.next() % KASUMI_EGG_ODDS == 0 or hood:
+        return KasumiLook(*KASUMI_EGG, hood=True)
+    sex = SEXES[rng.next() % len(SEXES)]
+    head = HEADS[rng.next() % len(HEADS)]
+    body = BODIES[rng.next() % len(BODIES)]
+    skin = 1 + rng.next() % SKINS
+    hair = 1 + rng.next() % HAIRS
+    return KasumiLook(sex, head, body, skin, hair)
+
+
+def kasumi_character(look):
+    """The second Eshmel as a replacement: no record, a name and model the file does not have yet."""
+    c = Character(KASUMI_IDENT, None, "", None, None, None, look.gender(), KASUMI_MPID, KASUMI_AID)
+    c.look = look
+    return c
+
+
+def kasumi_line(look):
+    return "randomizer: second Eshmel %s(%s): %s" % (KASUMI_IDENT, KASUMI_MPID[5:], look.describe())
+
+
+def kasumi_alternatives(alts, look):
+    """The alternatives of a look entry's condition (lists of terms) that the second Eshmel gets beside Eshmel's: each with
+    AID_イシュマール becomes KASUMI_AID, the avatar terms the look satisfies dropped; one needing another part, or a story-only one, is left
+    out; and one the entry already has, or twice, only once."""
+    out = []
+    terms = look.terms()
+    for alt in alts:
+        if ESHMEL_AID not in alt or any(t in ESHMEL_STORY for t in alt):
+            continue
+        new = []
+        for t in alt:
+            if t == ESHMEL_AID:
+                new.append(KASUMI_AID)
+            elif not is_avatar_term(t):
+                new.append(t)
+            elif t not in terms:
+                new = None
+                break
+        if new is not None and new not in out and new not in alts:
+            out.append(new)
+    return out
+
+
 def parse_force(text):
     """[(original, replacement)] and warnings; an entry that is not original=replacement is skipped, as the runtime does."""
     pairs, warn = [], []
@@ -177,16 +283,25 @@ def parse_force(text):
     return pairs, warn
 
 
-def make_mapping(person, seed, pool=POOL, force=()):
+def is_kasumi_name(name):
+    """The second Eshmel, as randomize_force names it: Ksm, Kasumi or MPID_Kasumi, any case."""
+    return name.strip().lower().replace(" ", "") in (KASUMI_IDENT.lower(), KASUMI_MPID.lower(), KASUMI_MPID[5:].lower())
+
+
+def make_mapping(person, seed, pool=POOL, force=(), kasumi=None):
     """[(original Character, replacement Character)] and warnings. Forced pairs first, in the order given. Then the pool characters not
     forced (originals) and those not yet used as a replacement (candidates), each in Person.bin's order: the candidates are shuffled
     (Fisher-Yates, from the last), and original i takes candidate i. Nobody keeps their own look: while an original drew itself, the
     candidates are shuffled again, from where they are, with the same generator (about 2.7 shuffles for the full pool). Only a lone
-    candidate, or SHUFFLE_TRIES shuffles that all failed (which a real pool cannot do), can leave someone as themselves."""
+    candidate, or SHUFFLE_TRIES shuffles that all failed (which a real pool cannot do), can leave someone as themselves.
+    With `kasumi` (kasumi_character()), the second Eshmel is the last candidate and KASUMI_SLOT an original only; a forced pair may name
+    it as a replacement."""
     warn = []
     used, done, out = set(), set(), []
     for a, b in force:
         ca, cb = person.find(a), person.find(b)
+        if kasumi is not None and is_kasumi_name(b):
+            cb = kasumi
         if ca is None or cb is None:
             warn.append("randomize_force: %s=%s: no character named %s" % (a, b, a if ca is None else b))
             continue
@@ -199,9 +314,12 @@ def make_mapping(person, seed, pool=POOL, force=()):
     for ident in pool:
         if ident not in person.by_ident:
             warn.append("pool: no character %s in Person.bin" % ident)
+    slots = set(pool) | ({KASUMI_SLOT} if kasumi is not None else set())
     pool = set(pool)
-    origs = [c for c in person.chars if c.ident in pool and c.ident not in done]
+    origs = [c for c in person.chars if c.ident in slots and c.ident not in done]
     cands = [c for c in person.chars if c.ident in pool and c.ident not in used]
+    if kasumi is not None and kasumi.ident not in used:
+        cands.append(kasumi)
     rng = SplitMix64(seed)
     n = min(len(origs), len(cands))
     for _ in range(SHUFFLE_TRIES):
@@ -223,10 +341,14 @@ def apply(data, mapping):
     out = bytearray(data)
     swap = {o.ident: (o, r) for o, r in mapping if o.ident != r.ident}
     changed, skipped = [], []
+    new_strings = []    # (pointer field, string): the second Eshmel's name and model, which the file does not have yet
 
     def put_ptr(off, value):
         assert off in b.ptrs, "0x%x is not a pointer field" % off
-        struct.pack_into("<Q", out, gamedata_bin.HEADER + off, value)
+        if isinstance(value, str):
+            new_strings.append((off, value))
+        else:
+            struct.pack_into("<Q", out, gamedata_bin.HEADER + off, value)
 
     for rec in p.t.records():
         pair = swap.get(b.string(rec + f[F_IDENT]))
@@ -238,11 +360,12 @@ def apply(data, mapping):
             skipped.append(b.key(rec))
             continue
         what = []
-        if b.ptr(rec + f[F_NAME]) is not None and r.name_ptr is not None:
-            put_ptr(rec + f[F_NAME], r.name_ptr)
+        kasumi = r.look is not None
+        if b.ptr(rec + f[F_NAME]) is not None and (r.name_ptr is not None or kasumi):
+            put_ptr(rec + f[F_NAME], r.mpid if kasumi else r.name_ptr)
             what.append("name")
         if aid is not None:
-            put_ptr(rec + f[F_AID], r.aid_ptr)
+            put_ptr(rec + f[F_AID], r.aid if kasumi else r.aid_ptr)
             what.append("model")
         # A borrowed model points at the character's own base record, which now carries the replacement's model. Never at the
         # replacement's base: that one is edited too when the replacement is itself replaced (Lin -> Tro, Tro -> Mhm made Lind's
@@ -252,6 +375,11 @@ def apply(data, mapping):
             what.append("borrowed model")
         out[gamedata_bin.HEADER + rec + f[F_GENDER]] = r.gender
         changed.append((b.key(rec), what))
+    if new_strings:
+        e = gamedata_edit.Editor(bytes(out))
+        for off, text in new_strings:
+            e.set_ptr(off, text)
+        return e.build(), changed, skipped
     return bytes(out), changed, skipped
 
 
@@ -381,7 +509,7 @@ def summary_line(changed, skipped, edited):
         len(changed), len(skipped), fnv1a64(edited))
 
 
-def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, cutscene_faces=CUTSCENE_FACES):
+def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, cutscene_faces=CUTSCENE_FACES, kasumi=None):
     """AssetTable.bin with living and Underworld forms, and a list of what changed. The file grows (gamedata_edit.Editor); the runtime
     does the same in edit_assets(), step for step, so the bytes must match. `swaps` is asset_swaps(mapping): steps 3 and 4 need it.
 
@@ -400,6 +528,12 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
        replaced by r: F in the condition becomes SID_冥界兵 (the condition now repeats the other), and, once per F, a new look entry
        "AID_r & F" -> r's Underworld look (as in 3, U本人 for a U of step 3) with the keyword.
 
+    5. With `kasumi` (a KasumiLook: the second Eshmel is in), after step 2: a tinted copy FID_イシュマール<sex><head>冥闘士 of each of
+       Eshmel's 8 unhooded portraits, and FID_カスミ / FID_カスミ冥闘士, copies of the easter egg's hooded one with voice Ism0F; a look
+       entry "AID_カスミ & !Spine & !AID_フード無し" -> カスミ when it is the easter egg, and "AID_カスミ & SID_冥界兵" -> its Underworld
+       look (steps 3 and 4 then treat it as anyone's); and in every look entry, beside Eshmel's alternatives, kasumi_alternatives():
+       the entry's condition list is rebuilt at the end of the data, its own alternatives first.
+
     New portrait entries go after the last of 容姿情報 (with a label each, as every entry has), new look entries after the last of
     アセットテーブル: later entries win, so an Underworld entry overrides the plain one, as Cai's does. A new look entry is a copy of
     the vanilla "AID_ブレザ & SID_冥界兵" entry (only its condition, look and keyword set). Its condition lists go at the end of the data."""
@@ -410,6 +544,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     f_voice, f_special = faces.field("ボイス").off, faces.field("特殊").off
     swaps = swaps or {}
     changes = []
+    if kasumi is not None:
+        forms = list(forms) + [KASUMI_SLOT_FORM]
 
     def strings(at):
         n, arr = b.u32(at) & 0xFFFF, b.ptr(at + 8)
@@ -433,7 +569,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         return any([aid, UNDERWORLD] in conds[r] for r in entries)
 
     new_faces = []      # (source portrait entry, new key, 特殊 or None to keep, voice or None to keep)
-    new_looks = []      # (AID_x, second condition, look)
+    new_looks = []      # ([condition terms], look, with the keyword SID_冥界兵)
     for look in looks:
         living = look[:-len("冥闘士")]
         src = fids.get("FID_" + look)
@@ -451,7 +587,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             e.u32(plain + f_kw, e.u32(plain + f_kw) & 0xFFFF0000)
             changes.append("%s: living model" % aid)
         if not has_underworld(aid):
-            new_looks.append((aid, UNDERWORLD, look))
+            new_looks.append(([aid, UNDERWORLD], look, True))
     for stem in forms:
         aid = "AID_" + stem
         plain = next((r for r in entries if [aid] in conds[r] and b.string(r + f_look)), None)
@@ -460,12 +596,40 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             changes.append("%s: skipped" % aid)
             continue
         new_faces.append((fids["FID_" + living], "FID_" + living + "冥闘士", 1, None))
-        new_looks.append((aid, UNDERWORLD, living + "冥闘士"))
+        new_looks.append(([aid, UNDERWORLD], living + "冥闘士", True))
+    # The second Eshmel. Portraits for every look a seed can draw, whatever this one drew: a tinted copy of each of Eshmel's 8 unhooded
+    # portraits, and the easter egg's hooded one (living and tinted) with the voice of its sex's unhooded set. Then its look entries:
+    # the hooded one's portrait (as Eshmel's hooded entries give it, "!Spine & !AID_フード無し"), and its Underworld look. Then
+    # (kasumi_alts) an alternative for KASUMI_AID beside each of Eshmel's alternatives in every look entry: the class outfits too.
+    kasumi_alts = []    # (its index, look entry, [new alternatives])
+    if kasumi is not None:
+        for sex in SEXES:
+            for head in HEADS:
+                stem = "イシュマール" + sex + head
+                if "FID_" + stem not in fids or "FID_" + stem + "冥闘士" in fids:
+                    changes.append("FID_%s冥闘士: skipped" % stem)
+                    continue
+                new_faces.append((fids["FID_" + stem], "FID_" + stem + "冥闘士", 1, None))
+        egg_sex, egg_head = KASUMI_EGG[0], KASUMI_EGG[1]
+        hood_src = fids.get("FID_イシュマール" + egg_sex + egg_head + "フード")
+        if hood_src is None or "FID_" + KASUMI_HOOD in fids:
+            changes.append("FID_%s: skipped" % KASUMI_HOOD)
+        else:
+            voice = "Ism0" + ("M" if egg_sex == "男" else "F")
+            new_faces.append((hood_src, "FID_" + KASUMI_HOOD, None, voice))
+            new_faces.append((hood_src, "FID_" + KASUMI_HOOD + "冥闘士", 1, voice))
+        if kasumi.hood:
+            new_looks.append(([KASUMI_AID, "!Spine", "!AID_フード無し"], KASUMI_HOOD, False))
+        new_looks.append(([KASUMI_AID, UNDERWORLD], kasumi.underworld(), True))
+        for i, r in enumerate(entries):
+            alts = kasumi_alternatives(conds[r], kasumi)
+            if alts and b.u32(r + f_cond) >> 16 == 16:
+                kasumi_alts.append((i, r, alts))
 
     def underworld_look(aid):
         """aid's Underworld look after steps 1 and 2: its new look entry's, else that of the last "aid & SID_冥界兵" entry with one."""
-        for a, second, look in new_looks:
-            if a == aid and second == UNDERWORLD:
+        for terms, look, _ in new_looks:
+            if terms == [aid, UNDERWORLD]:
                 return look
         found = None
         for r in entries:
@@ -518,7 +682,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             if v is None:
                 changes.append("%s: skipped" % alt[1])
                 continue
-            new_looks.append((swaps[alt[0]], alt[1], renamed.get(v, v)))
+            new_looks.append(([swaps[alt[0]], alt[1]], renamed.get(v, v), True))
     if new_looks and template is None:
         changes.append("no template look entry: no Underworld forms added")
         new_looks = []
@@ -529,7 +693,11 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     face_end, look_end, data_end = face_recs[-1] + faces.rec_size, entries[-1] + assets.rec_size, b.data_size
     face_raw = b"".join(bytes(b.d[H + src:H + src + faces.rec_size]) for src, _, _, _ in new_faces)
     look_raw = bytes(b.d[H + template:H + template + assets.rec_size]) * len(new_looks) if new_looks else b""
-    aux_raw = bytes(32 * len(new_looks))
+    # the end of the data: each new look entry's condition (one alternative: its header, then its strings), then each condition list
+    # the second Eshmel's alternatives make: all the alternatives' headers (the entry's own copied, then the new), then the new strings
+    aux_size = sum(16 + 8 * len(terms) for terms, _, _ in new_looks)
+    aux_size += sum(16 * ((b.u32(r + f_cond) & 0xFFFF) + len(alts)) + 8 * sum(len(a) for a in alts) for _, r, alts in kasumi_alts)
+    aux_raw = bytes(aux_size)
     # in place, at the offsets of the file as it is: the record counts of the two tables
     e.u32(labels["容姿情報"] + 0x10, (len(face_recs) + len(new_faces)) << 16)
     e.u32(labels["アセットテーブル"] + 0x10, (len(entries) + len(new_looks)) << 16)
@@ -578,22 +746,48 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             e.data[now(dst) + f_special] = special
         changes.append("FID_%s shows %s" % (u, v))
     look_row = max(b.u32(r + 0x14) >> 16 for r in entries)
-    aux = now(data_end) - len(aux_raw)
-    for i, (aid, second, look) in enumerate(new_looks):
+    lists = now(data_end) - len(aux_raw)
+    for i, (terms, look, keyword) in enumerate(new_looks):
         rec = look_end + assets.rec_size * i
-        lists = aux + 32 * i
         e.u32(rec + 0x10, 0x10000 | (len(entries) + i))
         e.u32(rec + 0x14, (look_row + 1 + i) << 16)
         e.u32(rec + f_cond, 1 | 16 << 16)
         e.set_ptr(rec + f_cond + 8, lists)
         e.set_ptr(rec + f_look, look)
-        e.u32(rec + f_kw, 1 | 8 << 16)
-        e.copy_ptr(rec + f_kw + 8, now(template + f_kw + 8))
-        e.u32(lists, 2 | 8 << 16)
+        if keyword:
+            e.u32(rec + f_kw, 1 | 8 << 16)
+            e.copy_ptr(rec + f_kw + 8, now(template + f_kw + 8))
+        else:                                       # an empty list, as the game's are
+            e.u32(rec + f_kw, 8 << 16)
+            e.data[rec + f_kw + 8:rec + f_kw + 16] = bytes(8)
+        e.u32(lists, len(terms) | 8 << 16)
         e.set_ptr(lists + 8, lists + 16)
-        e.set_ptr(lists + 16, aid)
-        e.set_ptr(lists + 24, second)
-        changes.append("%s & %s -> %s" % (aid, second, look))
+        for k, t in enumerate(terms):
+            e.set_ptr(lists + 16 + 8 * k, t)
+        changes.append("%s -> %s" % (" & ".join(terms), look))
+        lists += 16 + 8 * len(terms)
+    # the second Eshmel's alternatives: the entry's condition list moves to the end of the data, its own alternatives first (their
+    # headers copied: their strings stay where they are), then the new ones
+    for i, r, alts in kasumi_alts:
+        word, arr = b.u32(r + f_cond), b.ptr(r + f_cond + 8)
+        n = word & 0xFFFF
+        strs = lists + 16 * (n + len(alts))
+        e.u32(now(r) + f_cond, (n + len(alts)) | 16 << 16)
+        e.set_ptr(now(r) + f_cond + 8, lists)
+        for k in range(n):
+            src = arr + 16 * k
+            e.data[lists + 16 * k:lists + 16 * k + 16] = b.d[H + src:H + src + 16]
+            if src + 8 in b.ptrs:
+                e.copy_ptr(lists + 16 * k + 8, now(src + 8))
+        for j, alt in enumerate(alts):
+            at = lists + 16 * (n + j)
+            e.u32(at, len(alt) | 8 << 16)
+            e.set_ptr(at + 8, strs)
+            for m, t in enumerate(alt):
+                e.set_ptr(strs + 8 * m, t)
+            strs += 8 * len(alt)
+        lists = strs
+        changes.append("look entry %d: + %s" % (i, " | ".join(" & ".join(a) for a in alts)))
     return e.build(), changes
 
 
@@ -716,6 +910,8 @@ def main(argv=None):
     ap.add_argument("romfs", help="the RomFS folder (with GameData/Person.bin)")
     ap.add_argument("--seed", type=int, required=True, help="the [fefw] randomize_seed the game logged")
     ap.add_argument("--force", default="", help="as [fefw] randomize_force, e.g. Anh=Tro,Lin=Kou")
+    ap.add_argument("--eshmel", choices=["off", "on", "hood"], default="off",
+                    help="as [fefw] randomize_eshmel: the second Eshmel in the pool (hood: always the easter egg)")
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
@@ -729,11 +925,14 @@ def main(argv=None):
         data = fh.read()
     person = Person(data)
     force, warn = parse_force(a.force)
-    mapping, warn2 = make_mapping(person, a.seed, POOL, force)
+    look = draw_kasumi(a.seed, a.eshmel == "hood") if a.eshmel != "off" else None
+    mapping, warn2 = make_mapping(person, a.seed, POOL, force, kasumi_character(look) if look else None)
     for w in warn + warn2:
         print("warning: " + w, file=sys.stderr)
     edited, changed, skipped = apply(data, mapping)
     print("\n".join(mapping_lines(a.seed, mapping)))
+    if look:
+        print(kasumi_line(look))
     print(summary_line(changed, skipped, edited))
     if a.v:
         for key, what in changed:
@@ -745,7 +944,7 @@ def main(argv=None):
     assets = os.path.join(a.romfs, "GameData", "AssetTable.bin")
     if os.path.exists(assets):
         with open(assets, "rb") as fh:
-            edited_assets, changes = apply_assets(fh.read(), swaps=asset_swaps(mapping))
+            edited_assets, changes = apply_assets(fh.read(), swaps=asset_swaps(mapping), kasumi=look)
         print(assets_line(changes, edited_assets))
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:

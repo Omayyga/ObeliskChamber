@@ -733,5 +733,128 @@ class TestSpeakers(unittest.TestCase):
         self.assertEqual(ru.speaker_renames([(tro, kai), (kai, lin), (lin, lin)]), {"カイ": "トロイア", "リンド": "カイ"})
 
 
+KON = ("PID_コン・ムー", "MPID_KonMoe", "Kon", 1, None, None, "AID_コン・ムー")
+
+
+class TestKasumi(unittest.TestCase):
+    """The second Eshmel ([fefw] randomize_eshmel): its look, its place in the mapping, Person.bin and AssetTable.bin."""
+    EGG = ru.KasumiLook(*ru.KASUMI_EGG, hood=True)
+    LOOK = ru.KasumiLook("男", "C", "E", 7, 12)
+
+    def test_draw(self):
+        looks = [ru.draw_kasumi(seed) for seed in range(5000)]
+        self.assertEqual([x.describe() for x in looks[:50]], [ru.draw_kasumi(s).describe() for s in range(50)])   # seeded
+        eggs = [x for x in looks if x.hood]
+        self.assertTrue(60 <= len(eggs) <= 140, len(eggs))                       # about 1 in 50
+        self.assertTrue(all(x.describe() == "女 頭部B 身体B 肌色2 髪色3 フード" for x in eggs))
+        rest = [x for x in looks if not x.hood]
+        self.assertEqual({x.sex for x in rest}, {"男", "女"})
+        self.assertEqual({x.head for x in rest}, set("ABCD"))
+        self.assertEqual({x.body for x in rest}, set("ABCDE"))
+        self.assertEqual({x.skin for x in rest}, set(range(1, 13)))
+        self.assertEqual({x.hair for x in rest}, set(range(1, 17)))
+        self.assertTrue(all(ru.draw_kasumi(s, hood=True).describe() == self.EGG.describe() for s in range(20)))
+        self.assertEqual((self.LOOK.gender(), self.EGG.gender()), (1, 2))
+        self.assertEqual((self.LOOK.underworld(), self.EGG.underworld()), ("イシュマール男C冥闘士", "カスミ冥闘士"))
+
+    def test_alternatives(self):
+        alts = [["AID_イシュマール", "男"], ["AID_イシュマール", "女"], ["AID_イシュマール", "男", "頭部C"], ["AID_イシュマール", "男", "頭部A"],
+                ["JID_闘士", "男", "AID_イシュマール", "頭部C", "3部"], ["AID_イシュマール", "髪色12", "Spine"], ["AID_イシュマール", "髪色1"],
+                ["AID_イシュマール", "AID_イシュマールフード", "男", "頭部C", "!Spine", "!AID_フード無し"], ["AID_イシュマール", "男", "AID_イシュマール浮遊"],
+                ["AID_イシュマール", "1部", "!イシュマール支援"], ["AID_イシュマール", "男", "身体E", "デモ"], ["AID_イシュマール", "男", "身体E", "拠点"],
+                ["AID_オルヘル", "3部"], ["AID_イシュマール", "肌色7", "肌色7"]]
+        self.assertEqual(ru.kasumi_alternatives(alts, self.LOOK),
+                         [["AID_カスミ"], ["JID_闘士", "AID_カスミ", "3部"], ["AID_カスミ", "Spine"], ["AID_カスミ", "デモ"],
+                          ["AID_カスミ", "拠点"]])
+        hood = ru.kasumi_alternatives([["AID_イシュマール", "AID_イシュマールフード", "女", "頭部B", "!Spine", "!AID_フード無し"]], self.EGG)
+        self.assertEqual(hood, [["AID_カスミ", "!Spine", "!AID_フード無し"]])
+        self.assertEqual(ru.kasumi_alternatives([["AID_カイ"], ["AID_イシュマール", "頭部E"]], self.LOOK),
+                         [["AID_カスミ", "頭部E"]])        # no hairstyle E: not a part, so kept as any other condition
+        self.assertTrue(ru.is_avatar_term("髪色16") and ru.is_avatar_term("身体E") and not ru.is_avatar_term("頭部E"))
+
+    def test_mapping(self):
+        p = ru.Person(person(ROWS + [KON]))
+        pool = ["Kai", "Tro", "Lin", "Dag"]
+        k = ru.kasumi_character(self.LOOK)
+        seen = set()
+        for seed in range(100):
+            m, warn = ru.make_mapping(p, seed, pool, kasumi=k)
+            self.assertEqual(warn, [])
+            self.assertEqual([o.ident for o, _ in m], ["Kai", "Tro", "Lin", "Dag", "Kon"])   # Kumos: a slot only
+            self.assertEqual(sorted(r.ident for _, r in m), sorted(pool + ["Ksm"]))         # Kasumi: a look only
+            seen.add(next(o.ident for o, r in m if r is k))
+        self.assertEqual(seen, {"Kai", "Tro", "Lin", "Dag", "Kon"})
+        self.assertEqual([(o.ident, r.ident) for o, r in ru.make_mapping(p, 1, pool)[0]].count(("Kon", "Kai")), 0)   # off: no Kumos
+        m, warn = ru.make_mapping(p, 1, pool, ru.parse_force("Lin=Kasumi, Ksm=Kai")[0], k)
+        self.assertEqual((m[0][0].ident, m[0][1]), ("Lin", k))
+        self.assertEqual(warn, ["randomize_force: Ksm=Kai: no character named Ksm"])           # it has no slot
+        self.assertEqual(ru.make_mapping(p, 1, pool, ru.parse_force("Lin=Ksm")[0])[1],
+                         ["randomize_force: Lin=Ksm: no character named Ksm"])                 # off: no such character
+        self.assertEqual(ru.mapping_lines(1, [(m[0][0], k)])[1], "randomizer:   Lin(Lindo) -> Ksm(Kasumi)")
+
+    def test_person(self):
+        data = person(ROWS)
+        p = ru.Person(data)
+        k = ru.kasumi_character(self.EGG)
+        out, changed, _ = ru.apply(data, [(p.find("Lin"), k), (p.find("Kai"), p.find("Tro"))])
+        t = TestApply()
+        rows = lambda _, d, key: TestApply.rec(t, d, key)  # noqa: E731
+        self.assertEqual({x: rows(t, out, "PID_リンド").get(x) for x in ("名前", "アセットフラグ", "性別")},
+                         {"名前": "MPID_Kasumi", "アセットフラグ": "AID_カスミ", "性別": 2})
+        story = rows(t, out, "PID_SC00_05_リンド")
+        self.assertEqual((story["名前"], story["アセット流用"], story["性別"]), ("MPID_Kasumi", "PID_リンド", 2))
+        self.assertEqual(rows(t, out, "PID_カイ")["アセットフラグ"], "AID_トロイア")
+        self.assertEqual(rows(t, out, "PID_トロイア")["アセットフラグ"], "AID_トロイア")       # untouched
+        self.assertEqual(len(out), len(data) + len("MPID_Kasumi\0AID_カスミ\0".encode("utf-8")))   # only the two strings
+        self.assertEqual(ru.Person(out).find("Lin").aid, "AID_カスミ")
+
+    ENTRIES = [
+        ("e0", [["AID_ブレザ", "SID_冥界兵"]], "ブレザ冥闘士", ["SID_冥界兵"]),                        # the template
+        ("e1", [["JID_闘士", "女", "AID_イシュマール", "頭部B"], ["JID_闘士", "女", "AID_オルヘル"]], None, []),
+        ("e2", [["AID_イシュマール", "女"]], None, []),
+        ("e3", [["AID_イシュマール", "女", "頭部B"]], "イシュマール女B", []),
+        ("e4", [["AID_イシュマール", "AID_イシュマールフード", "女", "頭部B", "!Spine", "!AID_フード無し"]], "イシュマール女Bフード", []),
+        ("e5", [["AID_イシュマール", "男", "頭部C"]], "イシュマール男C", []),
+        ("e6", [["AID_リンド"]], "リンド", []),
+        ("e7", [["AID_リンド", "SID_冥界兵"], ["AID_リンド", "AID_リンド冥将"]], "リンド冥闘士", ["SID_冥界兵"]),
+        ("e8", [["AID_コン・ムー"]], "コン・ムー", []),                                          # Kumos: living only
+    ]
+    FACES = [("FID_ブレザ冥闘士", "Bre0", "168", 1), ("FID_リンド", "Lin0", "030", 0), ("FID_リンド冥闘士", "Lin9", "030", 1),
+             ("FID_コン・ムー", "Kon0", "155", 0)] + [
+        ("FID_イシュマール%s%s" % (s, h), "Ism0" + ("M" if s == "男" else "F"), "%s_%sHoodOff" % ("015" if s == "男" else "016", h), 0)
+        for s in "男女" for h in "ABCD"] + [("FID_イシュマール女Bフード", "Ism4F", "016_BHoodOn", 0)]
+    read = TestUnderworldForms.read
+
+    def test_assets(self):
+        data = asset_table(self.ENTRIES, self.FACES)
+        for look, want_look in ((self.EGG, "カスミ冥闘士"), (ru.KasumiLook("女", "B", "A", 1, 1), "イシュマール女B冥闘士")):
+            out, changes = ru.apply_assets(data, [], [], {"AID_リンド": "AID_カスミ"}, [], kasumi=look)
+            b, entries, faces = self.read(out)
+            # portraits for every look a seed can draw
+            for s in "男女":
+                for h in "ABCD":
+                    self.assertEqual(faces["FID_イシュマール%s%s冥闘士" % (s, h)][2], 1)
+                    self.assertEqual(faces["FID_イシュマール%s%s冥闘士" % (s, h)][1], faces["FID_イシュマール%s%s" % (s, h)][1])
+            self.assertEqual(faces["FID_カスミ"], ("Ism0F", "016_BHoodOn", 0))
+            self.assertEqual(faces["FID_カスミ冥闘士"], ("Ism0F", "016_BHoodOn", 1))
+            self.assertEqual({n for _, n in b.labels if n.startswith("FID_")}, set(faces))
+            # Eshmel's alternatives stay, the second Eshmel's follow them
+            self.assertEqual(entries[1][0], self.ENTRIES[1][1] + [["JID_闘士", "AID_カスミ"]])
+            self.assertEqual(entries[2][0], self.ENTRIES[2][1] + [["AID_カスミ"]])
+            self.assertEqual(entries[3][0], self.ENTRIES[3][1] + [["AID_カスミ"]])
+            self.assertEqual(entries[4][0], self.ENTRIES[4][1] + ([["AID_カスミ", "!Spine", "!AID_フード無し"]] if look.hood else []))
+            self.assertEqual(entries[5][0], self.ENTRIES[5][1])
+            self.assertEqual([x[1:] for x in entries[:len(self.ENTRIES)]], [x[2:] for x in self.ENTRIES])   # looks, keywords as were
+            self.assertEqual(faces["FID_コン・ムー冥闘士"], ("Kon0", "155", 1))                   # Kumos: an Underworld form
+            added = entries[len(self.ENTRIES):]
+            hood = [([["AID_カスミ", "!Spine", "!AID_フード無し"]], "カスミ", [])] if look.hood else []
+            self.assertEqual(added, [([["AID_コン・ムー", "SID_冥界兵"]], "コン・ムー冥闘士", ["SID_冥界兵"])] + hood + [
+                                            ([["AID_カスミ", "SID_冥界兵"]], want_look, ["SID_冥界兵"]),
+                                            ([["AID_カスミ", "AID_リンド冥将"]], want_look, ["SID_冥界兵"])])
+            self.assertEqual(entries[7][0], [["AID_リンド", "SID_冥界兵"], ["AID_リンド", "SID_冥界兵"]])   # step 4, as for anyone
+            self.assertEqual(ge.Editor(out).build(), out)                                       # a well-formed container
+        self.assertEqual(ru.apply_assets(data, [], [], None, []), (data, []))                  # off: nothing
+
+
 if __name__ == "__main__":
     unittest.main()

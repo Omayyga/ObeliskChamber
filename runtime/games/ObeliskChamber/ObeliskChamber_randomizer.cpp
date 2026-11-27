@@ -183,6 +183,69 @@ const char* const kCutsceneFaces[] = {
 constexpr const char* kOwnCopy = "\xe6\x9c\xac\xe4\xba\xba";        // 本人
 constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a chapter flag: AID_リンド冥将)
 
+// The second Eshmel ([fefw] randomize_eshmel, experimental; randomize_units.py KASUMI_*). Eshmel's own slot is never replaced (the game
+// hands the player's avatar settings to a look only through Eshmel's own record): a second Eshmel joins the pool as a look only, its
+// parts drawn from the seed, under a look key of its own; every look entry with an AID_イシュマール alternative gets one for it beside
+// it, the drawn parts already satisfied. Kumos (never placed on a map) joins as a slot only, so the pool stays one-to-one.
+constexpr const char* kKasumiIdent = "Ksm";
+constexpr const char* kKasumiMpid = "MPID_Kasumi";
+constexpr const char* kKasumiAid = "AID_\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x9f";                              // AID_カスミ
+constexpr const char* kKasumiSlot = "Kon";
+// Kumos's asset key (コン・ムー): he has no Underworld form, and gets one (as kUnderworldForms) while he is in. His own look is never
+// handed out, but randomize_force may put it on someone (Lin=Kon).
+constexpr const char* kKasumiSlotForm = "\xe3\x82\xb3\xe3\x83\xb3\xe3\x83\xbb\xe3\x83\xa0\xe3\x83\xbc";
+constexpr const char* kEshmelAid = "AID_\xe3\x82\xa4\xe3\x82\xb7\xe3\x83\xa5\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\xab";   // AID_イシュマール
+constexpr const char* kEshmel = "\xe3\x82\xa4\xe3\x82\xb7\xe3\x83\xa5\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\xab";         // イシュマール
+constexpr const char* kEshmelHood =
+    "AID_\xe3\x82\xa4\xe3\x82\xb7\xe3\x83\xa5\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\xab\xe3\x83\x95\xe3\x83\xbc\xe3\x83\x89";   // AID_イシュマールフード
+const char* const kEshmelStory[] = {
+    "AID_\xe3\x82\xa4\xe3\x82\xb7\xe3\x83\xa5\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\xab\xe6\xb5\xae\xe9\x81\x8a",   // AID_イシュマール浮遊 (floating)
+    "!\xe3\x82\xa4\xe3\x82\xb7\xe3\x83\xa5\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\xab\xe6\x94\xaf\xe6\x8f\xb4",       // !イシュマール支援 (no shadow)
+};
+constexpr const char* kMale = "\xe7\x94\xb7";                // 男
+constexpr const char* kFemale = "\xe5\xa5\xb3";              // 女
+constexpr const char* kHead = "\xe9\xa0\xad\xe9\x83\xa8";    // 頭部 A-D (the creator's hairstyle)
+constexpr const char* kBody = "\xe8\xba\xab\xe4\xbd\x93";    // 身体 A-E (outfit)
+constexpr const char* kSkin = "\xe8\x82\x8c\xe8\x89\xb2";    // 肌色 1-12
+constexpr const char* kHair = "\xe9\xab\xaa\xe8\x89\xb2";    // 髪色 1-16
+constexpr const char* kHeads = "ABCD";
+constexpr const char* kBodies = "ABCDE";
+constexpr int kSkins = 12, kHairs = 16;
+constexpr const char* kHoodWord = "\xe3\x83\x95\xe3\x83\xbc\xe3\x83\x89";                                   // フード
+constexpr const char* kNotSpine = "!Spine";
+constexpr const char* kNoHood = "!AID_\xe3\x83\x95\xe3\x83\xbc\xe3\x83\x89\xe7\x84\xa1\xe3\x81\x97";       // !AID_フード無し
+// The easter egg: 1 draw in kKasumiEggOdds is hooded, with the owner's own Eshmel (female, hairstyle B, outfit B, skin 2, hair 3). Its
+// portrait is a copy of the hooded one, FID_カスミ, with voice Ism0F (the hooded set, Ism4F, has no sound or quotes).
+constexpr uint64_t kKasumiEggOdds = 50;
+constexpr const char* kKasumiHood = "\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x9f";                                 // カスミ
+constexpr uint64_t kKasumiSalt = 0x4B4153554D49ull;                                                         // "KASUMI"
+
+struct KasumiLook {
+    std::string sex;         // 男 or 女
+    char head = 'A', body = 'A';
+    int skin = 1, hair = 1;
+    bool hood = false;
+    std::vector<std::string> terms() const {   // the avatar conditions it satisfies
+        std::vector<std::string> t = {sex, std::string(kHead) + head, std::string(kBody) + body, kSkin + std::to_string(skin),
+                                      kHair + std::to_string(hair)};
+        if (hood) t.push_back(kEshmelHood);
+        return t;
+    }
+    uint8_t gender() const { return sex == kMale ? 1 : 2; }
+    std::string underworld() const {   // its Underworld look (容姿)
+        return (hood ? std::string(kKasumiHood) : std::string(kEshmel) + sex + head) + kUnderworldSuffix;
+    }
+    std::string describe() const {
+        return sex + " " + kHead + head + " " + kBody + body + " " + kSkin + std::to_string(skin) + " " + kHair + std::to_string(hair) +
+               (hood ? std::string(" ") + kHoodWord : std::string());
+    }
+};
+KasumiLook kasumi_egg() {
+    KasumiLook l;
+    l.sex = kFemale, l.head = 'B', l.body = 'B', l.skin = 2, l.hair = 3, l.hood = true;
+    return l;
+}
+
 // Red eyes (randomize_units.py EYE_RIGS, EYE_SLOTS). The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eye slots named in
 // a list in the executable: 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r, any case. These pool characters' portrait rigs name
 // theirs without the 00_ (Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion), and
@@ -203,8 +266,11 @@ struct Settings {
     bool on = false;
     uint64_t seed = 0;
     std::string force;
+    int eshmel = 0;   // randomize_eshmel: 0 off, 1 on, 2 hood (always the easter egg)
 };
 Settings g_set;
+// The second Eshmel's look, drawn from the seed at install when randomize_eshmel is on (edit_person and edit_assets both use it)
+KasumiLook g_kasumi;
 // The mapping by asset key (AID_リンド -> AID_ソレル), made by edit_person for edit_assets (randomize_units.py asset_swaps). Both run on
 // the thread that builds the RomFS image, Person.bin first (edit_assets is a late edit).
 std::unordered_map<std::string, std::string> g_swaps;
@@ -334,6 +400,7 @@ struct Character {
     std::string ident, key, mpid, aid;   // aid: the model's asset key, AID_カイ
     uint64_t name_ptr = 0, aid_ptr = 0, key_ptr = 0;
     uint8_t gender = 0;
+    bool kasumi = false;   // the second Eshmel: no record; its name and model are strings the file does not have yet (mpid, aid)
     std::string label() const {
         std::string m = mpid;
         if (m.rfind("MPID_", 0) == 0) m.erase(0, 5);
@@ -391,6 +458,62 @@ uint64_t splitmix64(uint64_t& s) {
     return z ^ (z >> 31);
 }
 
+// randomize_units.py draw_kasumi(): 1 in kKasumiEggOdds (or always, with hood) the easter egg, else every part at random, in this order
+KasumiLook draw_kasumi(uint64_t seed, bool hood) {
+    uint64_t rng = seed ^ kKasumiSalt;
+    if (splitmix64(rng) % kKasumiEggOdds == 0 || hood) return kasumi_egg();
+    KasumiLook l;
+    l.sex = splitmix64(rng) % 2 == 0 ? kMale : kFemale;
+    l.head = kHeads[splitmix64(rng) % 4];
+    l.body = kBodies[splitmix64(rng) % 5];
+    l.skin = 1 + static_cast<int>(splitmix64(rng) % kSkins);
+    l.hair = 1 + static_cast<int>(splitmix64(rng) % kHairs);
+    return l;
+}
+
+// A condition the player's avatar settings decide (randomize_units.py is_avatar_term): 男, 女, 頭部A-D, 身体A-E, 肌色N, 髪色N, the hood
+bool is_avatar_term(const std::string& t) {
+    if (t == kMale || t == kFemale || t == kEshmelHood) return true;
+    auto rest = [&](const char* pre, std::string* r) {
+        const size_t n = std::strlen(pre);
+        if (t.compare(0, n, pre) != 0 || t.size() < n) return false;
+        *r = t.substr(n);
+        return true;
+    };
+    std::string r;
+    if (rest(kHead, &r)) return r.size() == 1 && std::strchr(kHeads, r[0]);
+    if (rest(kBody, &r)) return r.size() == 1 && std::strchr(kBodies, r[0]);
+    if (rest(kSkin, &r) || rest(kHair, &r))
+        return !r.empty() && std::all_of(r.begin(), r.end(), [](char c) { return c >= '0' && c <= '9'; });
+    return false;
+}
+
+// randomize_units.py kasumi_alternatives(): the alternatives a look entry gets for the second Eshmel beside Eshmel's own
+std::vector<std::vector<std::string>> kasumi_alternatives(const std::vector<std::vector<std::string>>& alts, const KasumiLook& look) {
+    std::vector<std::vector<std::string>> out;
+    const std::vector<std::string> terms = look.terms();
+    for (const auto& alt : alts) {
+        if (std::find(alt.begin(), alt.end(), kEshmelAid) == alt.end()) continue;
+        if (std::any_of(alt.begin(), alt.end(), [](const std::string& t) {
+                return std::any_of(std::begin(kEshmelStory), std::end(kEshmelStory), [&](const char* s) { return t == s; });
+            }))
+            continue;
+        std::vector<std::string> nw;
+        bool ok = true;
+        for (const std::string& t : alt) {
+            if (t == kEshmelAid) nw.push_back(kKasumiAid);
+            else if (!is_avatar_term(t)) nw.push_back(t);
+            else if (std::find(terms.begin(), terms.end(), t) == terms.end()) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok && std::find(out.begin(), out.end(), nw) == out.end() && std::find(alts.begin(), alts.end(), nw) == alts.end())
+            out.push_back(std::move(nw));
+    }
+    return out;
+}
+
 uint64_t fnv1a64(const std::vector<uint8_t>& d) {
     uint64_t h = 0xCBF29CE484222325ull;
     for (uint8_t b : d) h = (h ^ b) * 0x100000001B3ull;
@@ -404,9 +527,16 @@ std::string trim(const std::string& s) {
 
 using Mapping = std::vector<std::pair<const Character*, const Character*>>;
 
+// The second Eshmel, as randomize_force names it: Ksm, Kasumi or MPID_Kasumi, any case
+bool is_kasumi_name(const std::string& name) {
+    const std::string n = lower_nospace(name);
+    return n == "ksm" || n == "kasumi" || n == "mpid_kasumi";
+}
+
 // Forced pairs first, in the order given; then the rest of the pool is shuffled among itself (Fisher-Yates over the candidates, from the
-// last, repeated until nobody drew themselves). randomize_units.py make_mapping() is the same, step for step.
-Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std::string& force) {
+// last, repeated until nobody drew themselves). randomize_units.py make_mapping() is the same, step for step. With `kasumi` (the second
+// Eshmel), it is the last candidate and Kumos (kKasumiSlot) an original only; a forced pair may name it as a replacement.
+Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std::string& force, const Character* kasumi) {
     Mapping out;
     std::vector<std::string> used, done;
     auto in = [](const std::vector<std::string>& v, const std::string& s) { return std::find(v.begin(), v.end(), s) != v.end(); };
@@ -422,7 +552,7 @@ Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std:
             continue;
         }
         const std::string a = trim(part.substr(0, eq)), b = trim(part.substr(eq + 1));
-        const Character *ca = find_character(cs, a), *cb = find_character(cs, b);
+        const Character *ca = find_character(cs, a), *cb = kasumi && is_kasumi_name(b) ? kasumi : find_character(cs, b);
         if (!ca || !cb) {
             NXLOG_W(kTag, "randomizer: randomize_force: %s=%s: no character named %s", a.c_str(), b.c_str(), (!ca ? a : b).c_str());
             continue;
@@ -445,10 +575,11 @@ Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std:
             NXLOG_W(kTag, "randomizer: pool: no character %s in Person.bin", ident);
     std::vector<const Character*> origs, cands;
     for (const Character& c : cs) {
-        if (!in_pool(c.ident)) continue;
-        if (!in(done, c.ident)) origs.push_back(&c);
-        if (!in(used, c.ident)) cands.push_back(&c);
+        const bool slot = in_pool(c.ident) || (kasumi && c.ident == kKasumiSlot);
+        if (slot && !in(done, c.ident)) origs.push_back(&c);
+        if (in_pool(c.ident) && !in(used, c.ident)) cands.push_back(&c);
     }
+    if (kasumi && !in(used, kasumi->ident)) cands.push_back(kasumi);
     // Original i takes candidate i. Nobody keeps their own look: while an original drew itself, shuffle again (about 2.7 shuffles for the
     // full pool). Only a lone candidate, or kShuffleTries failed shuffles (which a real pool cannot do), leaves someone as themselves.
     uint64_t rng = seed;
@@ -465,6 +596,9 @@ Mapping make_mapping(const std::vector<Character>& cs, uint64_t seed, const std:
 }
 
 // ---- the edit ---------------------------------------------------------------------------------------------------------------------------
+// The file with these pointer fields pointing at strings, appended to its pool when new (Grow, below)
+std::vector<uint8_t> with_strings(const std::vector<uint8_t>& d, const std::vector<std::pair<uint64_t, std::string>>& fields);
+
 void edit_person(const NxModFile* file, void*) {
     Bin b;
     PersonTable t;
@@ -476,7 +610,9 @@ void edit_person(const NxModFile* file, void*) {
         return;
     }
     const std::vector<Character> cs = characters(b, t);
-    const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force);
+    Character kasumi;   // the second Eshmel, when randomize_eshmel is on
+    kasumi.ident = kKasumiIdent, kasumi.mpid = kKasumiMpid, kasumi.aid = kKasumiAid, kasumi.gender = g_kasumi.gender(), kasumi.kasumi = true;
+    const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force, g_set.eshmel ? &kasumi : nullptr);
     g_swaps.clear();
     g_speakers.clear();
     for (const auto& [o, rep] : mapping) {
@@ -492,9 +628,11 @@ void edit_person(const NxModFile* file, void*) {
             line += (j == i ? "" : ", ") + mapping[j].first->label() + " -> " + mapping[j].second->label();
         NXLOG_I(kTag, "randomizer:   %s", line.c_str());
     }
+    if (g_set.eshmel) NXLOG_I(kTag, "randomizer: second Eshmel %s: %s", kasumi.label().c_str(), g_kasumi.describe().c_str());
 
     std::vector<uint8_t> out(file->data, file->data + file->size);
     auto put = [&](uint64_t off, uint64_t v) { std::memcpy(out.data() + kHeader + off, &v, 8); };   // only on fields is_ptr() vouched for
+    std::vector<std::pair<uint64_t, std::string>> new_strings;   // the second Eshmel's name and model
     int changed = 0, dragons = 0;
     for (uint32_t i = 0; i < t.count; ++i) {
         const uint64_t rec = t.first + uint64_t(t.rec_size) * i;
@@ -509,8 +647,14 @@ void edit_person(const NxModFile* file, void*) {
             ++dragons;   // no model of its own and none borrowed: a dragon form
             continue;
         }
-        if (b.is_ptr(rec + t.f_name) && r->name_ptr) put(rec + t.f_name, r->name_ptr);
-        if (aid) put(rec + t.f_aid, r->aid_ptr);
+        if (b.is_ptr(rec + t.f_name) && (r->name_ptr || r->kasumi)) {
+            if (r->kasumi) new_strings.push_back({rec + t.f_name, r->mpid});
+            else put(rec + t.f_name, r->name_ptr);
+        }
+        if (aid) {
+            if (r->kasumi) new_strings.push_back({rec + t.f_aid, r->aid});
+            else put(rec + t.f_aid, r->aid_ptr);
+        }
         // A borrowed model points at the character's own base record, which now carries the replacement's model; never at the
         // replacement's base, which is edited too when the replacement is itself replaced (Lin -> Tro, Tro -> Mhm made Lind look
         // like Mahadu). So only a record that borrowed another character's base changes here.
@@ -518,6 +662,7 @@ void edit_person(const NxModFile* file, void*) {
         out[kHeader + rec + t.f_gender] = r->gender;
         ++changed;
     }
+    if (!new_strings.empty()) out = with_strings(out, new_strings);
     NXLOG_I(kTag, "randomizer: Person.bin: %d records changed, %d dragon forms left as they are (fnv1a64 %016" PRIx64 ")", changed, dragons,
             fnv1a64(out));
     if (changed) file->replace(file, out.data(), out.size());
@@ -672,6 +817,12 @@ private:
     std::vector<std::string> new_strings_;
 };
 
+std::vector<uint8_t> with_strings(const std::vector<uint8_t>& d, const std::vector<std::pair<uint64_t, std::string>>& fields) {
+    Grow e(d.data(), d.size());
+    for (const auto& [at, text] : fields) e.set_ptr(at, text);
+    return e.build();
+}
+
 // ---- living and Underworld forms: AssetTable.bin ---------------------------------------------------------------------------------------
 // randomize_units.py apply_assets(), step for step (its docstring says what and why):
 //   1. each look U of kLivingLooks, L = U without 冥闘士, x its character: a new portrait entry FID_L (a copy of FID_U, 特殊 0; a voice
@@ -756,7 +907,9 @@ void edit_assets(const NxModFile* file, void*) {
         std::string voice;   // empty: keep the source's
     };
     struct NewLook {
-        std::string aid, second, look;   // the condition "aid & second" -> look
+        Strings terms;      // the condition (one alternative)
+        std::string look;
+        bool keyword;       // with the keyword SID_冥界兵
     };
     std::vector<NewFace> new_faces;
     std::vector<NewLook> new_looks;
@@ -786,9 +939,11 @@ void edit_assets(const NxModFile* file, void*) {
             e.set_u32(prec + f_kw, e.u32(prec + f_kw) & 0xFFFF0000u);
             ++changes;
         }
-        if (!has_underworld(aid)) new_looks.push_back({aid, underworld, look});
+        if (!has_underworld(aid)) new_looks.push_back({{aid, underworld}, look, true});
     }
-    for (const char* stem : kUnderworldForms) {
+    std::vector<const char*> forms(std::begin(kUnderworldForms), std::end(kUnderworldForms));
+    if (g_set.eshmel) forms.push_back(kKasumiSlotForm);
+    for (const char* stem : forms) {
         const std::string aid = std::string("AID_") + stem;
         const int64_t plain = plain_of(aid, true);
         const std::string living = plain < 0 ? std::string() : str(entries[static_cast<size_t>(plain)] + f_look);
@@ -797,12 +952,47 @@ void edit_assets(const NxModFile* file, void*) {
             continue;
         }
         new_faces.push_back({fids.at("FID_" + living), "FID_" + living + suffix, 1, std::string()});
-        new_looks.push_back({aid, underworld, living + suffix});
+        new_looks.push_back({{aid, underworld}, living + suffix, true});
+    }
+    // 5. The second Eshmel (randomize_units.py apply_assets step 5): portraits for every look a seed can draw (a tinted copy of each of
+    // Eshmel's 8 unhooded portraits; the easter egg's hooded one, living and tinted, with voice Ism0F); its look entries (the hooded
+    // portrait for the easter egg, its Underworld look); and an alternative beside each of Eshmel's in every look entry.
+    struct KasumiAlts {
+        size_t index;
+        uint64_t rec;
+        std::vector<Strings> alts;
+    };
+    std::vector<KasumiAlts> kasumi_alts;
+    if (g_set.eshmel) {
+        for (const char* sex : {kMale, kFemale})
+            for (const char* h = kHeads; *h; ++h) {
+                const std::string stem = std::string(kEshmel) + sex + *h;
+                if (!fids.count("FID_" + stem) || fids.count("FID_" + stem + suffix)) {
+                    ++changes;   // skipped
+                    continue;
+                }
+                new_faces.push_back({fids.at("FID_" + stem), "FID_" + stem + suffix, 1, std::string()});
+            }
+        const KasumiLook egg = kasumi_egg();
+        const auto hood = fids.find("FID_" + std::string(kEshmel) + egg.sex + egg.head + kHoodWord);
+        if (hood == fids.end() || fids.count(std::string("FID_") + kKasumiHood)) {
+            ++changes;   // skipped
+        } else {
+            const std::string voice = std::string("Ism0") + (egg.sex == kMale ? "M" : "F");
+            new_faces.push_back({hood->second, std::string("FID_") + kKasumiHood, -1, voice});
+            new_faces.push_back({hood->second, std::string("FID_") + kKasumiHood + suffix, 1, voice});
+        }
+        if (g_kasumi.hood) new_looks.push_back({{kKasumiAid, kNotSpine, kNoHood}, kKasumiHood, false});
+        new_looks.push_back({{kKasumiAid, underworld}, g_kasumi.underworld(), true});
+        for (size_t i = 0; i < entries.size(); ++i) {
+            std::vector<Strings> alts = kasumi_alternatives(conds[i], g_kasumi);
+            if (!alts.empty() && (b.u32(entries[i] + f_cond) >> 16) == 16) kasumi_alts.push_back({i, entries[i], std::move(alts)});
+        }
     }
     // aid's Underworld look after steps 1 and 2: its new look entry's, else that of the last "aid & SID_冥界兵" entry with one
     auto underworld_look = [&](const std::string& aid) {
         for (const NewLook& l : new_looks)
-            if (l.aid == aid && l.second == underworld) return l.look;
+            if (l.terms == Strings{aid, underworld}) return l.look;
         std::string found;
         for (size_t i = 0; i < entries.size(); ++i)
             if (has_alt(i, {aid, underworld}) && !str(entries[i] + f_look).empty()) found = str(entries[i] + f_look);
@@ -881,7 +1071,7 @@ void edit_assets(const NxModFile* file, void*) {
                 continue;
             }
             const auto rn = renamed.find(v);
-            new_looks.push_back({swaps.at(alt[0]), alt[1], rn == renamed.end() ? v : rn->second});
+            new_looks.push_back({{swaps.at(alt[0]), alt[1]}, rn == renamed.end() ? v : rn->second, true});
         }
     }
     if (!new_looks.empty() && tpl < 0) {
@@ -893,7 +1083,15 @@ void edit_assets(const NxModFile* file, void*) {
     for (const Bin::Label& l : b.labels()) labels[l.name] = l.at;
     const uint64_t face_end = faces.rec(faces.count - 1) + faces.rec_size, look_end = assets.rec(assets.count - 1) + assets.rec_size,
                    data_end = b.data_size();
-    std::vector<uint8_t> face_raw, look_raw, aux_raw(32 * new_looks.size(), 0);
+    // the end of the data: each new look entry's condition (one alternative: its header, then its strings), then each condition list
+    // the second Eshmel's alternatives make: all the alternatives' headers (the entry's own copied, then the new), then the new strings
+    size_t aux_size = 0;
+    for (const NewLook& l : new_looks) aux_size += 16 + 8 * l.terms.size();
+    for (const KasumiAlts& k : kasumi_alts) {
+        aux_size += 16 * ((b.u32(k.rec + f_cond) & 0xFFFF) + k.alts.size());
+        for (const Strings& a : k.alts) aux_size += 8 * a.size();
+    }
+    std::vector<uint8_t> face_raw, look_raw, aux_raw(aux_size, 0);
     for (const NewFace& f : new_faces) face_raw.insert(face_raw.end(), file->data + kHeader + f.src, file->data + kHeader + f.src + faces.rec_size);
     if (!new_looks.empty()) {
         const uint64_t t = entries[static_cast<size_t>(tpl)];
@@ -944,25 +1142,58 @@ void edit_assets(const NxModFile* file, void*) {
         ++changes;
         NXLOG_I(kTag, "randomizer: AssetTable.bin: FID_%s shows %s", w.look.c_str(), w.shows.c_str());
     }
-    const uint64_t aux = now(data_end) - aux_raw.size();
+    uint64_t lists = now(data_end) - aux_raw.size();
     for (size_t i = 0; i < new_looks.size(); ++i) {
-        const uint64_t rec = look_end + uint64_t(assets.rec_size) * i, lists = aux + 32 * i;
+        const NewLook& l = new_looks[i];
+        const uint64_t rec = look_end + uint64_t(assets.rec_size) * i;
         e.set_u32(rec + 0x10, 0x10000u | uint32_t(assets.count + i));
         e.set_u32(rec + 0x14, uint32_t(look_row + 1 + i) << 16);
         e.set_u32(rec + f_cond, 1u | 16u << 16);
         e.set_ptr(rec + f_cond + 8, lists);
-        e.set_ptr(rec + f_look, new_looks[i].look);
-        e.set_u32(rec + f_kw, 1u | 8u << 16);
-        e.copy_ptr(rec + f_kw + 8, now(entries[static_cast<size_t>(tpl)] + f_kw + 8));
-        e.set_u32(lists, 2u | 8u << 16);
+        e.set_ptr(rec + f_look, l.look);
+        if (l.keyword) {
+            e.set_u32(rec + f_kw, 1u | 8u << 16);
+            e.copy_ptr(rec + f_kw + 8, now(entries[static_cast<size_t>(tpl)] + f_kw + 8));
+        } else {   // an empty list, as the game's are
+            e.set_u32(rec + f_kw, 8u << 16);
+            std::memset(e.data().data() + rec + f_kw + 8, 0, 8);
+        }
+        e.set_u32(lists, uint32_t(l.terms.size()) | 8u << 16);
         e.set_ptr(lists + 8, lists + 16);
-        e.set_ptr(lists + 16, new_looks[i].aid);
-        e.set_ptr(lists + 24, new_looks[i].second);
+        for (size_t k = 0; k < l.terms.size(); ++k) e.set_ptr(lists + 16 + 8 * k, l.terms[k]);
+        lists += 16 + 8 * l.terms.size();
         ++changes;
-        if (new_looks[i].second != underworld)
-            NXLOG_I(kTag, "randomizer: AssetTable.bin: %s & %s -> %s", new_looks[i].aid.c_str(), new_looks[i].second.c_str(),
-                    new_looks[i].look.c_str());
+        if (!(l.terms.size() == 2 && l.terms[1] == underworld)) {
+            std::string cond;
+            for (const std::string& t : l.terms) cond += (cond.empty() ? "" : " & ") + t;
+            NXLOG_I(kTag, "randomizer: AssetTable.bin: %s -> %s", cond.c_str(), l.look.c_str());
+        }
     }
+    // the second Eshmel's alternatives: the entry's condition list moves to the end of the data, its own alternatives first (their
+    // headers copied: their strings stay where they are), then the new ones
+    for (const KasumiAlts& k : kasumi_alts) {
+        const uint32_t word = b.u32(k.rec + f_cond), n = word & 0xFFFF;
+        const uint64_t arr = b.u64(k.rec + f_cond + 8);
+        uint64_t strs = lists + 16ull * (n + k.alts.size());
+        e.set_u32(now(k.rec) + f_cond, uint32_t(n + k.alts.size()) | 16u << 16);
+        e.set_ptr(now(k.rec) + f_cond + 8, lists);
+        for (uint32_t a = 0; a < n; ++a) {
+            const uint64_t src = arr + 16ull * a;
+            std::memcpy(e.data().data() + lists + 16ull * a, file->data + kHeader + src, 16);
+            if (b.is_ptr(src + 8)) e.copy_ptr(lists + 16ull * a + 8, now(src + 8));
+        }
+        for (size_t j = 0; j < k.alts.size(); ++j) {
+            const uint64_t at = lists + 16ull * (n + j);
+            e.set_u32(at, uint32_t(k.alts[j].size()) | 8u << 16);
+            e.set_ptr(at + 8, strs);
+            for (size_t m = 0; m < k.alts[j].size(); ++m) e.set_ptr(strs + 8 * m, k.alts[j][m]);
+            strs += 8 * k.alts[j].size();
+        }
+        lists = strs;
+        ++changes;
+    }
+    if (g_set.eshmel)
+        NXLOG_I(kTag, "randomizer: AssetTable.bin: second Eshmel (%s): %zu look entries", g_kasumi.describe().c_str(), kasumi_alts.size());
     const std::vector<uint8_t> out = e.build();
     NXLOG_I(kTag, "randomizer: AssetTable.bin: %zu changes (fnv1a64 %016" PRIx64 ")", changes, fnv1a64(out));
     if (changes) file->replace(file, out.data(), out.size());
@@ -1291,14 +1522,22 @@ void randomizer_install() {
                     err.c_str());
     }
     g_set.force = config_get_str("fefw", "randomize_force", "");
-    msg_names_install();   // Katarina's name: she has a name ID but no text (ObeliskChamber_msg.cpp)
+    // randomize_eshmel (experimental): off, on, or hood (debug: always the easter egg)
+    const std::string eshmel = lower_nospace(config_get_str("fefw", "randomize_eshmel", "off"));
+    if (eshmel == "on" || eshmel == "true" || eshmel == "1" || eshmel == "yes") g_set.eshmel = 1;
+    else if (eshmel == "hood") g_set.eshmel = 2;
+    else if (!(eshmel.empty() || eshmel == "off" || eshmel == "false" || eshmel == "0" || eshmel == "no"))
+        NXLOG_W(kTag, "randomizer: randomize_eshmel = \"%s\" is not off, on or hood: off", eshmel.c_str());
+    if (g_set.eshmel) g_kasumi = draw_kasumi(g_set.seed, g_set.eshmel == 2);
+    msg_names_install();   // Katarina's name (a name ID but no text) and Kasumi's (ObeliskChamber_msg.cpp)
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
     if (!services::modapi::add_runtime_edit("randomizer", &match_quotes, &edit_quotes, nullptr, true))
         NXLOG_W(kTag, "randomizer: too late to rewrite the level-up, death and retreat speakers");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
                     services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
-    NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
+    NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),
+            g_set.eshmel == 2 ? ", second Eshmel (hood)" : g_set.eshmel ? ", second Eshmel" : "",
             ok ? " (GameData/Person.bin and AssetTable.bin are edited as they load)" : ": too late to edit the files, applies at the next start");
 }
 
