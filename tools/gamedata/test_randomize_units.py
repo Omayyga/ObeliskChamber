@@ -591,13 +591,13 @@ class TestCutscenes(unittest.TestCase):
         self.assertEqual(ru.asset_swaps([(kai, tro), (tro, kai), (lin, lin)]), {"AID_カイ": "AID_トロイア", "AID_トロイア": "AID_カイ"})
 
 
-def skeleton(slots, version="4.1.24", nonessential=True, bones=2):
+def skeleton(slots, version="4.1.24", nonessential=True, bones=2, strings=("00_Eye", "x")):
     """A Spine binary skeleton up to its slots (then a byte the edit must keep): slot names as given, each on bone 0."""
     s = ru._skel_string
     out = b"\x11" * 8 + s(version) + struct.pack(">4f", 0, 0, 100, 100) + bytes([nonessential])
     if nonessential:
         out += struct.pack(">f", 30) + s("./images/") + s("")
-    out += bytes([2]) + s("00_Eye") + s("x")                       # the string table (attachment names)
+    out += bytes([len(strings)]) + b"".join(s(x) for x in strings)  # the string table (attachment names)
     out += bytes([bones])
     for i in range(bones):
         out += s("bone%d" % i) + (bytes([0]) if i else b"") + bytes(32) + bytes([0, 1]) + (b"\xff" * 4 if nonessential else b"")
@@ -910,7 +910,8 @@ class TestKasumi(unittest.TestCase):
         # the Underworld rig: every ..._Clipping slot starts with no attachment (the varint after the colours); the rest as before
         clipped = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"])
         out, note = ru.kasumi_rig_file("skel.zst", clipped, "016", colours, "901", unclip=True)
-        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping")
+        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping "
+                               "(0 skin attachments removed)")
         at = dict(ru._skel_slot_colours(out))
         self.assertEqual((out[at["Hood_Clipping"] + 8], out[at["A_TopHair_Hair"] + 8], out[at["Hood_Clipping_End"] + 8]), (0, 1, 1))
         self.assertEqual(len(out), len(clipped))
@@ -920,6 +921,23 @@ class TestKasumi(unittest.TestCase):
         out, _ = ru.kasumi_rig_file("skel.zst", bytes(long_att), "016", colours, "901", unclip=True)
         self.assertEqual(len(out), len(long_att) - 1)
         self.assertEqual(out[ru._skel_slot_colours(out)[0][1] + 8], 0)
+        # in a skin: the clipping attachment, alone in its slot group, goes; the group stays with no attachment
+        head = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"], strings=("00_Eye", "x", "Hood_Clipping"))[:-1]
+        # a skin: slot 0 holds the clipping attachment (key ref 3, no name, type 6, end slot 2, 3 unweighted vertices, a colour), slot 1
+        # a region; then whatever follows the skins
+        clip = bytes([3, 0, 6, 2, 3, 0]) + struct.pack(">6f", 0, 0, 1, 0, 0, 1) + b"\xff" * 4
+        other = bytes([1, 1, 2, 0, 0])
+        skel = head + bytes([2]) + bytes([0, 1]) + clip + other + b"TAIL"
+        start = len(head) + 3
+        self.assertEqual(ru._clipping_entries(skel, ru._skel_slot_colours(skel)), [(start - 1, start, start + len(clip))])
+        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", unclip=True)
+        self.assertTrue(note.endswith("clipping off: Hood_Clipping (1 skin attachments removed)"), note)
+        self.assertTrue(out.endswith(bytes([2]) + bytes([0, 0]) + other + b"TAIL"))
+        self.assertEqual(len(out), len(skel) - len(clip))
+        self.assertEqual(ru._clipping_entries(skel[:start + 10], ru._skel_slot_colours(skel)), [])   # cut short: not taken
+        bad = bytearray(skel)
+        bad[start + 3] = 1                                       # the end slot is not Hood_Clipping_End
+        self.assertEqual(ru._clipping_entries(bytes(bad), ru._skel_slot_colours(skel)), [])
         self.assertEqual(ru.kasumi_rig_file("spdb", spdb, "016", dst="901")[0], b"\x0d\x00\x00\x00901/901.atlas\x0c\x00\x00\x00901/901.skel")
 
     def test_look_helpers(self):

@@ -964,13 +964,89 @@ def _skel_slot_colours(data):
         return None
 
 
+def _varint(v):
+    out = bytearray()
+    while True:
+        out.append((v & 0x7F) | (0x80 if v > 0x7F else 0))
+        v >>= 7
+        if not v:
+            return bytes(out)
+
+
+def _read_varint(d, q):
+    v, shift = 0, 0
+    while True:
+        b = d[q]
+        q += 1
+        v |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80 or shift > 28:
+            return v, q
+
+
+def _clipping_entries(data, slots):
+    """The clipping attachments in a Spine 4.1 skeleton's skins: [(offset of its slot group's count, entry start, entry end)], in file
+    order. A skin lists, for each slot, "<slot index> <count>" then its attachments: "<key ref> <name ref> <type> <data>". Eshmel's rigs
+    keep each clipping attachment alone in the group of its slot (a slot named ..._Clipping), so it is found by its bytes "<slot> 01
+    <key ref>" (any string-table entry ending _Clipping) and then checked field by field: name ref none or such an entry, type 6
+    (clipping), end slot the slot "<name>_End", 3 to 4096 vertices (weighted: bone count, then index, x, y, weight per bone; or x, y),
+    the colour (nonessential data), all inside the file."""
+    r = _SkelReader(data)
+    r.take(8)
+    r.string()
+    r.take(16)
+    nonessential = r.take(1)[0] != 0
+    if nonessential:
+        r.take(4)
+        r.string()
+        r.string()
+    strings = [r.string() for _ in range(r.varint())]
+    names = [n for n, _ in slots]
+    refs = [i + 1 for i, t in enumerate(strings) if (t or "").endswith(CLIP_SLOT_SUFFIX)]
+    found = set()
+    for k, name in enumerate(names):
+        if not name.endswith(CLIP_SLOT_SUFFIX):
+            continue
+        for ref in refs:
+            head = _varint(k) + b"\x01" + _varint(ref)
+            i = data.find(head)
+            while i >= 0:
+                count_at = i + len(_varint(k))
+                at = count_at + 1
+                try:
+                    q = at + len(_varint(ref))
+                    nref, q = _read_varint(data, q)
+                    ok = (nref == 0 or nref in refs) and data[q] == 6
+                    if ok:
+                        endslot, q = _read_varint(data, q + 1)
+                        vc, q = _read_varint(data, q)
+                        ok = endslot < len(names) and names[endslot] == name + "_End" and 3 <= vc <= 4096 and data[q] in (0, 1)
+                    if ok:
+                        weighted = data[q]
+                        q += 1
+                        for _ in range(vc if weighted else 0):
+                            bones, q = _read_varint(data, q)
+                            for _ in range(bones):
+                                _, q = _read_varint(data, q)
+                                q += 12
+                        q += 0 if weighted else 8 * vc
+                        q += 4 if nonessential else 0
+                        if q <= len(data):
+                            found.add((count_at, at, q))
+                except IndexError:
+                    pass
+                i = data.find(head, i + 1)
+    return sorted(found)
+
+
 def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False):
     """One file of the second Eshmel's portrait rig (kind: one of RIG_FILES; .zst ones handed over decompressed), made from rig `src`'s
     (015 or 016) and a one-line note; (None, why) when the file is not laid out as expected. The folder name sits in fixed-length places:
     the atlas's first line "<src>.png" (the atlas is XOR-scrambled: the bytes change by src ^ dst), the BNTX texture name (a 16-bit
     length 3, the name, NUL), the .spdb paths "<src>/<src>.atlas" and "<src>/<src>.skel". The skeleton has no name but takes the colours:
     every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's; with
-    unclip, every slot whose name ends _Clipping (CLIP_SLOT_SUFFIX) has its setup attachment (the varint after the colours) set to none."""
+    unclip, every slot whose name ends _Clipping (CLIP_SLOT_SUFFIX) has its setup attachment (the varint after the colours) set to none,
+    and its clipping attachments go from the skins (_clipping_entries): the game applies a skin's attachments itself."""
     out = bytearray(data)
     if kind == "atlas.zst":
         if bytes(x ^ y for x, y in zip(data[:8], ATLAS_KEY)) != (src + ".png\n").encode():
@@ -1003,17 +1079,24 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
         note = "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
             x for k in range(3) for x in (counts[k], colours[k].hex() if colours and colours[k] else "none"))
         if unclip:
+            edits = []                                  # (start, end, new bytes) on the file as it is
             unclipped = []
-            for name, at in reversed(slots):            # from the end: a shorter varint moves what follows
+            for name, at in slots:
                 if not name.endswith(CLIP_SLOT_SUFFIX):
                     continue
-                p = at + 8
+                p = at + 8                              # the setup attachment: none
                 end = p
                 while end < len(out) and out[end] & 0x80:
                     end += 1
-                out[p:end + 1] = b"\0"
+                edits.append((p, end + 1, b"\0"))
                 unclipped.append(name)
-            note += "; clipping off: %s" % (", ".join(reversed(unclipped)) or "none")
+            entries = _clipping_entries(bytes(out), slots)
+            for count_at, at, end in entries:           # in the skins: the attachment goes, its slot group keeps no attachment
+                edits.append((count_at, count_at + 1, b"\0"))
+                edits.append((at, end, b""))
+            for start, end, new in sorted(edits, reverse=True):
+                out[start:end] = new
+            note += "; clipping off: %s (%d skin attachments removed)" % (", ".join(unclipped) or "none", len(entries))
         return bytes(out), note
     return None, "not a rig file"
 

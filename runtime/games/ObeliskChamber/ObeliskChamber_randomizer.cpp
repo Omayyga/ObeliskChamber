@@ -24,6 +24,7 @@
 #include <zstd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cinttypes>
 #include <cstdint>
@@ -1441,6 +1442,108 @@ bool skel_slot_colours(const std::vector<uint8_t>& d, std::vector<std::pair<std:
     return ok;
 }
 
+bool ends_with_clip(const std::string& name) {
+    const std::string clip = kClipSlotSuffix;
+    return name.size() >= clip.size() && name.compare(name.size() - clip.size(), clip.size(), clip) == 0;
+}
+
+// randomize_units.py _clipping_entries(): the clipping attachments in the skins, [(offset of its slot group's count, entry start, entry
+// end)], in file order. Each is alone in its slot's group "<slot> 01 <key ref>"; found by those bytes and checked field by field: name
+// ref none or a ..._Clipping string, type 6, end slot "<name>_End", 3 to 4096 vertices (weighted or not), the colour (nonessential).
+std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& d, const std::vector<std::pair<std::string, size_t>>& slots) {
+    size_t p = 0;
+    bool ok = true;
+    auto varint_at = [&](size_t& q, uint32_t* v) {
+        *v = 0;
+        for (int shift = 0;; shift += 7) {
+            if (q >= d.size()) return false;
+            const uint8_t b = d[q++];
+            *v |= uint32_t(b & 0x7F) << shift;
+            if (!(b & 0x80) || shift >= 28) return true;
+        }
+    };
+    auto take = [&](size_t n) {
+        if (!ok || p + n > d.size()) ok = false;
+        else p += n;
+    };
+    auto string = [&]() {
+        uint32_t n = 0;
+        if (!ok || !varint_at(p, &n)) {
+            ok = false;
+            return std::string();
+        }
+        if (n <= 1) return std::string();
+        const size_t at = p;
+        take(n - 1);
+        return ok ? std::string(reinterpret_cast<const char*>(d.data() + at), n - 1) : std::string();
+    };
+    take(8);
+    string();
+    take(16);
+    const bool nonessential = ok && p < d.size() && d[p] != 0;
+    take(1);
+    if (nonessential) {
+        take(4);
+        string();
+        string();
+    }
+    uint32_t nstrings = 0;
+    if (!ok || !varint_at(p, &nstrings)) return {};
+    std::vector<uint32_t> refs;
+    for (uint32_t i = 0; ok && i < nstrings; ++i)
+        if (ends_with_clip(string())) refs.push_back(i + 1);
+    if (!ok) return {};
+    auto encode = [](uint32_t v) {
+        std::vector<uint8_t> out;
+        for (;;) {
+            out.push_back(static_cast<uint8_t>((v & 0x7F) | (v > 0x7F ? 0x80 : 0)));
+            v >>= 7;
+            if (!v) return out;
+        }
+    };
+    std::vector<std::array<size_t, 3>> found;
+    for (size_t k = 0; k < slots.size(); ++k) {
+        const std::string& name = slots[k].first;
+        if (!ends_with_clip(name)) continue;
+        for (uint32_t ref : refs) {
+            std::vector<uint8_t> head = encode(static_cast<uint32_t>(k));
+            const size_t slot_len = head.size();
+            head.push_back(1);
+            const std::vector<uint8_t> refb = encode(ref);
+            head.insert(head.end(), refb.begin(), refb.end());
+            for (auto it = std::search(d.begin(), d.end(), head.begin(), head.end()); it != d.end();
+                 it = std::search(it + 1, d.end(), head.begin(), head.end())) {
+                const size_t count_at = static_cast<size_t>(it - d.begin()) + slot_len, at = count_at + 1;
+                size_t q = at + refb.size();
+                uint32_t nref = 0, endslot = 0, vc = 0;
+                if (!varint_at(q, &nref) || !(nref == 0 || std::find(refs.begin(), refs.end(), nref) != refs.end())) continue;
+                if (q >= d.size() || d[q] != 6) continue;
+                ++q;
+                if (!varint_at(q, &endslot) || !varint_at(q, &vc)) continue;
+                if (endslot >= slots.size() || slots[endslot].first != name + "_End" || vc < 3 || vc > 4096 || q >= d.size() || d[q] > 1)
+                    continue;
+                const bool weighted = d[q++] != 0;
+                bool good = true;
+                for (uint32_t v = 0; good && weighted && v < vc; ++v) {
+                    uint32_t bones = 0;
+                    if (!varint_at(q, &bones)) good = false;
+                    for (uint32_t b = 0; good && b < bones; ++b) {
+                        uint32_t idx = 0;
+                        if (!varint_at(q, &idx)) good = false;
+                        q += 12;
+                    }
+                }
+                if (!weighted) q += 8ull * vc;
+                if (nonessential) q += 4;
+                if (good && q <= d.size()) found.push_back({count_at, at, q});
+            }
+        }
+    }
+    std::sort(found.begin(), found.end());
+    found.erase(std::unique(found.begin(), found.end()), found.end());
+    return found;
+}
+
 std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<uint8_t>& d, const std::string& src, const std::string& dst,
                                      bool unclip, std::string* note) {
     std::vector<uint8_t> out = d;
@@ -1514,22 +1617,33 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
         *note = "slots coloured: skin " + std::to_string(counts[0]) + " (" + hex(g_kasumi_colours[0]) + "), lip " + std::to_string(counts[1]) +
                 " (" + hex(g_kasumi_colours[1]) + "), hair " + std::to_string(counts[2]) + " (" + hex(g_kasumi_colours[2]) + ")";
         if (unclip) {
-            const std::string clip = kClipSlotSuffix;
-            std::vector<std::string> unclipped;
-            for (size_t i = slots.size(); i-- > 0;) {   // from the end: a shorter varint moves what follows
-                const std::string& name = slots[i].first;
-                if (name.size() < clip.size() || name.compare(name.size() - clip.size(), clip.size(), clip) != 0) continue;
-                const size_t p = slots[i].second + 8;
+            struct Edit {
+                size_t start, end;
+                std::vector<uint8_t> with;
+            };
+            std::vector<Edit> edits;   // on the file as it is
+            std::string list;
+            for (const auto& [name, at] : slots) {
+                if (!ends_with_clip(name)) continue;
+                const size_t p = at + 8;   // the setup attachment: none
                 size_t end = p;
                 while (end < out.size() && (out[end] & 0x80)) ++end;
                 if (end >= out.size()) continue;
-                out.erase(out.begin() + static_cast<std::ptrdiff_t>(p), out.begin() + static_cast<std::ptrdiff_t>(end + 1));
-                out.insert(out.begin() + static_cast<std::ptrdiff_t>(p), uint8_t(0));
-                unclipped.insert(unclipped.begin(), name);
+                edits.push_back({p, end + 1, {0}});
+                list += (list.empty() ? "" : ", ") + name;
             }
-            std::string list;
-            for (const std::string& n : unclipped) list += (list.empty() ? "" : ", ") + n;
-            *note += "; clipping off: " + (list.empty() ? std::string("none") : list);
+            const std::vector<std::array<size_t, 3>> entries = clipping_entries(out, slots);
+            for (const auto& [count_at, at, end] : entries) {   // in the skins: the attachment goes, its slot group keeps none
+                edits.push_back({count_at, count_at + 1, {0}});
+                edits.push_back({at, end, {}});
+            }
+            std::sort(edits.begin(), edits.end(), [](const Edit& x, const Edit& y) { return x.start > y.start; });
+            for (const Edit& e : edits) {
+                out.erase(out.begin() + static_cast<std::ptrdiff_t>(e.start), out.begin() + static_cast<std::ptrdiff_t>(e.end));
+                out.insert(out.begin() + static_cast<std::ptrdiff_t>(e.start), e.with.begin(), e.with.end());
+            }
+            *note += "; clipping off: " + (list.empty() ? std::string("none") : list) + " (" + std::to_string(entries.size()) +
+                     " skin attachments removed)";
         }
         return out;
     }
