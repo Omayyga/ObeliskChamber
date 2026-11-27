@@ -910,10 +910,10 @@ class TestKasumi(unittest.TestCase):
         # the Underworld rig: every ..._Clipping slot starts with no attachment (the varint after the colours); the rest as before
         clipped = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"])
         out, note = ru.kasumi_rig_file("skel.zst", clipped, "016", colours, "901", unclip=True)
-        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping "
-                               "(0 skin attachments removed)")
+        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping, "
+                               "Hood_Clipping_End (0 skin attachments removed)")
         at = dict(ru._skel_slot_colours(out))
-        self.assertEqual((out[at["Hood_Clipping"] + 8], out[at["A_TopHair_Hair"] + 8], out[at["Hood_Clipping_End"] + 8]), (0, 1, 1))
+        self.assertEqual((out[at["Hood_Clipping"] + 8], out[at["A_TopHair_Hair"] + 8], out[at["Hood_Clipping_End"] + 8]), (0, 1, 0))
         self.assertEqual(len(out), len(clipped))
         long_att = bytearray(clipped)                       # an attachment index of two bytes becomes one
         first = ru._skel_slot_colours(clipped)[0][1] + 8
@@ -922,21 +922,30 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual(len(out), len(long_att) - 1)
         self.assertEqual(out[ru._skel_slot_colours(out)[0][1] + 8], 0)
         # in a skin: the clipping attachment, alone in its slot group, goes; the group stays with no attachment
-        head = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"], strings=("00_Eye", "x", "Hood_Clipping"))[:-1]
+        head = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"],
+                        strings=("00_Eye", "x", "Hood_Clipping", "Clipping_End"))[:-1]
         # a skin: slot 0 holds the clipping attachment (key ref 3, no name, type 6, end slot 2, 3 unweighted vertices, a colour), slot 1
-        # a region; then whatever follows the skins
+        # a region, slot 2 the end marker (key ref 4, no name, type 2 mesh: no path, colour, 4 vertices, uvs, 2 triangles, unweighted
+        # vertices, hull 4, no sequence, edges, width, height); then whatever follows the skins
         clip = bytes([3, 0, 6, 2, 3, 0]) + struct.pack(">6f", 0, 0, 1, 0, 0, 1) + b"\xff" * 4
         other = bytes([1, 1, 2, 0, 0])
-        skel = head + bytes([2]) + bytes([0, 1]) + clip + other + b"TAIL"
+        end = (bytes([4, 0, 2, 0]) + b"\xff" * 4 + bytes([4]) + struct.pack(">8f", 1, 1, 0, 1, 0, 0, 1, 0) + bytes([6])
+               + struct.pack(">6H", 0, 1, 2, 2, 3, 0) + bytes([0]) + struct.pack(">8f", 8, -8, -8, -8, -8, 8, 8, 8) + bytes([4, 0])
+               + bytes([8]) + struct.pack(">8H", 0, 1, 1, 2, 2, 3, 3, 0) + struct.pack(">2f", 16, 16))
+        skel = head + bytes([3]) + bytes([0, 1]) + clip + other + bytes([2, 1]) + end + b"TAIL"
         start = len(head) + 3
-        self.assertEqual(ru._clipping_entries(skel, ru._skel_slot_colours(skel)), [(start - 1, start, start + len(clip))])
+        end_at = start + len(clip) + len(other) + 2
+        self.assertEqual(ru._clipping_entries(skel, ru._skel_slot_colours(skel)),
+                         [(start - 1, start, start + len(clip)), (end_at - 1, end_at, end_at + len(end))])
         out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", unclip=True)
-        self.assertTrue(note.endswith("clipping off: Hood_Clipping (1 skin attachments removed)"), note)
-        self.assertTrue(out.endswith(bytes([2]) + bytes([0, 0]) + other + b"TAIL"))
-        self.assertEqual(len(out), len(skel) - len(clip))
+        self.assertTrue(note.endswith("clipping off: Hood_Clipping, Hood_Clipping_End (2 skin attachments removed)"), note)
+        self.assertTrue(out.endswith(bytes([3]) + bytes([0, 0]) + other + bytes([2, 0]) + b"TAIL"))
+        self.assertEqual(len(out), len(skel) - len(clip) - len(end))
         self.assertEqual(ru._clipping_entries(skel[:start + 10], ru._skel_slot_colours(skel)), [])   # cut short: not taken
         bad = bytearray(skel)
         bad[start + 3] = 1                                       # the end slot is not Hood_Clipping_End
+        self.assertEqual(ru._clipping_entries(bytes(bad), ru._skel_slot_colours(skel)), [(end_at - 1, end_at, end_at + len(end))])
+        bad[end_at + 2] = 6                                      # an end marker that is not a mesh
         self.assertEqual(ru._clipping_entries(bytes(bad), ru._skel_slot_colours(skel)), [])
         self.assertEqual(ru.kasumi_rig_file("spdb", spdb, "016", dst="901")[0], b"\x0d\x00\x00\x00901/901.atlas\x0c\x00\x00\x00901/901.skel")
 

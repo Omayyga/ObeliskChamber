@@ -126,6 +126,10 @@ KASUMI_FACE = "900"                     # no 9xx folder exists in UI/Face
 # no attachment there, so no clip is active.
 KASUMI_FACE_UW = "901"
 CLIP_SLOT_SUFFIX = "_Clipping"
+# Each clip ends at a slot named ..._Clipping_End that shows a 1600 x 1600 quad (attachment Clipping_End) with alpha 0. The Underworld
+# effect draws every slot opaque but Render (the one alpha-0 slot other rigs have), so that quad becomes an opaque sheet over everything
+# drawn before it: the head. In the Underworld rig the end markers go too.
+CLIP_END_SUFFIX = "_Clipping_End"
 KASUMI_RIGS = {"男": "015", "女": "016"}
 RIG_FILES = ("atlas.zst", "bntx.zst", "skel.zst", "spdb")
 ATLAS_KEY = bytes.fromhex("2d7a777e3f502160")   # an atlas is XOR-scrambled; these are the key's first bytes (each rig's "<n>.png\n")
@@ -985,12 +989,16 @@ def _read_varint(d, q):
 
 
 def _clipping_entries(data, slots):
-    """The clipping attachments in a Spine 4.1 skeleton's skins: [(offset of its slot group's count, entry start, entry end)], in file
-    order. A skin lists, for each slot, "<slot index> <count>" then its attachments: "<key ref> <name ref> <type> <data>". Eshmel's rigs
-    keep each clipping attachment alone in the group of its slot (a slot named ..._Clipping), so it is found by its bytes "<slot> 01
-    <key ref>" (any string-table entry ending _Clipping) and then checked field by field: name ref none or such an entry, type 6
-    (clipping), end slot the slot "<name>_End", 3 to 4096 vertices (weighted: bone count, then index, x, y, weight per bone; or x, y),
-    the colour (nonessential data), all inside the file."""
+    """The clipping attachments and their end markers in a Spine 4.1 skeleton's skins: [(offset of its slot group's count, entry start,
+    entry end)], in file order. A skin lists, for each slot, "<slot index> <count>" then its attachments: "<key ref> <name ref> <type>
+    <data>". Eshmel's rigs keep each alone in the group of its slot, so it is found by its bytes "<slot> 01 <key ref>" and then checked
+    field by field, all inside the file:
+      a slot named ..._Clipping: key ref any string ending _Clipping, name ref none or such a string, type 6 (clipping), end slot the
+        slot "<name>_End", 3 to 4096 vertices (weighted: bone count, then index, x, y, weight per bone; or x, y), the colour
+        (nonessential);
+      a slot named ..._Clipping_End: key ref any string ending Clipping_End, name ref none or such a string, type 2 (mesh): path ref,
+        colour, 3 to 4096 vertices, their uvs, the triangles (count, u16 each), the vertices, hull length, sequence (flag, then four
+        varints), with nonessential data the edges (count, u16 each), width and height."""
     r = _SkelReader(data)
     r.take(8)
     r.string()
@@ -1002,10 +1010,26 @@ def _clipping_entries(data, slots):
         r.string()
     strings = [r.string() for _ in range(r.varint())]
     names = [n for n, _ in slots]
-    refs = [i + 1 for i, t in enumerate(strings) if (t or "").endswith(CLIP_SLOT_SUFFIX)]
+    clip_refs = [i + 1 for i, t in enumerate(strings) if (t or "").endswith(CLIP_SLOT_SUFFIX)]
+    end_refs = [i + 1 for i, t in enumerate(strings) if (t or "").endswith("Clipping_End")]
     found = set()
+
+    def vertices(q, vc):
+        weighted = data[q]
+        q += 1
+        for _ in range(vc if weighted else 0):
+            bones, q = _read_varint(data, q)
+            for _ in range(bones):
+                _, q = _read_varint(data, q)
+                q += 12
+        return q + (0 if weighted else 8 * vc)
+
     for k, name in enumerate(names):
-        if not name.endswith(CLIP_SLOT_SUFFIX):
+        if name.endswith(CLIP_END_SUFFIX):
+            refs, mesh = end_refs, True
+        elif name.endswith(CLIP_SLOT_SUFFIX):
+            refs, mesh = clip_refs, False
+        else:
             continue
         for ref in refs:
             head = _varint(k) + b"\x01" + _varint(ref)
@@ -1016,23 +1040,36 @@ def _clipping_entries(data, slots):
                 try:
                     q = at + len(_varint(ref))
                     nref, q = _read_varint(data, q)
-                    ok = (nref == 0 or nref in refs) and data[q] == 6
-                    if ok:
+                    ok = (nref == 0 or nref in refs) and data[q] == (2 if mesh else 6)
+                    if ok and mesh:
+                        _, q = _read_varint(data, q + 1)            # path
+                        q += 4                                      # colour
+                        vc, q = _read_varint(data, q)
+                        ok = 3 <= vc <= 4096
+                        if ok:
+                            q += 8 * vc                             # uvs
+                            tris, q = _read_varint(data, q)
+                            q = vertices(q + 2 * tris, vc)
+                            _, q = _read_varint(data, q)            # hull length
+                            if data[q]:
+                                q += 1
+                                for _ in range(4):
+                                    _, q = _read_varint(data, q)
+                            else:
+                                q += 1
+                            if nonessential:
+                                edges, q = _read_varint(data, q)
+                                q += 2 * edges + 8
+                            if q <= len(data):
+                                found.add((count_at, at, q))
+                    elif ok:
                         endslot, q = _read_varint(data, q + 1)
                         vc, q = _read_varint(data, q)
-                        ok = endslot < len(names) and names[endslot] == name + "_End" and 3 <= vc <= 4096 and data[q] in (0, 1)
-                    if ok:
-                        weighted = data[q]
-                        q += 1
-                        for _ in range(vc if weighted else 0):
-                            bones, q = _read_varint(data, q)
-                            for _ in range(bones):
-                                _, q = _read_varint(data, q)
-                                q += 12
-                        q += 0 if weighted else 8 * vc
-                        q += 4 if nonessential else 0
-                        if q <= len(data):
-                            found.add((count_at, at, q))
+                        if endslot < len(names) and names[endslot] == name + "_End" and 3 <= vc <= 4096 and data[q] in (0, 1):
+                            q = vertices(q, vc)
+                            q += 4 if nonessential else 0
+                            if q <= len(data):
+                                found.add((count_at, at, q))
                 except IndexError:
                     pass
                 i = data.find(head, i + 1)
@@ -1082,7 +1119,7 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
             edits = []                                  # (start, end, new bytes) on the file as it is
             unclipped = []
             for name, at in slots:
-                if not name.endswith(CLIP_SLOT_SUFFIX):
+                if not name.endswith((CLIP_SLOT_SUFFIX, CLIP_END_SUFFIX)):
                     continue
                 p = at + 8                              # the setup attachment: none
                 end = p

@@ -230,6 +230,9 @@ constexpr const char* kKasumiFace = "900";
 // named ..._Clipping starts with no attachment.
 constexpr const char* kKasumiFaceUw = "901";
 constexpr const char* kClipSlotSuffix = "_Clipping";
+// Each clip ends at a slot ..._Clipping_End showing a 1600 x 1600 quad (Clipping_End) with alpha 0; the Underworld effect draws every slot
+// opaque but Render, so that quad covers the head. In the Underworld rig the end markers go too.
+constexpr const char* kClipEndSuffix = "_Clipping_End";
 const char* const kRigFiles[] = {"atlas.zst", "bntx.zst", "skel.zst", "spdb"};
 constexpr uint8_t kAtlasKey[8] = {0x2d, 0x7a, 0x77, 0x7e, 0x3f, 0x50, 0x21, 0x60};   // an atlas's XOR key, first bytes
 const char* const kTintSlots[] = {"_Skin", "_Lip", "_Hair"};                         // the game's order: skin, lip, hair
@@ -1442,14 +1445,16 @@ bool skel_slot_colours(const std::vector<uint8_t>& d, std::vector<std::pair<std:
     return ok;
 }
 
-bool ends_with_clip(const std::string& name) {
-    const std::string clip = kClipSlotSuffix;
-    return name.size() >= clip.size() && name.compare(name.size() - clip.size(), clip.size(), clip) == 0;
+bool ends_with(const std::string& name, const std::string& end) {
+    return name.size() >= end.size() && name.compare(name.size() - end.size(), end.size(), end) == 0;
 }
+bool ends_with_clip(const std::string& name) { return ends_with(name, kClipSlotSuffix); }
 
-// randomize_units.py _clipping_entries(): the clipping attachments in the skins, [(offset of its slot group's count, entry start, entry
-// end)], in file order. Each is alone in its slot's group "<slot> 01 <key ref>"; found by those bytes and checked field by field: name
-// ref none or a ..._Clipping string, type 6, end slot "<name>_End", 3 to 4096 vertices (weighted or not), the colour (nonessential).
+// randomize_units.py _clipping_entries(): the clipping attachments and their end markers in the skins, [(offset of its slot group's count,
+// entry start, entry end)], in file order. Each is alone in its slot's group "<slot> 01 <key ref>"; found by those bytes and checked field
+// by field: for a ..._Clipping slot, name ref none or a ..._Clipping string, type 6, end slot "<name>_End", 3 to 4096 vertices (weighted
+// or not), the colour (nonessential); for a ..._Clipping_End slot, a ...Clipping_End string, type 2 (mesh: path, colour, vertices, uvs,
+// triangles, vertices, hull, sequence, and with nonessential data edges, width, height).
 std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& d, const std::vector<std::pair<std::string, size_t>>& slots) {
     size_t p = 0;
     bool ok = true;
@@ -1489,10 +1494,29 @@ std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& 
     }
     uint32_t nstrings = 0;
     if (!ok || !varint_at(p, &nstrings)) return {};
-    std::vector<uint32_t> refs;
-    for (uint32_t i = 0; ok && i < nstrings; ++i)
-        if (ends_with_clip(string())) refs.push_back(i + 1);
+    std::vector<uint32_t> clip_refs, end_refs;
+    for (uint32_t i = 0; ok && i < nstrings; ++i) {
+        const std::string t = string();
+        if (ends_with_clip(t)) clip_refs.push_back(i + 1);
+        if (ends_with(t, "Clipping_End")) end_refs.push_back(i + 1);
+    }
     if (!ok) return {};
+    // past the vertices at q (weighted: per vertex a bone count, then index, x, y, weight per bone; or x, y); false when out of the file
+    auto vertices = [&](size_t& q, uint32_t vc) {
+        if (q >= d.size()) return false;
+        const bool weighted = d[q++] != 0;
+        for (uint32_t v = 0; weighted && v < vc; ++v) {
+            uint32_t bones = 0;
+            if (!varint_at(q, &bones)) return false;
+            for (uint32_t b = 0; b < bones; ++b) {
+                uint32_t idx = 0;
+                if (!varint_at(q, &idx)) return false;
+                q += 12;
+            }
+        }
+        if (!weighted) q += 8ull * vc;
+        return true;
+    };
     auto encode = [](uint32_t v) {
         std::vector<uint8_t> out;
         for (;;) {
@@ -1504,7 +1528,9 @@ std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& 
     std::vector<std::array<size_t, 3>> found;
     for (size_t k = 0; k < slots.size(); ++k) {
         const std::string& name = slots[k].first;
-        if (!ends_with_clip(name)) continue;
+        const bool mesh = ends_with(name, kClipEndSuffix);
+        if (!mesh && !ends_with_clip(name)) continue;
+        const std::vector<uint32_t>& refs = mesh ? end_refs : clip_refs;
         for (uint32_t ref : refs) {
             std::vector<uint8_t> head = encode(static_cast<uint32_t>(k));
             const size_t slot_len = head.size();
@@ -1517,25 +1543,37 @@ std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& 
                 size_t q = at + refb.size();
                 uint32_t nref = 0, endslot = 0, vc = 0;
                 if (!varint_at(q, &nref) || !(nref == 0 || std::find(refs.begin(), refs.end(), nref) != refs.end())) continue;
-                if (q >= d.size() || d[q] != 6) continue;
+                if (q >= d.size() || d[q] != (mesh ? 2 : 6)) continue;
                 ++q;
+                if (mesh) {
+                    uint32_t path = 0, vc = 0, tris = 0, hull = 0, edges = 0;
+                    if (!varint_at(q, &path)) continue;
+                    q += 4;   // colour
+                    if (!varint_at(q, &vc) || vc < 3 || vc > 4096) continue;
+                    q += 8ull * vc;   // uvs
+                    if (!varint_at(q, &tris)) continue;
+                    q += 2ull * tris;
+                    if (!vertices(q, vc) || !varint_at(q, &hull) || q >= d.size()) continue;
+                    bool good = true;
+                    if (d[q++]) {   // a sequence
+                        for (int s = 0; good && s < 4; ++s) {
+                            uint32_t x = 0;
+                            good = varint_at(q, &x);
+                        }
+                    }
+                    if (good && nonessential) {
+                        good = varint_at(q, &edges);
+                        q += 2ull * edges + 8;
+                    }
+                    if (good && q <= d.size()) found.push_back({count_at, at, q});
+                    continue;
+                }
                 if (!varint_at(q, &endslot) || !varint_at(q, &vc)) continue;
                 if (endslot >= slots.size() || slots[endslot].first != name + "_End" || vc < 3 || vc > 4096 || q >= d.size() || d[q] > 1)
                     continue;
-                const bool weighted = d[q++] != 0;
-                bool good = true;
-                for (uint32_t v = 0; good && weighted && v < vc; ++v) {
-                    uint32_t bones = 0;
-                    if (!varint_at(q, &bones)) good = false;
-                    for (uint32_t b = 0; good && b < bones; ++b) {
-                        uint32_t idx = 0;
-                        if (!varint_at(q, &idx)) good = false;
-                        q += 12;
-                    }
-                }
-                if (!weighted) q += 8ull * vc;
+                if (!vertices(q, vc)) continue;
                 if (nonessential) q += 4;
-                if (good && q <= d.size()) found.push_back({count_at, at, q});
+                if (q <= d.size()) found.push_back({count_at, at, q});
             }
         }
     }
@@ -1624,7 +1662,7 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
             std::vector<Edit> edits;   // on the file as it is
             std::string list;
             for (const auto& [name, at] : slots) {
-                if (!ends_with_clip(name)) continue;
+                if (!ends_with_clip(name) && !ends_with(name, kClipEndSuffix)) continue;
                 const size_t p = at + 8;   // the setup attachment: none
                 size_t end = p;
                 while (end < out.size() && (out[end] & 0x80)) ++end;
