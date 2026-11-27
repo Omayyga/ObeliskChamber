@@ -861,6 +861,34 @@ NXTEST(romfs_edits_late_files_last) {
     CHECK(late_asked == (std::vector<std::string>{"/GameData/AssetTable.bin", "/GameData/Person.bin", "/Msg/A.bin"}));
 }
 
+// Files added as copies: new folders made, the source found in any case, the copy edited like any file; a missing source or a taken
+// path leaves the tree as it is.
+NXTEST(romfs_copies_added_before_edits) {
+    TempTree base;
+    write_host(base.root, {{"/UI/Face/016/016.skel", false, pattern(10, 1)}, {"/a.bin", false, pattern(10, 2)}});
+    RomfsEdits edits;
+    std::vector<std::string> asked;
+    edits.copies = [] {
+        return std::vector<std::pair<std::string, std::string>>{{"/ui/face/016/016.skel", "/UI/Face/900/900.skel"},
+                                                                {"/UI/Face/017/017.skel", "/UI/Face/901/901.skel"},
+                                                                {"/a.bin", "/UI/Face/016/016.skel"}};
+    };
+    edits.wants = [](const std::string& path) { return path == "/UI/Face/900/900.skel"; };
+    edits.edit = [&](const std::string& path, std::vector<uint8_t>& data) {
+        asked.push_back(path);
+        data.push_back(0x7F);
+        return true;
+    };
+    RomfsImage img;
+    std::string err;
+    REQUIRE(img.build(utf8(base.root), &err, {}, &edits));
+    CHECK(asked == (std::vector<std::string>{"/UI/Face/900/900.skel"}));
+    std::vector<uint8_t> edited = pattern(10, 1);
+    edited.push_back(0x7F);
+    check_tree(img, {{"/UI/Face/016/016.skel", false, pattern(10, 1)}, {"/UI/Face/900/900.skel", false, edited},
+                     {"/a.bin", false, pattern(10, 2)}});
+}
+
 // An overlay file where the game has a folder replaces the folder.
 NXTEST(romfs_overlay_file_replaces_folder) {
     TempTree base, mod;

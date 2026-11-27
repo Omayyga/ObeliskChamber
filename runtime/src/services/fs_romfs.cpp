@@ -282,6 +282,71 @@ bool merge(Node& base, Node& add, uint32_t& taken, std::string& msg) {
     return true;
 }
 
+// Adds the file `dst` (an image path) as a copy of the file `src` (any case), with the folders it needs. False with why set when the
+// source is not a file of the tree or `dst` is taken or too long.
+bool add_copy(Node& root, const std::string& src, const std::string& dst, std::string& why) {
+    auto parts = [](const std::string& p) {
+        std::vector<std::string> out;
+        for (size_t at = 0; at <= p.size();) {
+            const size_t slash = std::min(p.find('/', at), p.size());
+            if (slash > at) out.push_back(p.substr(at, slash - at));
+            at = slash + 1;
+        }
+        return out;
+    };
+    auto child = [](Node& dir, const std::string& name) -> Node* {
+        for (Node& k : dir.kids)
+            if (same_name_nocase(k.name, name)) return &k;
+        return nullptr;
+    };
+    const Node* from = nullptr;
+    {
+        Node* d = &root;
+        const std::vector<std::string> sp = parts(src);
+        for (size_t i = 0; d && i < sp.size(); i++) d = child(*d, sp[i]);
+        if (!d || d->is_dir || sp.empty()) {
+            why = "no file " + src;
+            return false;
+        }
+        from = d;
+    }
+    const std::vector<std::string> dp = parts(dst);
+    if (dp.empty()) {
+        why = "no path";
+        return false;
+    }
+    Node copy = *from;   // copied before the tree below changes: adding nodes may move the source
+    Node* d = &root;
+    for (size_t i = 0; i + 1 < dp.size(); i++) {
+        Node* next = child(*d, dp[i]);
+        if (next && !next->is_dir) {
+            why = d->path + "/" + dp[i] + " is a file";
+            return false;
+        }
+        if (!next) {
+            Node k;
+            k.is_dir = true;
+            k.name = dp[i];
+            k.path = d->path + "/" + dp[i];
+            d->kids.push_back(std::move(k));
+            next = &d->kids.back();
+        }
+        d = next;
+    }
+    if (child(*d, dp.back())) {
+        why = "the path is taken";
+        return false;
+    }
+    copy.name = dp.back();
+    copy.path = d->path + "/" + copy.name;
+    if (copy.name.size() > kMaxName || copy.path.size() > kMaxPath) {
+        why = "name or path too long for a RomFS";
+        return false;
+    }
+    d->kids.push_back(std::move(copy));
+    return true;
+}
+
 void flatten(Node& n, std::vector<Node*>& dirs, std::vector<Node*>& files) {
     for (Node& k : n.kids) {
         if (k.is_dir) {
@@ -410,7 +475,20 @@ bool make_layout(const std::string& host_dir, const std::vector<std::string>& ov
             overlay_hosts.push_back(ov.host);
         }
     }
-    if (!overlays.empty()) sort_tree(root);
+    // Files added as copies of others (RomfsEdits::copies), before the edits, so an edit of the new path edits the copy
+    bool copied = false;
+    if (edits && edits->copies) {
+        for (const auto& [src, dst] : edits->copies()) {
+            std::string why;
+            if (add_copy(root, src, dst, why)) {
+                copied = true;
+                NXLOG_I("fs", "romfs: %s added, a copy of %s", dst.c_str(), src.c_str());
+            } else {
+                NXLOG_W("fs", "romfs: %s not added as a copy of %s: %s", dst.c_str(), src.c_str(), why.c_str());
+            }
+        }
+    }
+    if (!overlays.empty() || copied) sort_tree(root);
 
     std::vector<Node*> dirs{&root}, files;
     flatten(root, dirs, files);

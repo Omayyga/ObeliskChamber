@@ -755,7 +755,6 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual({x.hair for x in rest}, set(range(1, 17)))
         self.assertTrue(all(ru.draw_kasumi(s, hood=True).describe() == self.EGG.describe() for s in range(20)))
         self.assertEqual((self.LOOK.gender(), self.EGG.gender()), (1, 2))
-        self.assertEqual((self.LOOK.underworld(), self.EGG.underworld()), ("イシュマール男C冥闘士", "カスミ冥闘士"))
 
     def test_alternatives(self):
         alts = [["AID_イシュマール", "男"], ["AID_イシュマール", "女"], ["AID_イシュマール", "男", "頭部C"], ["AID_イシュマール", "男", "頭部A"],
@@ -827,33 +826,91 @@ class TestKasumi(unittest.TestCase):
 
     def test_assets(self):
         data = asset_table(self.ENTRIES, self.FACES)
-        for look, want_look in ((self.EGG, "カスミ冥闘士"), (ru.KasumiLook("女", "B", "A", 1, 1), "イシュマール女B冥闘士")):
+        for look, face in ((self.EGG, ("Ism0F", "900_BHoodOn")), (ru.KasumiLook("男", "C", "A", 1, 1), ("Ism0M", "900_CHoodOff"))):
             out, changes = ru.apply_assets(data, [], [], {"AID_リンド": "AID_カスミ"}, [], kasumi=look)
             b, entries, faces = self.read(out)
-            # portraits for every look a seed can draw
-            for s in "男女":
-                for h in "ABCD":
-                    self.assertEqual(faces["FID_イシュマール%s%s冥闘士" % (s, h)][2], 1)
-                    self.assertEqual(faces["FID_イシュマール%s%s冥闘士" % (s, h)][1], faces["FID_イシュマール%s%s" % (s, h)][1])
-            self.assertEqual(faces["FID_カスミ"], ("Ism0F", "016_BHoodOn", 0))
-            self.assertEqual(faces["FID_カスミ冥闘士"], ("Ism0F", "016_BHoodOn", 1))
+            # its own portraits: copies of the Eshmel one its draw names, in its own rig, with its sex's voice
+            self.assertEqual(faces["FID_カスミ"], face + (0,))
+            self.assertEqual(faces["FID_カスミ冥闘士"], face + (1,))
+            self.assertEqual(faces["FID_イシュマール女Bフード"], ("Ism4F", "016_BHoodOn", 0))          # Eshmel's stay as they are
+            self.assertFalse([k for k in faces if k.startswith("FID_イシュマール") and k.endswith("冥闘士")])
             self.assertEqual({n for _, n in b.labels if n.startswith("FID_")}, set(faces))
             # Eshmel's alternatives stay, the second Eshmel's follow them
-            self.assertEqual(entries[1][0], self.ENTRIES[1][1] + [["JID_闘士", "AID_カスミ"]])
-            self.assertEqual(entries[2][0], self.ENTRIES[2][1] + [["AID_カスミ"]])
-            self.assertEqual(entries[3][0], self.ENTRIES[3][1] + [["AID_カスミ"]])
+            self.assertEqual(entries[1][0], self.ENTRIES[1][1] + ([["JID_闘士", "AID_カスミ"]] if look.hood else []))
+            self.assertEqual(entries[2][0], self.ENTRIES[2][1] + ([["AID_カスミ"]] if look.hood else []))
             self.assertEqual(entries[4][0], self.ENTRIES[4][1] + ([["AID_カスミ", "!Spine", "!AID_フード無し"]] if look.hood else []))
-            self.assertEqual(entries[5][0], self.ENTRIES[5][1])
+            self.assertEqual(entries[5][0], self.ENTRIES[5][1] + ([] if look.hood else [["AID_カスミ"]]))
             self.assertEqual([x[1:] for x in entries[:len(self.ENTRIES)]], [x[2:] for x in self.ENTRIES])   # looks, keywords as were
             self.assertEqual(faces["FID_コン・ムー冥闘士"], ("Kon0", "155", 1))                   # Kumos: an Underworld form
-            added = entries[len(self.ENTRIES):]
-            hood = [([["AID_カスミ", "!Spine", "!AID_フード無し"]], "カスミ", [])] if look.hood else []
-            self.assertEqual(added, [([["AID_コン・ムー", "SID_冥界兵"]], "コン・ムー冥闘士", ["SID_冥界兵"])] + hood + [
-                                            ([["AID_カスミ", "SID_冥界兵"]], want_look, ["SID_冥界兵"]),
-                                            ([["AID_カスミ", "AID_リンド冥将"]], want_look, ["SID_冥界兵"])])
-            self.assertEqual(entries[7][0], [["AID_リンド", "SID_冥界兵"], ["AID_リンド", "SID_冥界兵"]])   # step 4, as for anyone
+            self.assertEqual(entries[len(self.ENTRIES):], [
+                ([["AID_コン・ムー", "SID_冥界兵"]], "コン・ムー冥闘士", ["SID_冥界兵"]),
+                ([["AID_カスミ"]], "カスミ", []),                                                # after Eshmel's: her own portrait
+                ([["AID_カスミ", "SID_冥界兵"]], "カスミ冥闘士", ["SID_冥界兵"]),
+                ([["AID_カスミ", "AID_リンド冥将"]], "カスミ冥闘士", ["SID_冥界兵"])])            # step 4, as for anyone
+            self.assertEqual(entries[7][0], [["AID_リンド", "SID_冥界兵"], ["AID_リンド", "SID_冥界兵"]])
             self.assertEqual(ge.Editor(out).build(), out)                                       # a well-formed container
+        # Kasumi plays a lord: the portrait the cutscene names shows hers, face and all
+        lord = asset_table(self.ENTRIES + [("e9", [["AID_カイ"]], "カイ", []), ("e10", [["AID_カイ", "SID_冥界兵"]], "カイ冥闘士", ["SID_冥界兵"])],
+                           self.FACES + [("FID_カイ", "Kai0", "017", 0), ("FID_カイ冥闘士", "Kai9", "017", 1)])
+        _, _, faces = self.read(ru.apply_assets(lord, [], [], {"AID_カイ": "AID_カスミ"}, ["カイ冥闘士"], kasumi=self.EGG)[0])
+        self.assertEqual(faces["FID_カイ冥闘士"], ("Ism0F", "900_BHoodOn", 1))
+        self.assertEqual(faces["FID_カイ冥闘士本人"], ("Kai9", "017", 1))
         self.assertEqual(ru.apply_assets(data, [], [], None, []), (data, []))                  # off: nothing
+
+    def test_colours(self):
+        """kasumi_colours: from the "& Spine" colour entries of the look's sex, skin and hair; later entries win."""
+        b = Builder()
+        conds = []
+        rows = [("c0", [["AID_イシュマール", "女", "肌色2", "Spine"]], "11223344", "55667788", "00000000"),
+                ("c1", [["AID_イシュマール", "女", "肌色2"]], "aaaaaaaa", "aaaaaaaa", "00000000"),          # not the portrait's
+                ("c2", [["AID_イシュマール", "男", "肌色2", "Spine"]], "bbbbbbbb", "bbbbbbbb", "00000000"),  # the other sex
+                ("c3", [["AID_イシュマール", "髪色3", "Spine"]], "00000000", "00000000", "9bc0d1ff"),
+                ("c4", [["AID_イシュマール", "髪色3", "Spine"]], "00000000", "00000000", "4a505cff")]       # later wins
+
+        def write(at, row):
+            conds.append((at + 0x20, row[1]))
+            for k, off in enumerate((0x30, 0x34, 0x38)):
+                b.data[at + off:at + off + 4] = bytes.fromhex(row[2 + k])
+        table(b, "アセットテーブル", [("条件", "string[,]", 16, 0x20), ("肌カラー", "color", 4, 0x30), ("口紅色", "color", 4, 0x34),
+                                     ("髪カラー", "color", 4, 0x38)], 0x40, rows, write)
+        for at, alts in conds:
+            struct.pack_into("<I", b.data, at, len(alts) | 16 << 16)
+            arr = len(b.data)
+            b.data += bytes(16 * len(alts))
+            struct.pack_into("<Q", b.data, at + 8, arr)
+            b.rel.append(at + 8)
+            for i, alt in enumerate(alts):
+                string_list(b, arr + 16 * i, alt)
+        b.labels.sort()
+        got = ru.kasumi_colours(b.build(), ru.KasumiLook("女", "B", "B", 2, 3))
+        self.assertEqual(got, [bytes.fromhex("11223344"), bytes.fromhex("55667788"), bytes.fromhex("4a505cff")])
+        self.assertEqual(ru.kasumi_colours(b.build(), ru.KasumiLook("女", "B", "B", 5, 9)), [None, None, None])
+
+    def test_rig_files(self):
+        key = ru.ATLAS_KEY
+        atlas = bytes(x ^ y for x, y in zip(b"016.png\nsize: 4096", key * 3))
+        out, _ = ru.kasumi_rig_file("atlas.zst", atlas, "016")
+        self.assertEqual(bytes(x ^ y for x, y in zip(out, key * 3)), b"900.png\nsize: 4096")
+        self.assertEqual(ru.kasumi_rig_file("atlas.zst", atlas, "015")[0], None)                  # another rig's
+        bntx = b"BNTX....\x03\x00016\x00\x00_DIC"
+        self.assertEqual(ru.kasumi_rig_file("bntx.zst", bntx, "016")[0], b"BNTX....\x03\x00900\x00\x00_DIC")
+        self.assertEqual(ru.kasumi_rig_file("bntx.zst", bntx * 2, "016")[0], None)               # not there once
+        spdb = b"\x0d\x00\x00\x00016/016.atlas\x0c\x00\x00\x00016/016.skel"
+        self.assertEqual(ru.kasumi_rig_file("spdb", spdb, "016")[0], b"\x0d\x00\x00\x00900/900.atlas\x0c\x00\x00\x00900/900.skel")
+        skel = skeleton(["Body02_Skin", "A_TopHair_Hair", "A_TopHair_Highlight", "Mouth_n00_Lip", "00_Eye"])
+        colours = [bytes.fromhex("dcba9eff"), bytes.fromhex("da9681ff"), bytes.fromhex("9bc0d1ff")]
+        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours)
+        slots = dict(ru._skel_slot_colours(out))
+        self.assertEqual({n: out[at:at + 8].hex() for n, at in slots.items()},
+                         {"Body02_Skin": "dcba9effffffffff", "A_TopHair_Hair": "9bc0d1ffffffffff", "A_TopHair_Highlight": "ffffffffffffffff",
+                          "Mouth_n00_Lip": "da9681ffffffffff", "00_Eye": "ffffffffffffffff"})
+        self.assertEqual(len(out), len(skel))
+        self.assertEqual(note, "slots coloured: skin 1 (dcba9eff), lip 1 (da9681ff), hair 1 (9bc0d1ff)")
+        self.assertEqual(ru.kasumi_rig_file("skel.zst", skeleton(["x_Hair"], version="4.2.01"), "016", colours)[0], None)
+
+    def test_look_helpers(self):
+        self.assertEqual((self.EGG.portrait(), self.EGG.voice(), self.EGG.rig()), ("イシュマール女Bフード", "Ism0F", "016"))
+        self.assertEqual((self.LOOK.portrait(), self.LOOK.voice(), self.LOOK.rig()), ("イシュマール男C", "Ism0M", "015"))
 
 
 if __name__ == "__main__":

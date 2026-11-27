@@ -4,6 +4,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct Ctx;          // the lifted code's register state (nxrecomp/ctx.h)
@@ -94,6 +95,11 @@ bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data);
 bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), void (*fn)(const NxModFile* file, void* user), void* user,
                       bool late = false);
 bool file_edit_late(const std::string& image_path);
+// A new file in the RomFS image: a copy of the file at image path `src` ("/UI/Face/016/016.skel.zst", any case) at `dst`, with the
+// folders it needs. Copies are made before the file edits, so a runtime edit matching `dst` edits the copy. A copy whose source is
+// missing or whose path is taken is left out (logged). Register before the RomFS image is built; false when it is too late.
+bool add_runtime_copy(const char* owner, const std::string& src, const std::string& dst);
+std::vector<std::pair<std::string, std::string>> file_copies();   // (src, dst), in the order registered
 }  // namespace modapi
 
 // ---- acc (acc.cpp) ----------------------------------------------------------------------------------------------------------------

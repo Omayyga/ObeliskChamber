@@ -518,6 +518,7 @@ std::shared_ptr<fs::RomfsImage> rom_image() {
     edits.wants = &modapi::file_edit_wanted;
     edits.edit = &modapi::file_edit_run;
     edits.late = &modapi::file_edit_late;
+    edits.copies = &modapi::file_copies;
     if (!img->build(dir, &err, overlays, &edits)) {
         NXLOG_E("fs", "RomFS folder '%s' cannot be served: %s (set [fs] romfs)", dir.c_str(), err.c_str());
         st().rom_failed = true;

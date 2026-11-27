@@ -94,6 +94,7 @@ struct State {
     std::vector<Panel> panels;
     std::atomic<size_t> live_panels{0};   // has_panels without the lock
     std::vector<Editor> editors;
+    std::vector<std::pair<std::string, std::string>> copies;   // add_runtime_copy: (source, new path) image paths
     bool edits_closed = false;   // the RomFS image has asked: later edit_file calls are too late
     std::vector<std::string> folders;   // the installed mods' folders (mod_folder), filled on first use
     bool folders_known = false;
@@ -612,6 +613,23 @@ bool add_runtime_edit(const char* owner, bool (*match)(const std::string& key), 
     const auto it = std::find_if(st().editors.begin(), st().editors.end(), [](const Editor& x) { return !x.match; });
     st().editors.insert(it, std::move(e));
     return true;
+}
+
+bool add_runtime_copy(const char* owner, const std::string& src, const std::string& dst) {
+    if (src.empty() || dst.empty()) return false;
+    std::lock_guard<std::mutex> lk(st().mu);
+    if (st().edits_closed) {
+        NXLOG_W(kTag, "%s: file copy registered too late, the game's file system is already set up", owner ? owner : "?");
+        return false;
+    }
+    st().copies.push_back({src, dst});
+    return true;
+}
+
+std::vector<std::pair<std::string, std::string>> file_copies() {
+    std::lock_guard<std::mutex> lk(st().mu);
+    st().edits_closed = true;
+    return st().copies;
 }
 
 bool file_edit_run(const std::string& image_path, std::vector<uint8_t>& data) {

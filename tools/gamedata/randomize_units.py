@@ -109,11 +109,21 @@ ESHMEL_AID = "AID_イシュマール"
 ESHMEL_HOOD = "AID_イシュマールフード"     # a story variable (Variable.bin) in vanilla: the hooded look
 ESHMEL_STORY = ("AID_イシュマール浮遊", "!イシュマール支援")   # story-only alternatives left out: the floating form, no shadow in Parts 1-2
 SEXES, HEADS, BODIES, SKINS, HAIRS = ("男", "女"), "ABCD", "ABCDE", 12, 16      # the creator's lists, in data order
-# The easter egg: 1 draw in KASUMI_EGG_ODDS is hooded, with the owner's own Eshmel (female, hairstyle B, outfit B, skin 2, hair 3). The
-# hooded portrait entries have voice Ism4M/F, which has no sound or quotes: its portrait is a copy, FID_<KASUMI_HOOD>, with voice Ism0F.
+# The easter egg: 1 draw in KASUMI_EGG_ODDS is hooded, with the owner's own Eshmel (female, hairstyle B, outfit B, skin 2, hair 3).
 KASUMI_EGG_ODDS = 50
 KASUMI_EGG = ("女", "B", "B", 2, 3)
-KASUMI_HOOD = "カスミ"                   # the hooded look's portrait entry FID_カスミ, and FID_カスミ冥闘士
+# Its portraits. The game tints a portrait's slots named ..._Skin, ..._Lip, ..._Hair (0x194f770 in main) only for faces in Eshmel's rigs
+# (a face name containing 015 or 016), with the colours of the save's avatar: Kasumi's came out white. So she has a rig of her own, a copy
+# of 015 (male) or 016 (female) in UI/Face/<KASUMI_FACE> (a name the game never tints), with her colours written into those slots (the
+# colours the look entries "AID_イシュマール & <sex> & 肌色N & Spine" and "AID_イシュマール & 髪色N & Spine" give: 肌カラー, 口紅色, 髪カラー),
+# and portrait entries of her own: FID_カスミ (and FID_カスミ冥闘士, tinted), copies of the Eshmel portrait entry her draw names with the
+# face in her folder and her sex's voice (the hooded entries' Ism4M/F has no sound or quotes). Eshmel's rigs and entries stay as they are.
+KASUMI_LOOK = "カスミ"
+KASUMI_FACE = "900"                     # no 9xx folder exists in UI/Face
+KASUMI_RIGS = {"男": "015", "女": "016"}
+RIG_FILES = ("atlas.zst", "bntx.zst", "skel.zst", "spdb")
+ATLAS_KEY = bytes.fromhex("2d7a777e3f502160")   # an atlas is XOR-scrambled; these are the key's first bytes (each rig's "<n>.png\n")
+TINT_SLOTS = ("_Skin", "_Lip", "_Hair")          # the game's order: skin, lip, hair colour
 KASUMI_SALT = 0x4B4153554D49            # "KASUMI": the look's generator is the seed's, apart from the shuffle's
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
@@ -201,9 +211,15 @@ class KasumiLook:
     def gender(self):
         return 1 if self.sex == "男" else 2
 
-    def underworld(self):
-        """Its Underworld look (容姿)."""
-        return (KASUMI_HOOD if self.hood else "イシュマール" + self.sex + self.head) + "冥闘士"
+    def portrait(self):
+        """The Eshmel portrait entry (容姿) its own is a copy of."""
+        return "イシュマール" + self.sex + self.head + ("フード" if self.hood else "")
+
+    def voice(self):
+        return "Ism0" + ("M" if self.sex == "男" else "F")
+
+    def rig(self):
+        return KASUMI_RIGS[self.sex]
 
     def describe(self):
         return "%s 頭部%s 身体%s 肌色%d 髪色%d%s" % (self.sex, self.head, self.body, self.skin, self.hair, " フード" if self.hood else "")
@@ -528,11 +544,11 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
        replaced by r: F in the condition becomes SID_冥界兵 (the condition now repeats the other), and, once per F, a new look entry
        "AID_r & F" -> r's Underworld look (as in 3, U本人 for a U of step 3) with the keyword.
 
-    5. With `kasumi` (a KasumiLook: the second Eshmel is in), after step 2: a tinted copy FID_イシュマール<sex><head>冥闘士 of each of
-       Eshmel's 8 unhooded portraits, and FID_カスミ / FID_カスミ冥闘士, copies of the easter egg's hooded one with voice Ism0F; a look
-       entry "AID_カスミ & !Spine & !AID_フード無し" -> カスミ when it is the easter egg, and "AID_カスミ & SID_冥界兵" -> its Underworld
-       look (steps 3 and 4 then treat it as anyone's); and in every look entry, beside Eshmel's alternatives, kasumi_alternatives():
-       the entry's condition list is rebuilt at the end of the data, its own alternatives first.
+    5. With `kasumi` (a KasumiLook: the second Eshmel is in), after step 2: FID_カスミ and FID_カスミ冥闘士 (特殊 1), copies of the
+       Eshmel portrait entry the draw names (kasumi.portrait()) with the face in UI/Face/<KASUMI_FACE> (its own rig: kasumi_rig_file)
+       and its sex's voice; look entries "AID_カスミ" -> カスミ and "AID_カスミ & SID_冥界兵" -> カスミ冥闘士 (steps 3 and 4 then treat it as
+       anyone's; an overwrite takes the face too); and in every look entry, beside Eshmel's alternatives, kasumi_alternatives(): the
+       entry's condition list is rebuilt at the end of the data, its own alternatives first.
 
     New portrait entries go after the last of 容姿情報 (with a label each, as every entry has), new look entries after the last of
     アセットテーブル: later entries win, so an Underworld entry overrides the plain one, as Cai's does. A new look entry is a copy of
@@ -541,7 +557,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     e = gamedata_edit.Editor(data)
     assets, faces = b.table("アセットテーブル"), b.table("容姿情報")
     f_cond, f_look, f_kw = (assets.field(n).off for n in ("条件", "容姿", "キーワード"))
-    f_voice, f_special = faces.field("ボイス").off, faces.field("特殊").off
+    f_voice, f_special, f_face = faces.field("ボイス").off, faces.field("特殊").off, faces.field("フェイス").off
     swaps = swaps or {}
     changes = []
     if kasumi is not None:
@@ -568,7 +584,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     def has_underworld(aid):
         return any([aid, UNDERWORLD] in conds[r] for r in entries)
 
-    new_faces = []      # (source portrait entry, new key, 特殊 or None to keep, voice or None to keep)
+    new_faces = []      # (source portrait entry, new key, 特殊 or None to keep, voice or None to keep, face or None to keep)
     new_looks = []      # ([condition terms], look, with the keyword SID_冥界兵)
     for look in looks:
         living = look[:-len("冥闘士")]
@@ -580,7 +596,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             changes.append("%s: skipped" % look)
             continue
         voice = b.string(src + f_voice) or ""
-        new_faces.append((src, "FID_" + living, 0, voice[:-1] + "0" if voice.endswith("9") else None))
+        new_faces.append((src, "FID_" + living, 0, voice[:-1] + "0" if voice.endswith("9") else None, None))
         e.set_ptr(plain + f_look, living)
         changes.append("%s: living look %s" % (aid, living))
         if strings(plain + f_kw) == [UNDERWORLD]:
@@ -595,32 +611,24 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         if not living or "FID_" + living not in fids or "FID_" + living + "冥闘士" in fids or has_underworld(aid):
             changes.append("%s: skipped" % aid)
             continue
-        new_faces.append((fids["FID_" + living], "FID_" + living + "冥闘士", 1, None))
+        new_faces.append((fids["FID_" + living], "FID_" + living + "冥闘士", 1, None, None))
         new_looks.append(([aid, UNDERWORLD], living + "冥闘士", True))
-    # The second Eshmel. Portraits for every look a seed can draw, whatever this one drew: a tinted copy of each of Eshmel's 8 unhooded
-    # portraits, and the easter egg's hooded one (living and tinted) with the voice of its sex's unhooded set. Then its look entries:
-    # the hooded one's portrait (as Eshmel's hooded entries give it, "!Spine & !AID_フード無し"), and its Underworld look. Then
-    # (kasumi_alts) an alternative for KASUMI_AID beside each of Eshmel's alternatives in every look entry: the class outfits too.
+    # The second Eshmel: its portrait entries FID_カスミ and FID_カスミ冥闘士 (tinted), copies of the Eshmel portrait entry its draw
+    # names, with the face in its own rig (UI/Face/<KASUMI_FACE>, made by kasumi_rig_file) and its sex's voice; the look entries
+    # "AID_カスミ" -> カスミ (after Eshmel's, which name Eshmel's portraits) and "AID_カスミ & SID_冥界兵" -> カスミ冥闘士 (steps 3 and 4 then
+    # treat it as anyone's); then (kasumi_alts) an alternative for KASUMI_AID beside each of Eshmel's in every look entry.
     kasumi_alts = []    # (its index, look entry, [new alternatives])
     if kasumi is not None:
-        for sex in SEXES:
-            for head in HEADS:
-                stem = "イシュマール" + sex + head
-                if "FID_" + stem not in fids or "FID_" + stem + "冥闘士" in fids:
-                    changes.append("FID_%s冥闘士: skipped" % stem)
-                    continue
-                new_faces.append((fids["FID_" + stem], "FID_" + stem + "冥闘士", 1, None))
-        egg_sex, egg_head = KASUMI_EGG[0], KASUMI_EGG[1]
-        hood_src = fids.get("FID_イシュマール" + egg_sex + egg_head + "フード")
-        if hood_src is None or "FID_" + KASUMI_HOOD in fids:
-            changes.append("FID_%s: skipped" % KASUMI_HOOD)
+        src = fids.get("FID_" + kasumi.portrait())
+        face = b.string(src + f_face) if src is not None else None
+        if not face or "_" not in face or "FID_" + KASUMI_LOOK in fids or "FID_" + KASUMI_LOOK + "冥闘士" in fids:
+            changes.append("FID_%s: skipped" % KASUMI_LOOK)
         else:
-            voice = "Ism0" + ("M" if egg_sex == "男" else "F")
-            new_faces.append((hood_src, "FID_" + KASUMI_HOOD, None, voice))
-            new_faces.append((hood_src, "FID_" + KASUMI_HOOD + "冥闘士", 1, voice))
-        if kasumi.hood:
-            new_looks.append(([KASUMI_AID, "!Spine", "!AID_フード無し"], KASUMI_HOOD, False))
-        new_looks.append(([KASUMI_AID, UNDERWORLD], kasumi.underworld(), True))
+            face = KASUMI_FACE + face[face.index("_"):]
+            new_faces.append((src, "FID_" + KASUMI_LOOK, 0, kasumi.voice(), face))
+            new_faces.append((src, "FID_" + KASUMI_LOOK + "冥闘士", 1, kasumi.voice(), face))
+            new_looks.append(([KASUMI_AID], KASUMI_LOOK, False))
+            new_looks.append(([KASUMI_AID, UNDERWORLD], KASUMI_LOOK + "冥闘士", True))
         for i, r in enumerate(entries):
             alts = kasumi_alternatives(conds[r], kasumi)
             if alts and b.u32(r + f_cond) >> 16 == 16:
@@ -638,10 +646,10 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         return found
 
     def face_source(look):
-        """(portrait entry, 特殊, voice) that FID_<look> is or is made from (None: keep the entry's), or None when there is none."""
+        """(portrait entry, 特殊, voice, face) that FID_<look> is or is made from (None: keep the entry's), or None when there is none."""
         if "FID_" + look in fids:
-            return fids["FID_" + look], None, None
-        return next(((src, special, voice) for src, key, special, voice in new_faces if key == "FID_" + look), None)
+            return fids["FID_" + look], None, None, None
+        return next(((src, special, voice, face) for src, key, special, voice, face in new_faces if key == "FID_" + look), None)
 
     # 3. the portraits the cutscenes name
     renamed = {}        # look -> the name of its copy
@@ -657,7 +665,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         if src is None or dst is None or "FID_" + u + OWN_COPY in fids:
             changes.append("%s: skipped" % u)
             continue
-        new_faces.append((dst, "FID_" + u + OWN_COPY, None, None))
+        new_faces.append((dst, "FID_" + u + OWN_COPY, None, None, None))
         renamed[u] = u + OWN_COPY
         overwrite.append((dst, u, v, src))
     for r in entries:
@@ -691,7 +699,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     H = gamedata_bin.HEADER
     face_recs = list(faces.records())
     face_end, look_end, data_end = face_recs[-1] + faces.rec_size, entries[-1] + assets.rec_size, b.data_size
-    face_raw = b"".join(bytes(b.d[H + src:H + src + faces.rec_size]) for src, _, _, _ in new_faces)
+    face_raw = b"".join(bytes(b.d[H + src:H + src + faces.rec_size]) for src, *_ in new_faces)
     look_raw = bytes(b.d[H + template:H + template + assets.rec_size]) * len(new_looks) if new_looks else b""
     # the end of the data: each new look entry's condition (one alternative: its header, then its strings), then each condition list
     # the second Eshmel's alternatives make: all the alternatives' headers (the entry's own copied, then the new), then the new strings
@@ -712,7 +720,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             len(aux_raw) if at >= data_end else 0)
 
     face_row = max(b.u32(r + 0x14) >> 16 for r in face_recs)
-    for i, (src, key, special, voice) in enumerate(new_faces):
+    for i, (src, key, special, voice, face) in enumerate(new_faces):
         rec = now(face_end) - len(face_raw) + faces.rec_size * i   # the inserted block starts where face_end was, moved by look_raw
         e.u32(rec + 0x10, 0x10000 | (len(face_recs) + i))
         e.u32(rec + 0x14, (face_row + 1 + i) << 16)
@@ -722,6 +730,8 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
         e.set_ptr(rec + 8, key)
         if voice is not None:
             e.set_ptr(rec + f_voice, voice)
+        if face is not None:
+            e.set_ptr(rec + f_face, face)
         if special is not None:
             e.data[rec + f_special] = special
         e.add_label(rec, key)
@@ -729,7 +739,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     # 3, the overwrites: every source is read before any is written (a lord may play another lord). A field the source has no
     # pointer in (Katarina has no voice) stops being one.
     copies, clears = [], []
-    for dst, u, v, (src, special, voice) in overwrite:
+    for dst, u, v, (src, special, voice, face) in overwrite:
         e.data[now(dst) + 0x20:now(dst) + faces.rec_size] = b.d[H + src + 0x20:H + src + faces.rec_size]
         for o in range(0x20, faces.rec_size, 8):
             if src + o in b.ptrs:
@@ -739,9 +749,11 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     e.copy_ptrs(copies)
     for at in clears:
         e.clear_ptr(at)
-    for dst, u, v, (src, special, voice) in overwrite:
+    for dst, u, v, (src, special, voice, face) in overwrite:
         if voice is not None:
             e.set_ptr(now(dst) + f_voice, voice)
+        if face is not None:
+            e.set_ptr(now(dst) + f_face, face)
         if special is not None:
             e.data[now(dst) + f_special] = special
         changes.append("FID_%s shows %s" % (u, v))
@@ -884,6 +896,108 @@ def rename_eye_slots(data):
     return bytes(out), [(old, new) for _, _, old, new in renames]
 
 
+def kasumi_colours(data, look):
+    """The second Eshmel's portrait colours [skin, lip, hair], 4 bytes each (RGBA, as the file stores them; None when no entry gives
+    one), from the vanilla AssetTable.bin: the last look entry with the alternative "AID_イシュマール & <sex> & 肌色N & Spine" gives 肌カラー
+    and 口紅色, the last with "AID_イシュマール & 髪色N & Spine" gives 髪カラー (later entries win). The runtime does the same."""
+    b = gamedata_bin.GameDataBin(bytes(data))
+    t = b.table("アセットテーブル")
+    f_cond = t.field("条件").off
+    f_skin, f_lip, f_hair = (t.field(n).off for n in ("肌カラー", "口紅色", "髪カラー"))
+    want_skin = sorted([ESHMEL_AID, look.sex, "肌色%d" % look.skin, "Spine"])
+    want_hair = sorted([ESHMEL_AID, "髪色%d" % look.hair, "Spine"])
+    H = gamedata_bin.HEADER
+    out = [None, None, None]
+    for rec in t.records():
+        word, arr = b.u32(rec + f_cond), b.ptr(rec + f_cond + 8)
+        for k in range(word & 0xFFFF if arr is not None else 0):
+            at = arr + (word >> 16) * k
+            n, sarr = b.u32(at) & 0xFFFF, b.ptr(at + 8)
+            alt = sorted(b.string(sarr + 8 * i) or "" for i in range(n)) if sarr is not None else []
+            if alt == want_skin:
+                out[0], out[1] = bytes(b.d[H + rec + f_skin:H + rec + f_skin + 4]), bytes(b.d[H + rec + f_lip:H + rec + f_lip + 4])
+            elif alt == want_hair:
+                out[2] = bytes(b.d[H + rec + f_hair:H + rec + f_hair + 4])
+    return [c if c and any(c) else None for c in out]
+
+
+def _skel_slot_colours(data):
+    """[(slot name, offset of its colour)] of a Spine 4.1 binary skeleton, or None when it is not one."""
+    r = _SkelReader(data)
+    try:
+        r.take(8)
+        if not (r.string() or "").startswith("4.1."):
+            return None
+        r.take(16)
+        nonessential = r.take(1)[0] != 0
+        if nonessential:
+            r.take(4)
+            r.string()
+            r.string()
+        for _ in range(r.varint()):
+            r.string()
+        for i in range(r.varint()):
+            r.string()
+            if i:
+                r.varint()
+            r.take(32)
+            r.varint()
+            r.take(1)
+            if nonessential:
+                r.take(4)
+        out = []
+        for _ in range(r.varint()):
+            name = r.string() or ""
+            r.varint()
+            out.append((name, r.p))
+            r.take(8)                               # colour, dark colour
+            r.varint()
+            r.varint()
+        return out
+    except (ValueError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE):
+    """One file of the second Eshmel's portrait rig (kind: one of RIG_FILES; .zst ones handed over decompressed), made from rig `src`'s
+    (015 or 016) and a one-line note; (None, why) when the file is not laid out as expected. The folder name sits in fixed-length places:
+    the atlas's first line "<src>.png" (the atlas is XOR-scrambled: the bytes change by src ^ dst), the BNTX texture name (a 16-bit
+    length 3, the name, NUL), the .spdb paths "<src>/<src>.atlas" and "<src>/<src>.skel". The skeleton has no name but takes the colours:
+    every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's."""
+    out = bytearray(data)
+    if kind == "atlas.zst":
+        if bytes(x ^ y for x, y in zip(data[:8], ATLAS_KEY)) != (src + ".png\n").encode():
+            return None, "the first line is not %s.png" % src
+        for i in range(len(src)):
+            out[i] ^= ord(src[i]) ^ ord(dst[i])
+        return bytes(out), "page %s.png" % dst
+    if kind == "bntx.zst":
+        old, new = b"\x03\x00" + src.encode() + b"\x00", b"\x03\x00" + dst.encode() + b"\x00"
+        if data.count(old) != 1:
+            return None, "the texture name %s is not there once" % src
+        return data.replace(old, new), "texture %s" % dst
+    if kind == "spdb":
+        for ext in (".atlas", ".skel"):
+            old, new = ("%s/%s%s" % (src, src, ext)).encode(), ("%s/%s%s" % (dst, dst, ext)).encode()
+            if bytes(out).count(old) != 1:
+                return None, "%s is not there once" % old.decode()
+            out = bytearray(bytes(out).replace(old, new))
+        return bytes(out), "%s/%s.atlas, %s/%s.skel" % (dst, dst, dst, dst)
+    if kind == "skel.zst":
+        slots = _skel_slot_colours(data)
+        if slots is None:
+            return None, "not a Spine 4.1 skeleton"
+        counts = [0, 0, 0]
+        for name, at in slots:
+            for k, suffix in enumerate(TINT_SLOTS):
+                if name.endswith(suffix) and colours and colours[k]:
+                    out[at:at + 4] = colours[k]
+                    counts[k] += 1
+        return bytes(out), "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
+            x for k in range(3) for x in (counts[k], colours[k].hex() if colours and colours[k] else "none"))
+    return None, "not a rig file"
+
+
 def show_placements(romfs, names, person_before, edited):
     after = Person(edited)
     for n in names:
@@ -918,6 +1032,8 @@ def main(argv=None):
     ap.add_argument("--o-msg", help="write each language's Levelup.msbt and Die.msbt with the speakers rewritten here, as "
                                     "<language>_<name>.msbt, uncompressed")
     ap.add_argument("--o-rigs", help="write the portrait rigs with their eye slots renamed (EYE_RIGS) here, as <n>.skel, uncompressed")
+    ap.add_argument("--o-kasumi", help="write the second Eshmel's portrait rig (UI/Face/900) here, as 900.atlas, 900.bntx, 900.skel, "
+                                       "900.spdb, uncompressed")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
     sys.stdout.reconfigure(encoding="utf-8")
@@ -944,7 +1060,8 @@ def main(argv=None):
     assets = os.path.join(a.romfs, "GameData", "AssetTable.bin")
     if os.path.exists(assets):
         with open(assets, "rb") as fh:
-            edited_assets, changes = apply_assets(fh.read(), swaps=asset_swaps(mapping), kasumi=look)
+            vanilla_assets = fh.read()
+        edited_assets, changes = apply_assets(vanilla_assets, swaps=asset_swaps(mapping), kasumi=look)
         print(assets_line(changes, edited_assets))
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
@@ -965,6 +1082,19 @@ def main(argv=None):
                 os.makedirs(a.o_msg, exist_ok=True)
                 with open(os.path.join(a.o_msg, "%s_%s.msbt" % (lang, name)), "wb") as fh:
                     fh.write(edited_msbt)
+    if look and os.path.exists(assets):
+        import inspect_romfs
+        colours = kasumi_colours(vanilla_assets, look)
+        for kind in RIG_FILES:
+            src = look.rig()
+            with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
+                raw = fh.read()
+            edited_file, note = kasumi_rig_file(kind, inspect_romfs.unzstd(raw) if kind.endswith(".zst") else raw, src, colours)
+            print("randomizer: UI/Face/%s/%s.%s: from %s: %s" % (KASUMI_FACE, KASUMI_FACE, kind, src, note))
+            if a.o_kasumi and edited_file is not None:
+                os.makedirs(a.o_kasumi, exist_ok=True)
+                with open(os.path.join(a.o_kasumi, KASUMI_FACE + "." + kind.replace(".zst", "")), "wb") as fh:
+                    fh.write(edited_file)
     for n in EYE_RIGS:
         path = os.path.join(a.romfs, "UI", "Face", n, n + ".skel.zst")
         if not os.path.exists(path):
