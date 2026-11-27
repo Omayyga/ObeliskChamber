@@ -621,8 +621,14 @@ class TestEyeSlots(unittest.TestCase):
         out, renames = ru.rename_eye_slots(data)
         self.assertEqual(out, skeleton([long, "00_Eye"], nonessential=False))
 
+    def test_whites_only(self):
+        # Gladius (119): the iris is right, the whites are 00_EyeWhite
+        out, renames = ru.rename_eye_slots(skeleton(["00_Eye", "00_EyeWhite", "Body"]))
+        self.assertEqual(renames, [("00_EyeWhite", "00_Eye_W")])
+        self.assertEqual(out, skeleton(["00_Eye", "00_Eye_W", "Body"]))
+
     def test_left_alone(self):
-        for data in (skeleton(["00_Eye", "Eye_W"]),            # already has the names the effect looks for
+        for data in (skeleton(["00_Eye", "00_Eye_W", "Body"]),  # already has the names the effect looks for
                      skeleton(["Eye", "00_eye_w", "Eye_W"]),   # a new name is taken
                      skeleton(["Eye"], version="4.2.01"),      # another format
                      skeleton(["Eye"])[:40]):                  # cut short

@@ -75,12 +75,14 @@ FLAG_SUFFIX = "冥将"
 # Red eyes. The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eyes it finds by slot name, from a list in the executable:
 # 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r (any case). These pool characters' portrait rigs (UI/Face/<n>/<n>.skel.zst, Spine
 # 4.1 binary) name their eye slots without the 00_ (Eye, Eye_W, Eye_Hi; Eye_Highlight in two), so their Underworld portraits keep their
-# own eye colour: Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion. None of them is
-# Underworld in the game. rename_eye_slots() gives those slots the names the list has; slots are found by position everywhere else in
-# the file (animations, skins, draw order), so nothing else changes.
-EYE_RIGS = ["007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"]
+# own eye colour: Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion; and Gladius's (119)
+# has the iris right but names the whites 00_EyeWhite. None of them is Underworld in the game. rename_eye_slots() gives those slots the
+# names the list has; slots are found by position everywhere else in the file (animations, skins, draw order), so nothing else changes.
+# (A rig without a highlight slot is fine: so are several the game shows Underworld, Dagda's and Hyoushi's.)
+EYE_RIGS = ["007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112", "119"]
 EYE_SLOTS = {"eye": "00_", "eye_w": "00_", "eye_hi": "00_", "eye_l": "00_", "eye_r": "00_", "eye_w_l": "00_", "eye_w_r": "00_",
-             "eye_hi_l": "00_", "eye_hi_r": "00_", "eye_highlight": "00_Eye_Hi"}    # a prefix (ends in _), or the new name
+             "eye_hi_l": "00_", "eye_hi_r": "00_", "eye_highlight": "00_Eye_Hi",
+             "00_eyewhite": "00_Eye_W"}    # a prefix (ends in _), or the new name
 # Level-up, death and retreat quotes (Msg/<language>/Levelup.msbt MID_LevelUp_[Min_|Max_]<voice>_NN and MID_Skill_LevelUp_[Max_]<voice>_NN,
 # Die.msbt MID_DIE_<voice>_NN and MID_RETREAT_<voice>_NN) are picked by the unit's voice code, which follows its look; but each line names its speaker (attribute field 3,
 # e.g. クラプカ), and the game shows the speaker's slot (PID_クラプカ), which wears someone else. speaker_renames() / rewrite_speakers() name
@@ -638,7 +640,7 @@ def _skel_string(text):
 
 def rename_eye_slots(data):
     """A Spine 4.1 skeleton with its eye slots named as the Underworld effect looks for them (EYE_SLOTS), and [(old, new)]; the data
-    as it is and [] when it is not a 4.1 skeleton, already has a 00_eye slot, or a new name is taken. The runtime does the same."""
+    as it is and [] when it is not a 4.1 skeleton or a new name is taken. The runtime does the same."""
     r = _SkelReader(data)
     try:
         r.take(8)                                   # hash
@@ -673,8 +675,6 @@ def rename_eye_slots(data):
     except (ValueError, IndexError, UnicodeDecodeError):
         return data, []
     names = {(n or "").lower() for n, _, _ in slots}
-    if names & {"00_eye", "00_eye_l", "00_eye_r"}:
-        return data, []
     renames = []
     for name, at, end in slots:
         new = EYE_SLOTS.get((name or "").lower())

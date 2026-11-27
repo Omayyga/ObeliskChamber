@@ -185,15 +185,16 @@ constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a
 
 // Red eyes (randomize_units.py EYE_RIGS, EYE_SLOTS). The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eye slots named in
 // a list in the executable: 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r, any case. These pool characters' portrait rigs name
-// theirs without the 00_ (Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion), so the
-// slots are renamed (edit_eye_rig): a prefix, or for Eye_Highlight the name the list has.
-const char* const kEyeRigs[] = {"007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"};
+// theirs without the 00_ (Cara, Hurtando, Maxim, Fianna, Scirocco, Halvin, Alexandra, Cleobulus, Isheth, Hong Hua, Centlion), and
+// Gladius's (119) names the whites 00_EyeWhite, so the slots are renamed (edit_eye_rig): a prefix, or the name the list has.
+const char* const kEyeRigs[] = {"007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112", "119"};
 struct EyeSlot {
     const char* lower;   // the slot's name, lower case
     const char* to;      // a prefix (ends in _) or the new name
 };
 const EyeSlot kEyeSlots[] = {{"eye", "00_"},      {"eye_w", "00_"},   {"eye_hi", "00_"},   {"eye_l", "00_"},   {"eye_r", "00_"},
-                             {"eye_w_l", "00_"},  {"eye_w_r", "00_"}, {"eye_hi_l", "00_"}, {"eye_hi_r", "00_"}, {"eye_highlight", "00_Eye_Hi"}};
+                             {"eye_w_l", "00_"},  {"eye_w_r", "00_"}, {"eye_hi_l", "00_"}, {"eye_hi_r", "00_"}, {"eye_highlight", "00_Eye_Hi"},
+                             {"00_eyewhite", "00_Eye_W"}};
 
 constexpr size_t kHeader = 0x20;
 constexpr uint32_t kTableVersion = 0x20251201;
@@ -971,8 +972,7 @@ bool match_assets(const std::string& key) { return key == "/gamedata/assettable.
 
 // ---- red eyes: the portrait rigs -------------------------------------------------------------------------------------------------------
 // randomize_units.py rename_eye_slots(), step for step: a Spine 4.1 binary skeleton (big-endian, variable-length integers, strings with
-// their length + 1 first) read as far as its slots, and the eye slots' names replaced. Empty when it is not one, already has a 00_eye slot,
-// or a new name is taken.
+// their length + 1 first) read as far as its slots, and the eye slots' names replaced. Empty when it is not one or a new name is taken.
 std::vector<uint8_t> rename_eye_slots(const std::vector<uint8_t>& d, std::vector<std::pair<std::string, std::string>>* renames) {
     size_t p = 0;
     bool ok = true;
@@ -1040,8 +1040,6 @@ std::vector<uint8_t> rename_eye_slots(const std::vector<uint8_t>& d, std::vector
     if (!ok) return {};
     std::vector<std::string> names;
     for (const Slot& s : slots) names.push_back(lower(s.name));
-    for (const char* x : {"00_eye", "00_eye_l", "00_eye_r"})
-        if (std::find(names.begin(), names.end(), x) != names.end()) return {};
     struct Rename {
         size_t at, end;
         std::string from, to;
