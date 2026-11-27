@@ -81,10 +81,15 @@ FLAG_SUFFIX = "冥将"
 EYE_RIGS = ["007", "027", "028", "037", "047", "054", "099", "100", "103", "107", "112"]
 EYE_SLOTS = {"eye": "00_", "eye_w": "00_", "eye_hi": "00_", "eye_l": "00_", "eye_r": "00_", "eye_w_l": "00_", "eye_w_r": "00_",
              "eye_hi_l": "00_", "eye_hi_r": "00_", "eye_highlight": "00_Eye_Hi"}    # a prefix (ends in _), or the new name
-# Level-up lines (Msg/<language>/Levelup.msbt, MID_LevelUp_<voice>_NN) are picked by the unit's voice code, which follows its look; but
-# each line names its speaker (attribute field 3, e.g. クラプカ), and the game shows the speaker's slot (PID_クラプカ), which wears someone
-# else. speaker_renames() / rewrite_speakers() name the slot that now wears that look instead, so the speaker is the unit on screen.
+# Level-up, death and retreat quotes (Msg/<language>/Levelup.msbt MID_LevelUp_[Min_|Max_]<voice>_NN and MID_Skill_LevelUp_[Max_]<voice>_NN,
+# Die.msbt MID_DIE_<voice>_NN and MID_RETREAT_<voice>_NN) are picked by the unit's voice code, which follows its look; but each line names its speaker (attribute field 3,
+# e.g. クラプカ), and the game shows the speaker's slot (PID_クラプカ), which wears someone else. speaker_renames() / rewrite_speakers() name
+# the slot that now wears that look instead, so the speaker is the unit on screen. Only those lines: Die.msbt also has the story's own
+# deaths (MID_DIE_SCXX_00_Kai_001, MID_EV_DIE_SC00_05_Kai), whose speaker is a role, as in cutscenes.
 SPEAKER_FIELD = 12          # byte offset of the speaker's string offset in an ATR1 record
+QUOTE_FILES = ["Levelup", "Die"]
+QUOTE_PREFIXES = ("MID_LevelUp_", "MID_LevelUp_Min_", "MID_LevelUp_Max_", "MID_Skill_LevelUp_", "MID_Skill_LevelUp_Max_", "MID_DIE_",
+                  "MID_RETREAT_")
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
 SHUFFLE_TRIES = 1000
 # How many pairs each log line names: the runtime's log cuts a line at 4096 bytes.
@@ -263,24 +268,62 @@ def speaker_renames(mapping):
     return out
 
 
+def _voice_and_number(rest):
+    """A voice code (letters, a digit, at most one letter: Kra0, Ism0F), _, digits."""
+    i = 0
+    while i < len(rest) and rest[i].isascii() and rest[i].isalpha():
+        i += 1
+    if i == 0 or i >= len(rest) or not rest[i].isdigit():
+        return False
+    i += 1
+    if i < len(rest) and rest[i].isascii() and rest[i].isalpha():
+        i += 1
+    if i >= len(rest) or rest[i] != "_" or i + 1 >= len(rest):
+        return False
+    return all(c.isascii() and c.isdigit() for c in rest[i + 1:])
+
+
+def is_quote_label(label):
+    """One of QUOTE_PREFIXES, then a voice code and a line number (MID_DIE_Tah0_01, MID_LevelUp_Max_Kai0_00)."""
+    return any(label.startswith(pre) and _voice_and_number(label[len(pre):]) for pre in QUOTE_PREFIXES)
+
+
 def rewrite_speakers(data, renames):
     """An MSBT file (uncompressed) whose lines naming a speaker of `renames` name the new one, and how many lines changed; the data as it
     is and 0 when nothing changes or the file is not laid out as Levelup.msbt is (UTF-8, ATR1 with a string area that every speaker
-    field points into). A new speaker's string is one the string area already has (its first), else one appended to it; ATR1 grows,
-    the sections after it move. The runtime does the same (edit_levelup)."""
+    field points into). Only lines whose label is_quote_label() (LBL1). A new speaker's string is one the string area already has (its
+    first), else one appended to it; ATR1 grows, the sections after it move. The runtime does the same (edit_quotes)."""
     if len(data) < 0x20 or data[:8] != b"MsgStdBn" or data[8:10] != b"\xff\xfe" or data[0xC] != 0:
         return data, 0
     nsec = struct.unpack_from("<H", data, 0xE)[0]
-    p, atr = 0x20, None
+    p, atr, lbl = 0x20, None, None
     for _ in range(nsec):
         if p + 16 > len(data):
             return data, 0
         size = struct.unpack_from("<I", data, p + 4)[0]
         if data[p:p + 4] == b"ATR1":
             atr = (p, size)
+        elif data[p:p + 4] == b"LBL1":
+            lbl = (p, size)
         p = (p + 16 + size + 15) & ~15
-    if atr is None or atr[0] + 16 + atr[1] > len(data):
+    if atr is None or lbl is None or atr[0] + 16 + atr[1] > len(data) or lbl[0] + 16 + lbl[1] > len(data):
         return data, 0
+    quotes = set()                              # the indices of the lines whose label is a quote's
+    lb = data[lbl[0] + 16:lbl[0] + 16 + lbl[1]]
+    if len(lb) < 4:
+        return data, 0
+    slots = struct.unpack_from("<I", lb, 0)[0]
+    if 4 + 8 * slots > len(lb):
+        return data, 0
+    for i in range(slots):
+        n, q = struct.unpack_from("<II", lb, 4 + 8 * i)
+        for _ in range(n):
+            if q >= len(lb) or q + 1 + lb[q] + 4 > len(lb):
+                return data, 0
+            name = lb[q + 1:q + 1 + lb[q]].decode("utf-8", "surrogateescape")
+            if is_quote_label(name):
+                quotes.add(struct.unpack_from("<I", lb, q + 1 + lb[q])[0])
+            q += 1 + lb[q] + 4
     at, size = atr
     area = bytearray(data[at + 16:at + 16 + size])
     if len(area) < 8:
@@ -300,7 +343,7 @@ def rewrite_speakers(data, renames):
     for k in range(count):
         f = 8 + k * rec + SPEAKER_FIELD
         v = struct.unpack_from("<I", area, f)[0]
-        if v == 0 or v == 0xFFFFFFFF:
+        if v == 0 or v == 0xFFFFFFFF or k not in quotes:
             continue
         if not recs_end <= v < len(area) or (v > recs_end and area[v - 1] != 0):
             return data, 0
@@ -676,7 +719,8 @@ def main(argv=None):
     ap.add_argument("-o", help="write the edited Person.bin here")
     ap.add_argument("--o-assets", help="write the edited AssetTable.bin here")
     ap.add_argument("--show", nargs="*", default=[], help="Dispos files (SC00_05) whose placements to list with their new look")
-    ap.add_argument("--o-msg", help="write each language's Levelup.msbt with the speakers rewritten here, as <language>.msbt, uncompressed")
+    ap.add_argument("--o-msg", help="write each language's Levelup.msbt and Die.msbt with the speakers rewritten here, as "
+                                    "<language>_<name>.msbt, uncompressed")
     ap.add_argument("--o-rigs", help="write the portrait rigs with their eye slots renamed (EYE_RIGS) here, as <n>.skel, uncompressed")
     ap.add_argument("-v", action="store_true", help="list every record changed")
     a = ap.parse_args(argv)
@@ -709,18 +753,19 @@ def main(argv=None):
     renames = speaker_renames(mapping)
     msg_dir = os.path.join(a.romfs, "Msg")
     for lang in sorted(os.listdir(msg_dir)) if os.path.isdir(msg_dir) else []:
-        path = os.path.join(msg_dir, lang, "Levelup.msbt.zst")
-        if not os.path.exists(path):
-            continue
-        import inspect_romfs
-        with open(path, "rb") as fh:
-            msbt = inspect_romfs.unzstd(fh.read())
-        edited_msbt, n_lines = rewrite_speakers(msbt, renames)
-        print("randomizer: Msg/%s/Levelup.msbt.zst: %d level-up lines name the unit that wears their look" % (lang, n_lines))
-        if a.o_msg:
-            os.makedirs(a.o_msg, exist_ok=True)
-            with open(os.path.join(a.o_msg, lang + ".msbt"), "wb") as fh:
-                fh.write(edited_msbt)
+        for name in QUOTE_FILES:
+            path = os.path.join(msg_dir, lang, name + ".msbt.zst")
+            if not os.path.exists(path):
+                continue
+            import inspect_romfs
+            with open(path, "rb") as fh:
+                msbt = inspect_romfs.unzstd(fh.read())
+            edited_msbt, n_lines = rewrite_speakers(msbt, renames)
+            print("randomizer: Msg/%s/%s.msbt.zst: %d quote lines name the unit that wears their look" % (lang, name, n_lines))
+            if a.o_msg:
+                os.makedirs(a.o_msg, exist_ok=True)
+                with open(os.path.join(a.o_msg, "%s_%s.msbt" % (lang, name)), "wb") as fh:
+                    fh.write(edited_msbt)
     for n in EYE_RIGS:
         path = os.path.join(a.romfs, "UI", "Face", n, n + ".skel.zst")
         if not os.path.exists(path):

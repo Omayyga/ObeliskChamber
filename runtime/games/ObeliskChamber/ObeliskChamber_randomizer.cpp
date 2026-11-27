@@ -1110,12 +1110,36 @@ void edit_eye_rig(const NxModFile* file, void*) {
     file->replace(file, comp.data(), csize);
 }
 
-// ---- level-up speakers: Msg/<language>/Levelup.msbt -----------------------------------------------------------------------------------
-// randomize_units.py rewrite_speakers(), step for step. A level-up line (MID_LevelUp_<voice>_NN) is picked by the unit's voice code, which
-// follows its look, but names its speaker in attribute field 3 (クラプカ), and the game shows that speaker's slot, which wears someone else.
-// Each line naming a speaker of g_speakers names the slot that wears its look instead: a string the ATR1 string area already has (its
-// first), else one appended to it; ATR1 grows and the sections after it move. Empty when nothing changes or the file is not laid out so.
+// ---- quote speakers: Msg/<language>/Levelup.msbt and Die.msbt ---------------------------------------------------------------------------
+// randomize_units.py rewrite_speakers(), step for step. A level-up, death or retreat quote (MID_LevelUp_[Min_|Max_]<voice>_NN,
+// MID_Skill_LevelUp_[Max_]<voice>_NN, MID_DIE_<voice>_NN, MID_RETREAT_<voice>_NN) is picked by the unit's voice code, which follows its
+// look, but names its speaker in attribute field 3 (クラプカ), and the game shows that speaker's slot, which wears someone else. Each such
+// line (by its LBL1 label: the story's own deaths, MID_EV_DIE_* and MID_DIE_SCXX_*, name a role and stay) naming a speaker of g_speakers
+// names the slot that wears its look instead: a string the ATR1 string area already has (its first), else one appended to it; ATR1 grows
+// and the sections after it move. Empty when nothing changes or the file is not laid out so.
 constexpr size_t kSpeakerField = 12;   // the speaker's string offset in an ATR1 record
+const char* const kQuotePrefixes[] = {"MID_LevelUp_",       "MID_LevelUp_Min_", "MID_LevelUp_Max_", "MID_Skill_LevelUp_",
+                                      "MID_Skill_LevelUp_Max_", "MID_DIE_",      "MID_RETREAT_"};
+
+// A voice code (letters, a digit, at most one letter: Kra0, Ism0F), _, digits
+bool voice_and_number(const std::string& rest) {
+    auto alpha = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    auto digit = [](char c) { return c >= '0' && c <= '9'; };
+    size_t i = 0;
+    while (i < rest.size() && alpha(rest[i])) ++i;
+    if (i == 0 || i >= rest.size() || !digit(rest[i])) return false;
+    ++i;
+    if (i < rest.size() && alpha(rest[i])) ++i;
+    if (i >= rest.size() || rest[i] != '_' || i + 1 >= rest.size()) return false;
+    for (size_t k = i + 1; k < rest.size(); ++k)
+        if (!digit(rest[k])) return false;
+    return true;
+}
+bool is_quote_label(const std::string& label) {
+    for (const char* pre : kQuotePrefixes)
+        if (label.rfind(pre, 0) == 0 && voice_and_number(label.substr(std::strlen(pre)))) return true;
+    return false;
+}
 
 std::vector<uint8_t> rewrite_speakers(const std::vector<uint8_t>& d, const std::unordered_map<std::string, std::string>& renames, int* changed) {
     *changed = 0;
@@ -1127,15 +1151,34 @@ std::vector<uint8_t> rewrite_speakers(const std::vector<uint8_t>& d, const std::
     if (d.size() < 0x20 || std::memcmp(d.data(), "MsgStdBn\xff\xfe", 10) != 0 || d[0xC] != 0) return {};
     uint16_t nsec = 0;
     std::memcpy(&nsec, d.data() + 0xE, 2);
-    size_t p = 0x20, at = 0, size = 0;
-    bool found = false;
+    size_t p = 0x20, at = 0, size = 0, lat = 0, lsize = 0;
+    bool found = false, lfound = false;
     for (uint16_t i = 0; i < nsec; ++i) {
         if (p + 16 > d.size()) return {};
         const uint32_t n = u32(d, p + 4);
         if (std::memcmp(d.data() + p, "ATR1", 4) == 0) at = p, size = n, found = true;
+        else if (std::memcmp(d.data() + p, "LBL1", 4) == 0) lat = p, lsize = n, lfound = true;
         p = (p + 16 + n + 15) & ~size_t(15);
     }
-    if (!found || at + 16 + size > d.size()) return {};
+    if (!found || !lfound || at + 16 + size > d.size() || lat + 16 + lsize > d.size()) return {};
+    std::vector<uint32_t> quotes;   // the indices of the lines whose label is a quote's
+    {
+        const std::vector<uint8_t> lb(d.begin() + static_cast<std::ptrdiff_t>(lat + 16), d.begin() + static_cast<std::ptrdiff_t>(lat + 16 + lsize));
+        if (lb.size() < 4) return {};
+        const uint64_t slots = u32(lb, 0);
+        if (4 + 8 * slots > lb.size()) return {};
+        for (uint64_t i = 0; i < slots; ++i) {
+            const uint32_t n = u32(lb, static_cast<size_t>(4 + 8 * i));
+            size_t q = u32(lb, static_cast<size_t>(8 + 8 * i));
+            for (uint32_t k = 0; k < n; ++k) {
+                if (q >= lb.size() || q + 1 + lb[q] + 4 > lb.size()) return {};
+                const std::string name(reinterpret_cast<const char*>(lb.data() + q + 1), lb[q]);
+                if (is_quote_label(name)) quotes.push_back(u32(lb, q + 1 + lb[q]));
+                q += 1 + lb[q] + 4;
+            }
+        }
+        std::sort(quotes.begin(), quotes.end());
+    }
     std::vector<uint8_t> area(d.begin() + static_cast<std::ptrdiff_t>(at + 16), d.begin() + static_cast<std::ptrdiff_t>(at + 16 + size));
     if (area.size() < 8) return {};
     const uint64_t count = u32(area, 0), rec = u32(area, 4), recs_end = 8 + count * rec;
@@ -1151,7 +1194,7 @@ std::vector<uint8_t> rewrite_speakers(const std::vector<uint8_t>& d, const std::
     for (uint64_t k = 0; k < count; ++k) {
         const size_t f = static_cast<size_t>(8 + k * rec + kSpeakerField);
         const uint32_t v = u32(area, f);
-        if (v == 0 || v == 0xFFFFFFFFu) continue;
+        if (v == 0 || v == 0xFFFFFFFFu || !std::binary_search(quotes.begin(), quotes.end(), static_cast<uint32_t>(k))) continue;
         if (v < recs_end || v >= area.size() || (v > recs_end && area[v - 1] != 0)) {
             *changed = 0;
             return {};
@@ -1182,18 +1225,20 @@ std::vector<uint8_t> rewrite_speakers(const std::vector<uint8_t>& d, const std::
     return out;
 }
 
-// "/msg/<language>/levelup.msbt.zst": the language, as the path spells it
-bool match_levelup(const std::string& key) {
-    const std::string tail = "/levelup.msbt.zst";
-    return key.rfind("/msg/", 0) == 0 && key.size() > tail.size() + 5 && key.compare(key.size() - tail.size(), tail.size(), tail) == 0 &&
-           key.find('/', 5) == key.size() - tail.size();
+// "/msg/<language>/levelup.msbt.zst" and "/msg/<language>/die.msbt.zst"
+bool match_quotes(const std::string& key) {
+    for (const std::string tail : {"/levelup.msbt.zst", "/die.msbt.zst"})
+        if (key.rfind("/msg/", 0) == 0 && key.size() > tail.size() + 5 && key.compare(key.size() - tail.size(), tail.size(), tail) == 0 &&
+            key.find('/', 5) == key.size() - tail.size())
+            return true;
+    return false;
 }
 
-void edit_levelup(const NxModFile* file, void*) {
+void edit_quotes(const NxModFile* file, void*) {
     std::string path = file->path ? file->path : "";
     if (!path.empty() && path[0] == '/') path.erase(0, 1);
     if (!g_mapped) {
-        NXLOG_W(kTag, "randomizer: %s: edited before Person.bin, so without the mapping: level-up speakers left as they are", path.c_str());
+        NXLOG_W(kTag, "randomizer: %s: edited before Person.bin, so without the mapping: quote speakers left as they are", path.c_str());
         return;
     }
     const unsigned long long size = ZSTD_getFrameContentSize(file->data, static_cast<size_t>(file->size));
@@ -1209,7 +1254,7 @@ void edit_levelup(const NxModFile* file, void*) {
     }
     int changed = 0;
     const std::vector<uint8_t> out = rewrite_speakers(msbt, g_speakers, &changed);
-    NXLOG_I(kTag, "randomizer: %s: %d level-up lines name the unit that wears their look", path.c_str(), changed);
+    NXLOG_I(kTag, "randomizer: %s: %d quote lines name the unit that wears their look", path.c_str(), changed);
     if (out.empty()) return;
     std::vector<uint8_t> comp(ZSTD_compressBound(out.size()));
     const size_t csize = ZSTD_compress(comp.data(), comp.size(), out.data(), out.size(), 3);
@@ -1251,8 +1296,8 @@ void randomizer_install() {
     msg_names_install();   // Katarina's name: she has a name ID but no text (ObeliskChamber_msg.cpp)
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
-    if (!services::modapi::add_runtime_edit("randomizer", &match_levelup, &edit_levelup, nullptr, true))
-        NXLOG_W(kTag, "randomizer: too late to rewrite the level-up speakers");
+    if (!services::modapi::add_runtime_edit("randomizer", &match_quotes, &edit_quotes, nullptr, true))
+        NXLOG_W(kTag, "randomizer: too late to rewrite the level-up, death and retreat speakers");
     const bool ok = services::modapi::add_runtime_edit("randomizer", &match_person, &edit_person, nullptr) &&
                     services::modapi::add_runtime_edit("randomizer", &match_assets, &edit_assets, nullptr, true);
     NXLOG_I(kTag, "randomizer: on, seed %" PRIu64 "%s%s%s", g_set.seed, g_set.force.empty() ? "" : ", forced ", g_set.force.c_str(),

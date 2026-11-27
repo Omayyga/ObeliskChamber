@@ -629,9 +629,13 @@ class TestEyeSlots(unittest.TestCase):
             self.assertEqual(ru.rename_eye_slots(data), (data, []))
 
 
-def msbt(speakers, rec=20, tail=b"TAILDATA"):
-    """An MSBT file like Levelup.msbt: LBL1 (filler), ATR1 with a record a line whose field 3 is the offset of its speaker's string in
-    the area after the records (0 for none), and TXT2 (filler, `tail`)."""
+def msbt(speakers, rec=20, tail=b"TAILDATA", labels=None):
+    """An MSBT file like Levelup.msbt: LBL1 (the labels, one hash slot; MID_LevelUp_Kra0_00, _01... unless given), ATR1 with a record a
+    line whose field 3 is the offset of its speaker's string in the area after the records (0 for none), and TXT2 (filler, `tail`)."""
+    labels = labels or ["MID_LevelUp_Kra0_%02d" % i for i in range(len(speakers))]
+    lbl = struct.pack("<III", 1, len(labels), 12)
+    for i, name in enumerate(labels):
+        lbl += bytes([len(name)]) + name.encode() + struct.pack("<I", i)
     area = bytearray()
     recs = bytearray()
     base = 8 + rec * len(speakers)
@@ -646,7 +650,7 @@ def msbt(speakers, rec=20, tail=b"TAILDATA"):
     def section(magic, data):
         out = magic + struct.pack("<I", len(data)) + bytes(8) + data
         return out + b"\xab" * (-len(out) % 16)
-    body = section(b"LBL1", b"labels..") + section(b"ATR1", bytes(atr)) + section(b"TXT2", tail)
+    body = section(b"LBL1", lbl) + section(b"ATR1", bytes(atr)) + section(b"TXT2", tail)
     head = bytearray(b"MsgStdBn\xff\xfe" + bytes(22))
     head[0xC] = 0
     struct.pack_into("<H", head, 0xE, 3)
@@ -698,6 +702,23 @@ class TestSpeakers(unittest.TestCase):
         utf16 = bytearray(data)
         utf16[0xC] = 1
         self.assertEqual(ru.rewrite_speakers(bytes(utf16), {"イシュマール": "x"}), (bytes(utf16), 0))
+
+    def test_only_quotes(self):
+        # Die.msbt: the voice quotes change; the story's own deaths (a role, as in cutscenes) and the header labels do not
+        labels = ["MID_DIE_Kra0", "MID_DIE_Kra0_01", "MID_RETREAT_Kra0_01", "MID_DIE_SCXX_00_Kai_001", "MID_EV_DIE_SC00_05_Kai_001",
+                  "MID_LevelUp_Max_Kai0_00", "MID_Skill_LevelUp_Ism0M_00"]
+        data = msbt(["クラプカ"] * 3 + ["カイ"] * 4, labels=labels)
+        out, n = ru.rewrite_speakers(data, {"クラプカ": "ライラー", "カイ": "マーナ"})
+        self.assertEqual(n, 4)
+        self.assertEqual(self.speakers(out), ["クラプカ", "ライラー", "ライラー", "カイ", "カイ", "マーナ", "マーナ"])
+
+    def test_quote_labels(self):
+        for label in ("MID_LevelUp_Kra0_00", "MID_LevelUp_Min_Ism0F_02", "MID_LevelUp_Max0_00", "MID_LevelUp_Max_Max0_00",
+                      "MID_Skill_LevelUp_Max_Kai1_00", "MID_DIE_Tah0_01", "MID_RETREAT_Tah0_01"):
+            self.assertTrue(ru.is_quote_label(label), label)
+        for label in ("MID_DIE_Tah0", "MID_DIE_SCXX_00_Kai_001", "MID_EV_DIE_SC00_05_Kai_001", "MID_EV_RETREAT_SC30_00_Nat_001",
+                      "MID_LevelUp_Max", "MID_DIE_Tah0_", "MID_DIE_Tah0_01x", "MID_DIE_SCXX_Termination", "MID_LevelUp_Kra00_00"):
+            self.assertFalse(ru.is_quote_label(label), label)
 
     def test_renames(self):
         p = ru.Person(person(ROWS))
