@@ -1378,11 +1378,14 @@ def bntx_texture(data):
 
 
 def block_linear(bx, by, bw, gob_y, bpb=16):
-    """Where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes (GOBs of 64 bytes x 8 rows, gob_y GOBs a block)."""
+    """Where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes (GOBs of 64 bytes x 8 rows, gob_y GOBs a block).
+    Inside a GOB the Switch 2's order (tools/tiling tegra_tiling.h gob_switch2; the runtime untiles this game's textures so): offset
+    bits 4..8 are row bit 0, row bit 1, byte column bit 4, row bit 2, byte column bit 5. (The Switch 1 order, y0 x4 y1 y2 x5, swaps
+    neighbouring blocks: the first bake left dotted lines of white blocks along edges.)"""
     x = bx * bpb
     row_gobs = (bw * bpb + 63) // 64
     return ((by // (8 * gob_y)) * row_gobs * gob_y * 512 + (x // 64) * gob_y * 512 + ((by % (8 * gob_y)) // 8) * 512
-            + ((x % 64) // 32) * 256 + ((by % 8) // 2) * 64 + ((x % 32) // 16) * 32 + (by % 2) * 16 + (x % 16))
+            + ((x % 64) // 32) * 256 + ((by % 8) // 4) * 128 + ((x % 32) // 16) * 64 + ((by % 4) // 2) * 32 + (by % 2) * 16 + (x % 16))
 
 
 # BC7 modes: subsets, partition bits, rotation bits, index selection bits, colour bits, alpha bits, p-bit per endpoint, p-bit per subset

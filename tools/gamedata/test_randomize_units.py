@@ -1034,8 +1034,10 @@ class TestBake(unittest.TestCase):
         self.assertEqual(ru.bake_blocks(16, 8, regions, meshes), {0: 0, 1: 0, 2: 1, 3: 0, 4: 2})
 
     def test_block_linear(self):
-        self.assertEqual([ru.block_linear(x, y, 512, 16) for x, y in ((0, 0), (1, 0), (0, 1), (2, 0), (0, 2), (4, 0), (0, 8), (0, 128))],
-                         [0, 32, 16, 256, 64, 8192, 512, 128 * 16 * 512])
+        # in a GOB: row bit 0 (16), row bit 1 (32), the next 16 bytes (64), row bit 2 (128), the other 32-byte half (256)
+        self.assertEqual([ru.block_linear(x, y, 512, 16) for x, y in ((0, 0), (0, 1), (0, 2), (1, 0), (0, 4), (2, 0), (4, 0), (0, 8),
+                                                                      (0, 128))],
+                         [0, 16, 32, 64, 128, 256, 16 * 512, 512, 128 * 16 * 512])
 
     @staticmethod
     def block(fields):

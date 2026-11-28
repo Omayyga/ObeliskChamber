@@ -2041,11 +2041,12 @@ bool bntx_texture(const std::vector<uint8_t>& d, BntxTexture* t) {
     return t->at <= d.size() && t->size <= d.size() - t->at;
 }
 
-// randomize_units.py block_linear(): where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes
+// randomize_units.py block_linear(): where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes; inside a GOB the Switch
+// 2's order (tegra_tiling.h gob_switch2: offset bits 4..8 = row bit 0, row bit 1, byte column bit 4, row bit 2, byte column bit 5)
 uint64_t block_linear(uint64_t bx, uint64_t by, uint64_t bw, uint64_t gob_y, uint64_t bpb = 16) {
     const uint64_t x = bx * bpb, row_gobs = (bw * bpb + 63) / 64;
     return (by / (8 * gob_y)) * row_gobs * gob_y * 512 + (x / 64) * gob_y * 512 + ((by % (8 * gob_y)) / 8) * 512 + ((x % 64) / 32) * 256 +
-           ((by % 8) / 2) * 64 + ((x % 32) / 16) * 32 + (by % 2) * 16 + (x % 16);
+           ((by % 8) / 4) * 128 + ((x % 32) / 16) * 64 + ((by % 4) / 2) * 32 + (by % 2) * 16 + (x % 16);
 }
 
 // randomize_units.py bc7_tint(): a BC7 block with each endpoint's red, green and blue times rgb / 255 (rounded, then the nearest the mode
