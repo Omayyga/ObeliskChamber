@@ -192,6 +192,28 @@ const char* const kCutsceneFaces[] = {
 };
 constexpr const char* kOwnCopy = "\xe6\x9c\xac\xe4\xba\xba";        // 本人
 constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a chapter flag: AID_リンド冥将)
+// On foot only (randomize_units.py FOOT_SETS, which says why): these pool characters' own animation sets hold standing motions with no
+// condition on the class, so on a horse their idle beat the rider's. Each alternative of an entry adding one of them that names the
+// character and has no class term (SID_歩兵, a JID_, デモ, 拠点) gets "SID_歩兵 & !重装移動", as the lords' have. In Python's order.
+struct FootSets {
+    const char* aid;
+    std::vector<std::string> sets;
+};
+const FootSets kFootSets[] = {
+    {"AID_\xe3\x83\x80\xe3\x82\xb0\xe3\x82\xb6", {"AB_001MA_W#"}},                                              // AID_ダグザ
+    {"AID_\xe3\x82\xbd\xe3\x83\xac\xe3\x83\xab", {"AB_003MA_W2"}},                                              // AID_ソレル
+    {"AID_\xe3\x83\xa9\xe3\x82\xa4\xe3\x83\xa9\xe3\x83\xbc", {"AB_012FA_W#", "AB_102FA_W#"}},                    // AID_ライラー
+    {"AID_\xe3\x82\xa4\xe3\x82\xb7\xe3\x82\xa8\xe3\x83\x88", {"AB_103FA_W#"}},                                  // AID_イシエト
+    {"AID_\xe3\x83\x9e\xe3\x83\xbc\xe3\x83\x8a", {"AB_104FA_W0", "AB_104FA_W#", "AB_104bFA_W#"}},                // AID_マーナ
+    {"AID_\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x88\xe3\x83\xbc\xe3\x83\xab", {"AB_110MA_W2"}},                      // AID_カストール
+    {"AID_\xe3\x82\xb0\xe3\x83\xa9\xe3\x83\x87\xe3\x82\xa3\xe3\x82\xa6\xe3\x82\xb9", {"AB_119MA_W1"}},          // AID_グラディウス
+    {"AID_\xe3\x82\xbc\xe3\x83\xb3\xe3\x82\xbc\xe3\x83\xab", {"AB_126MA_W#"}},                                  // AID_ゼンゼル
+    {"AID_\xe3\x82\xbc\xe3\x83\x8e\xe3\x83\xb3", {"AB_126MA_W6"}},                                              // AID_ゼノン
+    {"AID_\xe3\x83\xb4\xe3\x82\xa1\xe3\x83\xb3\xe3\x83\x80\xe3\x83\xab", {"AB_171MA_W#"}},                      // AID_ヴァンダル
+};
+const char* const kFootGuard[] = {"SID_\xe6\xad\xa9\xe5\x85\xb5", "!\xe9\x87\x8d\xe8\xa3\x85\xe7\xa7\xbb\xe5\x8b\x95"};   // SID_歩兵, !重装移動
+const char* const kFootClassTerms[] = {"SID_\xe6\xad\xa9\xe5\x85\xb5", "\xe3\x83\x87\xe3\x83\xa2", "\xe6\x8b\xa0\xe7\x82\xb9"};   // SID_歩兵, デモ, 拠点
+constexpr const char* kFieldAnim = "\xe3\x82\xa2\xe3\x83\x8b\xe3\x83\xa1";                                    // アニメ
 
 // The second Eshmel ([fefw] randomize_eshmel, experimental; randomize_units.py KASUMI_*). Eshmel's own slot is never replaced (the game
 // hands the player's avatar settings to a look only through Eshmel's own record): a second Eshmel joins the pool as a look only, its
@@ -866,8 +888,12 @@ std::vector<uint8_t> with_strings(const std::vector<uint8_t>& d, const std::vect
 //      of FID_U), every look entry showing U shows U本人, and FID_U takes the content of FID_V (all but its key; no voice when V has none).
 //   4. each condition "AID_x & F" (F a chapter flag, AID_…冥将) of an entry that also has "AID_x & SID_冥界兵", x replaced by r: F
 //      becomes SID_冥界兵 there, and, once per F, a new look entry "AID_r & F" -> r's Underworld look (U本人 for a U of step 3).
+//   6. after 4, on foot only (kFootSets): each look entry adding one of a pool character's own on-foot animation sets gets "SID_歩兵 &
+//      !重装移動" in each alternative naming the character with no class term; in place for an entry with only a condition and
+//      animations, else in a new animation-only entry, followed by the later entries with body animations that may hold for that look.
 // New portrait entries follow the last of 容姿情報 (labelled), new look entries the last of アセットテーブル (copies of the vanilla
-// "AID_ブレザ & SID_冥界兵" entry), their condition lists the end of the data. Steps 3 and 4 need the mapping (g_swaps).
+// "AID_ブレザ & SID_冥界兵" entry, then step 6's: copies of the first entry with only a condition and animations), their condition lists
+// the end of the data. Steps 3 and 4 need the mapping (g_swaps).
 void edit_assets(const NxModFile* file, void*) {
     Bin b;
     Table assets, faces;
@@ -1104,6 +1130,7 @@ void edit_assets(const NxModFile* file, void*) {
     }
     // 4. the chapter flags
     std::vector<std::string> flags;
+    std::vector<std::vector<Strings>> conds_now = conds;   // the conditions as this step leaves them (for step 6)
     for (size_t i = 0; i < entries.size(); ++i) {
         const uint64_t rec = entries[i];
         const uint32_t word = b.u32(rec + f_cond);
@@ -1114,6 +1141,7 @@ void edit_assets(const NxModFile* file, void*) {
                 alt[1].rfind("AID_", 0) != 0 || !ends_with(alt[1], flag_suffix) || !has_alt(i, {alt[0], underworld}))
                 continue;
             e.set_ptr(b.u64(arr + uint64_t(word >> 16) * k + 8) + 8, underworld);
+            conds_now[i][k][1] = underworld;
             ++changes;
             if (std::find(flags.begin(), flags.end(), alt[1]) != flags.end()) continue;
             flags.push_back(alt[1]);
@@ -1130,6 +1158,130 @@ void edit_assets(const NxModFile* file, void*) {
         ++changes;   // no template look entry: no Underworld forms added
         new_looks.clear();
     }
+    // 6. on foot only (kFootSets; randomize_units.py apply_assets step 6): in place when the entry has nothing but a condition and
+    // animations; else the sets move to a new animation-only entry (a copy of the first vanilla one), and from the first moved entry on
+    // every later entry with body animations (AB_) that may hold for that look follows again, with only those, for that look only
+    uint32_t f_anim = 0;
+    const bool have_anim = find_field(b, assets, kFieldAnim, 16, &f_anim);
+    auto pointers_only_cond_anim = [&](uint64_t rec) {
+        for (uint32_t o = 0; o < assets.rec_size; o += 8)
+            if (b.is_ptr(rec + o) != (o == f_cond + 8 || o == f_anim + 8)) return false;
+        return true;
+    };
+    int64_t anim_tpl = -1;
+    for (size_t i = 0; have_anim && i < entries.size() && anim_tpl < 0; ++i)
+        if (pointers_only_cond_anim(entries[i])) anim_tpl = static_cast<int64_t>(i);
+    struct GuardAlts {
+        uint64_t rec;
+        std::vector<Strings> alts;
+    };
+    struct AnimCut {
+        uint64_t rec;
+        std::vector<size_t> keep;   // indices of the sets it keeps
+    };
+    struct AnimLook {
+        std::vector<Strings> alts;
+        Strings sets;
+    };
+    std::vector<GuardAlts> guard_alts;
+    std::vector<AnimCut> anim_cuts;
+    std::vector<AnimLook> anim_looks;
+    size_t foot_guarded = 0, foot_moved = 0, foot_again = 0;
+    std::set<std::string> look_keys;
+    for (const auto& alts : conds)
+        for (const Strings& alt : alts)
+            if (alt.size() == 1 && alt[0].rfind("AID_", 0) == 0) look_keys.insert(alt[0]);
+    auto contains = [](const Strings& v, const std::string& s) { return std::find(v.begin(), v.end(), s) != v.end(); };
+    for (const FootSets& fs : have_anim ? std::vector<FootSets>(std::begin(kFootSets), std::end(kFootSets)) : std::vector<FootSets>()) {
+        const std::string aid = fs.aid;
+        std::map<size_t, AnimLook> moved;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const uint64_t r = entries[i];
+            const Strings anims = strings(r + f_anim);
+            Strings foot;
+            for (const std::string& s : anims)
+                if (contains(fs.sets, s)) foot.push_back(s);
+            bool names = false;
+            for (const Strings& alt : conds[i]) names = names || contains(alt, aid);
+            bool kasumi_rec = false;
+            for (const KasumiAlts& k : kasumi_alts) kasumi_rec = kasumi_rec || k.rec == r;
+            if (foot.empty() || kasumi_rec || !names) continue;
+            std::vector<Strings> alts;
+            size_t n = 0;
+            for (const Strings& alt : conds_now[i]) {
+                bool classed = false;
+                for (const std::string& t : alt) {
+                    classed = classed || t.rfind("JID_", 0) == 0;
+                    for (const char* c : kFootClassTerms) classed = classed || t == c;
+                }
+                Strings a = alt;
+                if (contains(alt, aid) && !classed) {
+                    for (const char* g : kFootGuard) a.push_back(g);
+                    ++n;
+                }
+                alts.push_back(std::move(a));
+            }
+            if (!n) continue;
+            ++changes;
+            if (pointers_only_cond_anim(r) && foot == anims) {
+                guard_alts.push_back({r, std::move(alts)});
+                ++foot_guarded;
+            } else if (anim_tpl >= 0) {   // else skipped: no template
+                AnimCut cut{r, {}};
+                for (size_t k = 0; k < anims.size(); ++k)
+                    if (!contains(foot, anims[k])) cut.keep.push_back(k);
+                anim_cuts.push_back(std::move(cut));
+                moved[i] = {std::move(alts), foot};
+                ++foot_moved;
+            }
+        }
+        if (moved.empty()) continue;
+        size_t again = 0;
+        for (size_t j = moved.begin()->first; j < entries.size(); ++j) {
+            const auto m = moved.find(j);
+            if (m != moved.end()) {
+                anim_looks.push_back(m->second);
+                continue;
+            }
+            Strings body;
+            for (const std::string& s : strings(entries[j] + f_anim))
+                if (s.rfind("AB_", 0) == 0) body.push_back(s);
+            std::vector<Strings> alts;
+            for (const Strings& alt : conds_now[j]) {
+                bool other = false;
+                for (const std::string& t : alt) other = other || (t != aid && look_keys.count(t));
+                if (other) continue;
+                Strings a = alt;
+                if (!contains(a, aid)) a.push_back(aid);
+                alts.push_back(std::move(a));
+            }
+            if (body.empty() || alts.empty()) continue;
+            anim_looks.push_back({std::move(alts), std::move(body)});
+            ++again;
+        }
+        foot_again += again;
+        ++changes;
+    }
+    // the moved sets leave their entries: the kept ones close up, the freed pointers go (in place, before the inserts)
+    for (const AnimCut& c : anim_cuts) {
+        const uint32_t word = b.u32(c.rec + f_anim);
+        const uint64_t arr = b.u64(c.rec + f_anim + 8);
+        std::vector<std::pair<uint64_t, uint64_t>> moves;
+        for (size_t j = 0; j < c.keep.size(); ++j)
+            if (j != c.keep[j]) moves.push_back({arr + 8 * j, arr + 8 * c.keep[j]});
+        e.copy_ptrs(moves);
+        for (size_t j = c.keep.size(); j < (word & 0xFFFF); ++j) {
+            e.clear_ptr(arr + 8 * j);
+            std::memset(e.data().data() + arr + 8 * j, 0, 8);
+        }
+        e.set_u32(c.rec + f_anim, (word & 0xFFFF0000u) | uint32_t(c.keep.size()));
+        if (c.keep.empty()) {
+            e.clear_ptr(c.rec + f_anim + 8);
+            std::memset(e.data().data() + c.rec + f_anim + 8, 0, 8);
+        }
+    }
+    NXLOG_I(kTag, "randomizer: AssetTable.bin: on foot only: %zu look entries guarded, %zu moved to new ones, %zu re-added after them",
+            foot_guarded, foot_moved, foot_again);
 
     std::unordered_map<std::string, uint64_t> labels;
     for (const Bin::Label& l : b.labels()) labels[l.name] = l.at;
@@ -1143,6 +1295,15 @@ void edit_assets(const NxModFile* file, void*) {
         aux_size += 16 * ((b.u32(k.rec + f_cond) & 0xFFFF) + k.alts.size());
         for (const Strings& a : k.alts) aux_size += 8 * a.size();
     }
+    // then step 6's: each rebuilt condition list (the headers, then the strings), then each new animation entry's condition list and
+    // its animation list
+    auto list_size = [](const std::vector<Strings>& alts) {
+        size_t n = 16 * alts.size();
+        for (const Strings& a : alts) n += 8 * a.size();
+        return n;
+    };
+    for (const GuardAlts& g : guard_alts) aux_size += list_size(g.alts);
+    for (const AnimLook& l : anim_looks) aux_size += list_size(l.alts) + 8 * l.sets.size();
     std::vector<uint8_t> face_raw, look_raw, aux_raw(aux_size, 0);
     for (const NewFace& f : new_faces) face_raw.insert(face_raw.end(), file->data + kHeader + f.src, file->data + kHeader + f.src + faces.rec_size);
     if (!new_looks.empty()) {
@@ -1150,9 +1311,14 @@ void edit_assets(const NxModFile* file, void*) {
         for (size_t i = 0; i < new_looks.size(); ++i)
             look_raw.insert(look_raw.end(), file->data + kHeader + t, file->data + kHeader + t + assets.rec_size);
     }
+    if (!anim_looks.empty()) {
+        const uint64_t t = entries[static_cast<size_t>(anim_tpl)];
+        for (size_t i = 0; i < anim_looks.size(); ++i)
+            look_raw.insert(look_raw.end(), file->data + kHeader + t, file->data + kHeader + t + assets.rec_size);
+    }
     // in place first: the record counts of the two tables
     e.set_u32(labels.at(kTableFaces) + 0x10, uint32_t(faces.count + new_faces.size()) << 16);
-    e.set_u32(labels.at(kTableAssets) + 0x10, uint32_t(assets.count + new_looks.size()) << 16);
+    e.set_u32(labels.at(kTableAssets) + 0x10, uint32_t(assets.count + new_looks.size() + anim_looks.size()) << 16);
     // the inserts, from the end of the file down
     e.insert(data_end, aux_raw);
     e.insert(face_end, face_raw);
@@ -1245,6 +1411,35 @@ void edit_assets(const NxModFile* file, void*) {
         }
         lists = strs;
         ++changes;
+    }
+    // step 6: a condition list of alternatives at `at`: the headers, then the strings; returns where it ends
+    auto cond_list = [&](uint64_t at, const std::vector<Strings>& alts) {
+        uint64_t strs = at + 16ull * alts.size();
+        for (size_t k = 0; k < alts.size(); ++k) {
+            e.set_u32(at + 16 * k, uint32_t(alts[k].size()) | 8u << 16);
+            e.set_ptr(at + 16 * k + 8, strs);
+            for (size_t m = 0; m < alts[k].size(); ++m) e.set_ptr(strs + 8 * m, alts[k][m]);
+            strs += 8 * alts[k].size();
+        }
+        return strs;
+    };
+    for (const GuardAlts& g : guard_alts) {
+        e.set_u32(now(g.rec) + f_cond, uint32_t(g.alts.size()) | 16u << 16);
+        e.set_ptr(now(g.rec) + f_cond + 8, lists);
+        lists = cond_list(lists, g.alts);
+    }
+    for (size_t i = 0; i < anim_looks.size(); ++i) {
+        const AnimLook& l = anim_looks[i];
+        const uint64_t rec = look_end + uint64_t(assets.rec_size) * (new_looks.size() + i);
+        e.set_u32(rec + 0x10, 0x10000u | uint32_t(assets.count + new_looks.size() + i));
+        e.set_u32(rec + 0x14, uint32_t(look_row + 1 + new_looks.size() + i) << 16);
+        e.set_u32(rec + f_cond, uint32_t(l.alts.size()) | 16u << 16);
+        e.set_ptr(rec + f_cond + 8, lists);
+        lists = cond_list(lists, l.alts);
+        e.set_u32(rec + f_anim, uint32_t(l.sets.size()) | 8u << 16);
+        e.set_ptr(rec + f_anim + 8, lists);
+        for (size_t m = 0; m < l.sets.size(); ++m) e.set_ptr(lists + 8 * m, l.sets[m]);
+        lists += 8 * l.sets.size();
     }
     if (g_set.eshmel)
         NXLOG_I(kTag, "randomizer: AssetTable.bin: second Eshmel (%s): %zu look entries", g_kasumi.describe().c_str(), kasumi_alts.size());

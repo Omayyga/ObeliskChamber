@@ -1129,5 +1129,165 @@ class TestBake(unittest.TestCase):
         self.assertTrue(note.startswith("texture 901; not baked: "), note)
 
 
+def anim_asset_table(entries):
+    """entries: ([[condition strings], ...], [animation sets], body model or None). Returns AssetTable.bin bytes: look entries with a
+    condition, a body model and animations (one portrait entry, which apply_assets needs)."""
+    b = Builder()
+    late = []           # (at, alternatives or None, items)
+
+    def write_entry(at, row):
+        alts, anims, body = row[1:]
+        late.append((at + 0x20, alts, None))
+        late.append((at + 0x30, None, anims))
+        b.strptr(at + 0x40, body)
+
+    def write_face(at, row):
+        b.strptr(at + 0x20, "Kai0")
+        b.strptr(at + 0x28, "017_Std")
+
+    table(b, "アセットテーブル", [("条件", "string[,]", 16, 0x20), ("アニメ", "string[]", 16, 0x30), ("体モデル", "string", 8, 0x40),
+                                ("容姿", "data", 16, 0x48), ("キーワード", "string[]", 16, 0x58)], 0x68,
+          [(None,) + tuple(row) for row in entries], write_entry)
+    table(b, "容姿情報", [("ボイス", "string", 8, 0x20), ("フェイス", "string", 8, 0x28), ("特殊", "u8", 1, 0x30)], 0x38,
+          [("FID_カイ",)], write_face, label_records=True)
+    for at, alts, items in late:
+        if alts is None:
+            string_list(b, at, items)
+            continue
+        struct.pack_into("<I", b.data, at, len(alts) | 16 << 16)
+        arr = len(b.data)
+        b.data += bytes(16 * len(alts))
+        struct.pack_into("<Q", b.data, at + 8, arr)
+        b.rel.append(at + 8)
+        for i, alt in enumerate(alts):
+            string_list(b, arr + 16 * i, alt)
+    b.labels.sort()
+    return b.build()
+
+
+def look_entries(data):
+    """[(alternatives, animation sets, body model)] of an AssetTable.bin's look entries."""
+    b = gb.GameDataBin(data)
+    t = b.table("アセットテーブル")
+    f_cond, f_anim = t.field("条件").off, t.field("アニメ").off
+    f_body = next((f.off for f in t.fields if f.name == "体モデル"), None)
+
+    def strings(at):
+        arr = b.ptr(at + 8)
+        return [] if arr is None else [b.string(arr + 8 * i) for i in range(b.u32(at) & 0xFFFF)]
+
+    out = []
+    for rec in t.records():
+        word, arr = b.u32(rec + f_cond), b.ptr(rec + f_cond + 8)
+        alts = [] if arr is None else [strings(arr + (word >> 16) * k) for k in range(word & 0xFFFF)]
+        out.append((alts, strings(rec + f_anim), b.string(rec + f_body) if f_body is not None else None))
+    return out
+
+
+GUARD = ru.FOOT_GUARD
+
+
+class TestFootSets(unittest.TestCase):
+    ENTRIES = [
+        ([["SID_歩兵", "AID_ゴライアス", "!重装移動"]], ["AB_720MA_W#"], None),          # 0: the template (condition and animations only)
+        ([["AID_ダグザ"]], ["AE_001M", "AB_001MA_W#"], "CD_001"),                      # 1: a model too: the set moves
+        ([["AID_グラディウス"]], ["AE_119M"], "CD_119"),                                 # 2: Gladius's plain entry (a look key)
+        ([["AID_グラディウス", "デフォルト衣装", "剣"]], ["AB_119MA_W1"], None),            # 3: animations only: guarded in place
+        ([["AID_マーナ", "JID_無職"], ["AID_マーナ", "デフォルト衣装"], ["AID_マーナ", "デモ"]], ["AB_104FA_W#"], "CD_104"),
+        ([["短斧", "男", "SID_歩兵", "!重装移動"]], ["AB_W05MA_W3"], None),               # 5, 6: later: again after Dagda's and Maria's
+        ([["ロンスカ", "男"], ["AID_グラディウス", "マント"]], ["AE_x", "AB_700MA_W#"], None),
+        ([["AID_ロクサーナ"]], ["AB_999FA_W0"], None),                                   # 7: another look's: not again
+        ([["AID_カストール", "JID_ガーディアン", "槍"]], ["AB_110MA_W2"], None),            # 8: a class term already: left alone
+        ([["男", "ダンジョン"]], ["AE_999M"], None),                                     # 9: no body animations: not again
+        ([["AID_マーナ"]], ["AE_104F"], "HD_104"),                                       # 10, 11: plain entries (look keys)
+        ([["AID_カストール"]], ["AE_110M"], "HD_110"),
+    ]
+
+    def test_entries(self):
+        out, changes = ru.apply_assets(anim_asset_table(self.ENTRIES), looks=[], forms=[], cutscene_faces=[])
+        got = look_entries(out)
+        self.assertEqual(got[1], ([["AID_ダグザ"]], ["AE_001M"], "CD_001"))
+        self.assertEqual(got[3], ([["AID_グラディウス", "デフォルト衣装", "剣"] + GUARD], ["AB_119MA_W1"], None))
+        self.assertEqual(got[4], (self.ENTRIES[4][0], [], "CD_104"))
+        for i in (0, 2, 5, 6, 7, 8, 9, 10, 11):
+            self.assertEqual(got[i], self.ENTRIES[i])
+        # the new entries, in FOOT_SETS's order: Dagda's set and the later entries again (3 for Gladius, an alternative this look has
+        # not: left out; 7 another look's), then Maria's likewise
+        self.assertEqual(got[12:], [
+            ([["AID_ダグザ"] + GUARD], ["AB_001MA_W#"], None),
+            ([["短斧", "男", "SID_歩兵", "!重装移動", "AID_ダグザ"]], ["AB_W05MA_W3"], None),
+            ([["ロンスカ", "男", "AID_ダグザ"]], ["AB_700MA_W#"], None),
+            ([["AID_マーナ", "JID_無職"], ["AID_マーナ", "デフォルト衣装"] + GUARD, ["AID_マーナ", "デモ"]], ["AB_104FA_W#"], None),
+            ([["短斧", "男", "SID_歩兵", "!重装移動", "AID_マーナ"]], ["AB_W05MA_W3"], None),
+            ([["ロンスカ", "男", "AID_マーナ"]], ["AB_700MA_W#"], None),
+        ])
+        self.assertEqual(ru.foot_line(changes),
+                         "randomizer: AssetTable.bin: on foot only: 1 look entries guarded, 2 moved to new ones, 4 re-added after them")
+
+    def test_no_animation_field(self):
+        data = asset_table([("", [["AID_マーナ"]], None, [])], [("FID_カイ", "Kai0", "017_Std", 0)])
+        out, changes = ru.apply_assets(data, looks=[], forms=[], cutscene_faces=[])
+        self.assertEqual(out, data)
+        self.assertEqual(changes, [])
+
+
+ROMFS = os.environ.get("FEFW_ROMFS")
+LOCO = ("IdleStart", "IdleLoop", "IdleDStart", "IdleDLoop", "RunStart", "RunLoop", "WalkLoop", "WalkLLoop", "WalkRLoop")
+
+
+@unittest.skipUnless(ROMFS and os.path.isdir(ROMFS or ""), "set FEFW_ROMFS to a RomFS dump to check the game's own files")
+class TestFootSetsInGame(unittest.TestCase):
+    """The game's own AssetTable.bin and AnimSet.bin: which set each motion comes from, for each FOOT_SETS character, in contexts drawn
+    from the terms that matter (the entries' later sets override earlier ones, motion by motion). On foot (SID_歩兵, not armoured)
+    nothing changes; with no class term at all (mounted, flying), none of the character's own on-foot sets is left."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROMFS, "GameData", "AssetTable.bin"), "rb") as fh:
+            cls.vanilla = fh.read()
+        cls.edited, _ = ru.apply_assets(cls.vanilla, looks=[], forms=[], cutscene_faces=[])
+        with open(os.path.join(ROMFS, "GameData", "AnimSet.bin"), "rb") as fh:
+            a = gb.GameDataBin(fh.read())
+        t = next(iter(a.tables()))
+        cls.sets = {}
+        for rec in t.records():
+            r = a.record(t, rec)
+            cls.sets[a.key(rec)] = {m for m, v in r.items() if m not in ("$key", "兵種名") and v not in (None, "", 0)}
+
+    def resolve(self, entries, ctx):
+        won = {}
+        for alts, anims, _ in entries:
+            if not any(all((t[1:] not in ctx) if t.startswith("!") else (t in ctx) for t in alt) for alt in alts):
+                continue
+            for s in anims:
+                for w in range(8):
+                    name = s[:-1] + str(w) if s.endswith("#") else s
+                    if name[-1] != str(w):
+                        continue
+                    for m in self.sets.get(name, ()):
+                        won[(w, m)] = s
+        return won
+
+    def test_motions(self):
+        import random
+        vanilla, edited = look_entries(self.vanilla), look_entries(self.edited)
+        terms = ["SID_歩兵", "重装移動", "騎馬移動", "デフォルト衣装", "デモ", "拠点", "JID_無職", "短斧", "ロンスカ", "ロンスカデフォ",
+                 "ダンジョン", "SID_冥界兵", "剣", "槍", "黒魔", "AID_ラクシャ", "AID_イリアナ", "AID_マリア冥将"]
+        rnd = random.Random(1)
+        for aid, sets in ru.FOOT_SETS.items():
+            for sex in ("男", "女"):
+                for _ in range(600):
+                    ctx = {aid, sex} | {t for t in terms if rnd.random() < 0.4}
+                    before, after = self.resolve(vanilla, ctx), self.resolve(edited, ctx)
+                    if "SID_歩兵" in ctx and "重装移動" not in ctx:
+                        self.assertEqual(before, after, (aid, sorted(ctx)))
+                    elif not ctx & {"SID_歩兵", "デモ", "拠点", "JID_無職"}:
+                        mine = {k: s for k, s in after.items() if s in sets and k[1] in LOCO}
+                        self.assertEqual(mine, {}, (aid, sorted(ctx)))
+                        for k, s in after.items():
+                            if s not in sets:
+                                self.assertEqual(before.get(k), s, (aid, sorted(ctx), k)) if before.get(k) not in sets else None
+
+
 if __name__ == "__main__":
     unittest.main()

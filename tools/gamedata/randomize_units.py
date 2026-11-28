@@ -73,6 +73,28 @@ OWN_COPY = "本人"
 # whoever plays it: each such condition is made to need SID_冥界兵 instead, and a new look entry "AID_<replacement> & AID_x冥将" gives
 # the replacement's Underworld look.
 FLAG_SUFFIX = "冥将"
+# On foot only. A unit's animations are layered: every look entry whose condition holds adds its アニメ sets, later entries over earlier
+# ones, motion by motion (GameData/AnimSet.bin says which motions a set defines: AB_104FA_W0 "マリア女素手" its own IdleStart/Loop and
+# IdleD); the class and mount entries come first, the characters' after. These pool characters' own sets hold standing (on-foot) motions
+# with no condition on the class: in the game they only ever have foot classes, and the lords' sets, which need it, have "SID_歩兵 &
+# !重装移動" (infantry, not armoured: every mounted and flying class lacks SID_歩兵, a dismounted one has it). On a horse their idle
+# would beat the rider's, so the unit stood through the horse between attacks. Each alternative of an entry adding one of these sets
+# that names the character and has no class term (SID_歩兵, a JID_, デモ cutscenes, 拠点 the hub) gets FOOT_GUARD:
+#   - an entry with nothing but a condition and animations: in place (its condition list rebuilt at the end of the data);
+#   - an entry with more (a model, a portrait): the sets leave its アニメ and a new entry with only them and its alternatives, guarded,
+#     goes after the last of アセットテーブル. Every later vanilla entry with body animations (AB_) that may hold for that look follows
+#     it again, with only those sets and the character added to each alternative, so that for this look the sets keep their order
+#     (a later entry may override them: Dagda runs with the hand axe's (短斧) or the long skirt's (ロンスカ) run, in a dungeon with its
+#     own). An alternative needing another look (a key some entry has alone, AID_x) cannot hold and is left out.
+# The characters' vanilla classes are all on foot, so nothing changes in them; only these pool characters' entries change (an
+# alternative naming the character). TestFootSetsInGame checks the motions against the game's files.
+FOOT_SETS = {
+    "AID_ダグザ": ["AB_001MA_W#"], "AID_ソレル": ["AB_003MA_W2"], "AID_ライラー": ["AB_012FA_W#", "AB_102FA_W#"], "AID_イシエト": ["AB_103FA_W#"],
+    "AID_マーナ": ["AB_104FA_W0", "AB_104FA_W#", "AB_104bFA_W#"], "AID_カストール": ["AB_110MA_W2"], "AID_グラディウス": ["AB_119MA_W1"],
+    "AID_ゼンゼル": ["AB_126MA_W#"], "AID_ゼノン": ["AB_126MA_W6"], "AID_ヴァンダル": ["AB_171MA_W#"],
+}
+FOOT_GUARD = ["SID_歩兵", "!重装移動"]
+FOOT_CLASS_TERMS = ("SID_歩兵", "デモ", "拠点")      # and any JID_ term
 # Red eyes. The Underworld portrait effect (UI/Face/Hell.sprop) recolours the eyes it finds by slot name, from a list in the executable:
 # 00_eye, 00_eye_w, 00_eye_hi, each also with _l / _r (any case). These pool characters' portrait rigs (UI/Face/<n>/<n>.skel.zst, Spine
 # 4.1 binary) name their eye slots without the 00_ (Eye, Eye_W, Eye_Hi; Eye_Highlight in two), so their Underworld portraits keep their
@@ -579,6 +601,11 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
        anyone's; an overwrite takes the face too); and in every look entry, beside Eshmel's alternatives, kasumi_alternatives(): the
        entry's condition list is rebuilt at the end of the data, its own alternatives first.
 
+    6. After 4, on foot only (FOOT_SETS, which says why): each look entry adding one of a character's own on-foot animation sets gets
+       FOOT_GUARD in each alternative that names the character and has no class term; in place when the entry has nothing but a
+       condition and animations, else the sets move to a new animation-only entry (a copy of the first vanilla one), followed by
+       copies of the later entries with body animations that may hold for that look (only those sets; the character added).
+
     New portrait entries go after the last of 容姿情報 (with a label each, as every entry has), new look entries after the last of
     アセットテーブル: later entries win, so an Underworld entry overrides the plain one, as Cai's does. A new look entry is a copy of
     the vanilla "AID_ブレザ & SID_冥界兵" entry (only its condition, look and keyword set). Its condition lists go at the end of the data."""
@@ -704,6 +731,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             changes.append("%s -> %s" % (look, renamed[look]))
     # 4. the chapter flags
     flags = set()
+    conds_now = {r: [list(alt) for alt in conds[r]] for r in entries}     # the conditions as this step leaves them (for step 6)
     for r in entries:
         word, arr = b.u32(r + f_cond), b.ptr(r + f_cond + 8)
         for k, alt in enumerate(conds[r]):
@@ -711,6 +739,7 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
                     and alt[1].startswith("AID_") and alt[1].endswith(FLAG_SUFFIX) and [alt[0], UNDERWORLD] in conds[r]):
                 continue
             e.set_ptr(b.ptr(arr + (word >> 16) * k + 8) + 8, UNDERWORLD)
+            conds_now[r][k][1] = UNDERWORLD
             changes.append("%s & %s: needs %s" % (alt[0], alt[1], UNDERWORLD))
             if alt[1] in flags:
                 continue
@@ -723,6 +752,71 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     if new_looks and template is None:
         changes.append("no template look entry: no Underworld forms added")
         new_looks = []
+    # 6. on foot only (FOOT_SETS)
+    f_anim = next((f.off for f in assets.fields if f.name == "アニメ" and f.size == 16), None)
+    only_cond_anim = {f_cond + 8, None if f_anim is None else f_anim + 8}
+
+    def pointers(rec):
+        return {o for o in range(0, assets.rec_size, 8) if rec + o in b.ptrs}
+
+    anim_tpl = next((r for r in entries if pointers(r) == only_cond_anim), None)
+    kasumi_recs = {r for _, r, _ in kasumi_alts}
+    guard_alts = []     # (look entry, [alternatives]): its condition list, rebuilt in place
+    anim_cuts = []      # (look entry, [indices of the sets it keeps])
+    anim_looks = []     # ([alternatives], [sets]): new look entries with only a condition and animations
+    look_keys = {alt[0] for r in entries for alt in conds[r] if len(alt) == 1 and alt[0].startswith("AID_")}
+    for aid, sets in FOOT_SETS.items() if f_anim is not None else ():
+        moved = {}      # index -> (alternatives, sets)
+        for i, r in enumerate(entries):
+            anims = strings(r + f_anim)
+            foot = [s for s in anims if s in sets]
+            if not foot or r in kasumi_recs or not any(aid in alt for alt in conds[r]):
+                continue
+            alts, n = [], 0
+            for alt in conds_now[r]:
+                if aid in alt and not any(t in FOOT_CLASS_TERMS or t.startswith("JID_") for t in alt):
+                    alts.append(alt + FOOT_GUARD)
+                    n += 1
+                else:
+                    alts.append(list(alt))
+            if not n:
+                continue
+            if pointers(r) == only_cond_anim and foot == anims:
+                guard_alts.append((r, alts))
+                changes.append("look entry %d: %s on foot only" % (i, ", ".join(foot)))
+            elif anim_tpl is None:
+                changes.append("look entry %d: %s: skipped (no template)" % (i, ", ".join(foot)))
+            else:
+                anim_cuts.append((r, [k for k, s in enumerate(anims) if s not in foot]))
+                moved[i] = (alts, foot)
+                changes.append("look entry %d: %s on foot only, in a new look entry" % (i, ", ".join(foot)))
+        if not moved:
+            continue
+        # from the first moved entry on, in order: the moved sets, and each later entry with body animations (AB_) that may hold for
+        # this look (no alternative needing another look), again with only those, for this look only
+        again = 0
+        for j in range(min(moved), len(entries)):
+            if j in moved:
+                anim_looks.append(moved[j])
+                continue
+            body = [s for s in strings(entries[j] + f_anim) if s.startswith("AB_")]
+            alts = [alt + ([] if aid in alt else [aid]) for alt in conds_now[entries[j]]
+                    if not any(t != aid and t in look_keys for t in alt)]
+            if body and alts:
+                anim_looks.append((alts, body))
+                again += 1
+        changes.append("%s: %d later look entries again after its own" % (aid, again))
+    # the moved sets leave their entries: the kept ones close up, the freed pointers go (in place, before the inserts)
+    for r, keep in anim_cuts:
+        word, arr = b.u32(r + f_anim), b.ptr(r + f_anim + 8)
+        e.copy_ptrs([(arr + 8 * j, arr + 8 * k) for j, k in enumerate(keep) if j != k])
+        for j in range(len(keep), word & 0xFFFF):
+            e.clear_ptr(arr + 8 * j)
+            e.data[arr + 8 * j:arr + 8 * j + 8] = bytes(8)
+        e.u32(r + f_anim, (word & 0xFFFF0000) | len(keep))
+        if not keep:
+            e.clear_ptr(r + f_anim + 8)
+            e.data[r + f_anim + 8:r + f_anim + 16] = bytes(8)
 
     labels = {name: at for at, name in b.labels}
     H = gamedata_bin.HEADER
@@ -730,14 +824,20 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
     face_end, look_end, data_end = face_recs[-1] + faces.rec_size, entries[-1] + assets.rec_size, b.data_size
     face_raw = b"".join(bytes(b.d[H + src:H + src + faces.rec_size]) for src, *_ in new_faces)
     look_raw = bytes(b.d[H + template:H + template + assets.rec_size]) * len(new_looks) if new_looks else b""
+    if anim_looks:
+        look_raw += bytes(b.d[H + anim_tpl:H + anim_tpl + assets.rec_size]) * len(anim_looks)
     # the end of the data: each new look entry's condition (one alternative: its header, then its strings), then each condition list
-    # the second Eshmel's alternatives make: all the alternatives' headers (the entry's own copied, then the new), then the new strings
+    # the second Eshmel's alternatives make: all the alternatives' headers (the entry's own copied, then the new), then the new strings;
+    # then step 6's: each rebuilt condition list (the headers, then the strings), then each new animation entry's condition list and its
+    # animation list
     aux_size = sum(16 + 8 * len(terms) for terms, _, _ in new_looks)
     aux_size += sum(16 * ((b.u32(r + f_cond) & 0xFFFF) + len(alts)) + 8 * sum(len(a) for a in alts) for _, r, alts in kasumi_alts)
+    aux_size += sum(16 * len(alts) + 8 * sum(len(a) for a in alts) for _, alts in guard_alts)
+    aux_size += sum(16 * len(alts) + 8 * sum(len(a) for a in alts) + 8 * len(sets) for alts, sets in anim_looks)
     aux_raw = bytes(aux_size)
     # in place, at the offsets of the file as it is: the record counts of the two tables
     e.u32(labels["容姿情報"] + 0x10, (len(face_recs) + len(new_faces)) << 16)
-    e.u32(labels["アセットテーブル"] + 0x10, (len(entries) + len(new_looks)) << 16)
+    e.u32(labels["アセットテーブル"] + 0x10, (len(entries) + len(new_looks) + len(anim_looks)) << 16)
     # the inserts, from the end of the file down, so that each lands where the file as it is says
     e.insert(data_end, aux_raw)
     e.insert(face_end, face_raw)
@@ -829,7 +929,44 @@ def apply_assets(data, looks=LIVING_LOOKS, forms=UNDERWORLD_FORMS, swaps=None, c
             strs += 8 * len(alt)
         lists = strs
         changes.append("look entry %d: + %s" % (i, " | ".join(" & ".join(a) for a in alts)))
+
+    # step 6: a condition list of alternatives (lists of terms) at `lists`: the headers, then the strings; returns where it ends
+    def cond_list(at, alts):
+        strs = at + 16 * len(alts)
+        for k, alt in enumerate(alts):
+            e.u32(at + 16 * k, len(alt) | 8 << 16)
+            e.set_ptr(at + 16 * k + 8, strs)
+            for m, t in enumerate(alt):
+                e.set_ptr(strs + 8 * m, t)
+            strs += 8 * len(alt)
+        return strs
+
+    for r, alts in guard_alts:
+        e.u32(now(r) + f_cond, len(alts) | 16 << 16)
+        e.set_ptr(now(r) + f_cond + 8, lists)
+        lists = cond_list(lists, alts)
+    for i, (alts, sets) in enumerate(anim_looks):
+        rec = look_end + assets.rec_size * (len(new_looks) + i)
+        e.u32(rec + 0x10, 0x10000 | (len(entries) + len(new_looks) + i))
+        e.u32(rec + 0x14, (look_row + 1 + len(new_looks) + i) << 16)
+        e.u32(rec + f_cond, len(alts) | 16 << 16)
+        e.set_ptr(rec + f_cond + 8, lists)
+        lists = cond_list(lists, alts)
+        e.u32(rec + f_anim, len(sets) | 8 << 16)
+        e.set_ptr(rec + f_anim + 8, lists)
+        for m, s in enumerate(sets):
+            e.set_ptr(lists + 8 * m, s)
+        lists += 8 * len(sets)
     return e.build(), changes
+
+
+def foot_line(changes):
+    """The log line for step 6 of apply_assets (on foot only)."""
+    guarded = sum(1 for c in changes if c.endswith(" on foot only"))
+    moved = sum(1 for c in changes if c.endswith(" on foot only, in a new look entry"))
+    again = sum(int(c.split(": ")[1].split()[0]) for c in changes if c.endswith(" later look entries again after its own"))
+    return "randomizer: AssetTable.bin: on foot only: %d look entries guarded, %d moved to new ones, %d re-added after them" % (
+        guarded, moved, again)
 
 
 def assets_line(changes, edited):
@@ -1604,6 +1741,7 @@ def main(argv=None):
         with open(assets, "rb") as fh:
             vanilla_assets = fh.read()
         edited_assets, changes = apply_assets(vanilla_assets, swaps=asset_swaps(mapping), kasumi=look)
+        print(foot_line(changes))
         print(assets_line(changes, edited_assets))
         if a.o_assets:
             with open(a.o_assets, "wb") as fh:
