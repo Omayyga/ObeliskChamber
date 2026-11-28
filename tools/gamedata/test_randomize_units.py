@@ -949,9 +949,56 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual(ru._clipping_entries(bytes(bad), ru._skel_slot_colours(skel)), [])
         self.assertEqual(ru.kasumi_rig_file("spdb", spdb, "016", dst="901")[0], b"\x0d\x00\x00\x00901/901.atlas\x0c\x00\x00\x00901/901.skel")
 
+    @staticmethod
+    def skinned(slots, default, named, strings=("00_Eye", "x", "BHoodOff", "AHoodOff")):
+        """A whole skeleton: no constraints, a default skin with a region in each slot of `default`, then each (name ref, slots) of
+        `named` the same way, then TAIL."""
+        region = bytes([2, 0, 0, 0]) + bytes(32) + bytes([0])      # key ref x, no name, region, no path, 32 bytes, no sequence
+        groups = lambda ks: bytes([len(ks)]) + b"".join(bytes([k, 1]) + region for k in ks)
+        out = skeleton(slots, strings=strings)[:-1] + bytes([0, 0, 0]) + groups(default) + bytes([len(named)])
+        for ref, ks in named:
+            out += bytes([ref, 0, 0, 0, 0]) + groups(ks)
+        return out + b"TAIL"
+
+    def test_underworld_colours(self):
+        colours = [bytes.fromhex("dcba9eff"), bytes.fromhex("da9681ff"), bytes.fromhex("9bc0d1ff")]
+        slots = ["Body02_Skin", "A_TopHair_Hair", "B_Hair_Hair", "Mouth_n00_Lip", "00_Eye", "A_TopHair_Highlight"]
+        skel = self.skinned(slots, [0], [(3, [1, 5]), (4, [2])])
+        spans, skins = ru._skel_skins(skel)
+        self.assertEqual([n for n, _, _ in spans], slots)
+        self.assertEqual(skins, {"default": {0}, "BHoodOff": {1, 5}, "AHoodOff": {2}})
+        self.assertIsNone(ru._skel_skins(skel[:-6]))                   # cut short
+        # BHoodOff: the default skin's Body02_Skin and BHoodOff's A_TopHair_Hair; not the lip (no skin) nor AHoodOff's hair
+        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", True, "BHoodOff")
+        self.assertEqual(note, "slots coloured: skin 1 (dcba9eff), lip 1 (da9681ff), hair 2 (9bc0d1ff); Underworld colours: 2 slots of "
+                               "BHoodOff renamed 00_eye_l..00_Eye_l; clipping off: none (0 skin attachments removed)")
+        self.assertEqual(out, self.skinned(["00_eye_l", "00_Eye_l"] + slots[2:], [0], [(3, [1, 5]), (4, [2])])
+                         .replace(b"\xff" * 8, bytes.fromhex("79605fffffffffff"), 1)
+                         .replace(b"\xff" * 8, bytes.fromhex("55637effffffffff"), 1)
+                         .replace(b"\xff" * 8, bytes.fromhex("9bc0d1ffffffffff"), 1)
+                         .replace(b"\xff" * 8, bytes.fromhex("da9681ffffffffff"), 1))
+        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", True, "CHoodOff")
+        self.assertTrue(note.endswith("; Underworld colours: no skin CHoodOff; clipping off: none (0 skin attachments removed)"), note)
+        self.assertEqual(ru._skel_slot_colours(out), ru._skel_slot_colours(ru.kasumi_rig_file("skel.zst", skel, "016", colours)[0]))
+        # more such slots than names: the rest keep theirs
+        many = ["h%d_Hair" % i for i in range(41)]
+        out, note = ru.kasumi_rig_file("skel.zst", self.skinned(many, list(range(41)), [(3, [])]), "016", colours, "901", True, "BHoodOff")
+        self.assertIn("Underworld colours: 40 slots of BHoodOff renamed 00_eye_l..00_EYE (1 left: no name free)", note)
+        self.assertEqual([n for n, _, _ in ru._skel_skins(out)[0]][-2:], ["00_EYE", "h40_Hair"])
+
+    def test_iris_names(self):
+        names = ru.iris_names(set())
+        self.assertEqual(len(names), 40)
+        self.assertEqual(len(set(names)), 40)
+        self.assertEqual(names[:3] + names[-1:], ["00_eye_l", "00_Eye_l", "00_eYe_l", "00_EYE"])
+        self.assertEqual({n.lower() for n in names}, set(ru.EYE_TAGS))
+        self.assertEqual(ru.iris_names({"00_Eye", "00_eye_l"})[:2], ["00_Eye_l", "00_eYe_l"])
+        self.assertEqual(len(ru.iris_names({"00_Eye"})), 39)
+
     def test_look_helpers(self):
         self.assertEqual((self.EGG.portrait(), self.EGG.voice(), self.EGG.rig()), ("イシュマール女Bフード", "Ism0F", "016"))
         self.assertEqual((self.LOOK.portrait(), self.LOOK.voice(), self.LOOK.rig()), ("イシュマール男C", "Ism0M", "015"))
+        self.assertEqual((self.EGG.face_skin(), self.LOOK.face_skin()), ("BHoodOn", "CHoodOff"))
 
 
 if __name__ == "__main__":

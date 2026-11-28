@@ -130,6 +130,15 @@ CLIP_SLOT_SUFFIX = "_Clipping"
 # effect draws every slot opaque but Render (the one alpha-0 slot other rigs have), so that quad becomes an opaque sheet over everything
 # drawn before it: the head. In the Underworld rig the end markers go too.
 CLIP_END_SUFFIX = "_Clipping_End"
+# Its colours there. The Underworld effect sets every slot's colour to one lavender grey (UNDERWORLD_GREY, RGB), but for Render (which it
+# skips), the army colour slots, and the iris slots, which keep their own setup colour (alpha 1). It finds the iris by slot name, any case:
+# 00_eye, 00_eye_l, 00_eye_r (EYE_TAGS; the executable's list, the same one as for EYE_RIGS). Eshmel's hair and skin are white in the
+# texture and take their colour from the slot, so in the Underworld rig the _Skin, _Lip and _Hair slots the default skin and the portrait's
+# skin (KasumiLook.face_skin) use are given iris names, and their colour times the grey, which is what the effect makes of a texture that
+# has its colours. Each name is different (case variants, 39 free in Eshmel's rigs for at most 27 such slots): the game keeps each slot's
+# render data by slot name. Animations, skins and draw order find slots by position, so nothing else changes.
+UNDERWORLD_GREY = (0x8C, 0x84, 0x9A)
+EYE_TAGS = ("00_eye_l", "00_eye_r", "00_eye")
 KASUMI_RIGS = {"男": "015", "女": "016"}
 RIG_FILES = ("atlas.zst", "bntx.zst", "skel.zst", "spdb")
 ATLAS_KEY = bytes.fromhex("2d7a777e3f502160")   # an atlas is XOR-scrambled; these are the key's first bytes (each rig's "<n>.png\n")
@@ -230,6 +239,10 @@ class KasumiLook:
 
     def rig(self):
         return KASUMI_RIGS[self.sex]
+
+    def face_skin(self):
+        """The skin of the rig its portrait shows: the Eshmel entry's face is <rig>_<head>HoodOff, or HoodOn with the hood."""
+        return self.head + ("HoodOn" if self.hood else "HoodOff")
 
     def describe(self):
         return "%s 頭部%s 身体%s 肌色%d 髪色%d%s" % (self.sex, self.head, self.body, self.skin, self.hair, " フード" if self.hood else "")
@@ -1076,14 +1089,178 @@ def _clipping_entries(data, slots):
     return sorted(found)
 
 
-def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False):
+def _skel_skins(data):
+    """A Spine 4.1 binary skeleton's slots [(name, start, end of its string)] and, for each skin ("default" for the default one), the
+    slot indices it has attachments for; None when the file does not read to the end of its skins."""
+    r = _SkelReader(data)
+    try:
+        r.take(8)
+        if not (r.string() or "").startswith("4.1."):
+            return None
+        r.take(16)
+        nonessential = r.take(1)[0] != 0
+        if nonessential:
+            r.take(4)
+            r.string()
+            r.string()
+        strings = [r.string() for _ in range(r.varint())]
+
+        def ref():
+            n = r.varint()
+            return None if n == 0 else strings[n - 1]
+
+        for i in range(r.varint()):                 # bones
+            r.string()
+            if i:
+                r.varint()
+            r.take(32)
+            r.varint()
+            r.take(1)
+            if nonessential:
+                r.take(4)
+        slots = []
+        for _ in range(r.varint()):
+            at = r.p
+            name = r.string() or ""
+            slots.append((name, at, r.p))
+            r.varint()
+            r.take(8)
+            r.varint()
+            r.varint()
+        for _ in range(r.varint()):                 # ik constraints: name, order, skin required, bones, target, mix, softness, 4 flags
+            r.string()
+            r.varint()
+            r.take(1)
+            for _ in range(r.varint()):
+                r.varint()
+            r.varint()
+            r.take(12)
+        for _ in range(r.varint()):                 # transform constraints: ..., target, local, relative, 12 floats
+            r.string()
+            r.varint()
+            r.take(1)
+            for _ in range(r.varint()):
+                r.varint()
+            r.varint()
+            r.take(50)
+        for _ in range(r.varint()):                 # path constraints: ..., target, 3 modes, 6 floats
+            r.string()
+            r.varint()
+            r.take(1)
+            for _ in range(r.varint()):
+                r.varint()
+            for _ in range(4):
+                r.varint()
+            r.take(24)
+
+        def vertices(n):
+            if r.take(1)[0]:
+                for _ in range(n):
+                    for _ in range(r.varint()):
+                        r.varint()
+                        r.take(12)
+            else:
+                r.take(8 * n)
+
+        def sequence():
+            if r.take(1)[0]:
+                for _ in range(4):
+                    r.varint()
+
+        skins = {}
+
+        def skin(name):
+            used = skins.setdefault(name, set())
+            for _ in range(r.varint()):
+                k = r.varint()
+                if k >= len(slots):
+                    raise ValueError("no slot %d" % k)
+                used.add(k)
+                for _ in range(r.varint()):
+                    ref()
+                    ref()
+                    t = r.take(1)[0]
+                    if t == 0:                      # region: path, rotation, x, y, scale x, y, width, height, colour, sequence
+                        ref()
+                        r.take(32)
+                        sequence()
+                    elif t == 1:                    # bounding box
+                        vertices(r.varint())
+                        r.take(4 if nonessential else 0)
+                    elif t == 2:                    # mesh
+                        ref()
+                        r.take(4)
+                        vc = r.varint()
+                        r.take(8 * vc)
+                        r.take(2 * r.varint())
+                        vertices(vc)
+                        r.varint()
+                        sequence()
+                        if nonessential:
+                            r.take(2 * r.varint())
+                            r.take(8)
+                    elif t == 3:                    # linked mesh: path, colour, skin, parent, timelines, sequence
+                        ref()
+                        r.take(4)
+                        ref()
+                        ref()
+                        r.take(1)
+                        sequence()
+                        r.take(8 if nonessential else 0)
+                    elif t == 4:                    # path
+                        r.take(2)
+                        vc = r.varint()
+                        vertices(vc)
+                        r.take(4 * (vc // 3))
+                        r.take(4 if nonessential else 0)
+                    elif t == 5:                    # point
+                        r.take(12 + (4 if nonessential else 0))
+                    elif t == 6:                    # clipping: end slot, vertices
+                        r.varint()
+                        vertices(r.varint())
+                        r.take(4 if nonessential else 0)
+                    else:
+                        raise ValueError("attachment type %d" % t)
+
+        skin("default")
+        for _ in range(r.varint()):
+            name = ref() or ""
+            for _ in range(4):                      # its bones and constraints
+                for _ in range(r.varint()):
+                    r.varint()
+            skin(name)
+        return slots, skins
+    except (ValueError, IndexError, UnicodeDecodeError):
+        return None
+
+
+def iris_names(taken):
+    """Every slot name the Underworld effect takes for an iris (EYE_TAGS, in any case) but those in `taken`, in a fixed order: each tag,
+    its letters' cases counting up from all lower case (the first letter the lowest bit)."""
+    out = []
+    for tag in EYE_TAGS:
+        letters = [i for i, ch in enumerate(tag) if ch.isalpha()]
+        for mask in range(1 << len(letters)):
+            name = list(tag)
+            for bit, i in enumerate(letters):
+                if mask >> bit & 1:
+                    name[i] = name[i].upper()
+            name = "".join(name)
+            if name not in taken:
+                out.append(name)
+    return out
+
+
+def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False, face_skin=None):
     """One file of the second Eshmel's portrait rig (kind: one of RIG_FILES; .zst ones handed over decompressed), made from rig `src`'s
     (015 or 016) and a one-line note; (None, why) when the file is not laid out as expected. The folder name sits in fixed-length places:
     the atlas's first line "<src>.png" (the atlas is XOR-scrambled: the bytes change by src ^ dst), the BNTX texture name (a 16-bit
     length 3, the name, NUL), the .spdb paths "<src>/<src>.atlas" and "<src>/<src>.skel". The skeleton has no name but takes the colours:
     every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's; with
     unclip, every slot whose name ends _Clipping (CLIP_SLOT_SUFFIX) has its setup attachment (the varint after the colours) set to none,
-    and its clipping attachments go from the skins (_clipping_entries): the game applies a skin's attachments itself."""
+    and its clipping attachments go from the skins (_clipping_entries): the game applies a skin's attachments itself; with face_skin
+    (the Underworld rig), the TINT_SLOTS slots the default skin and that one use take iris_names() in slot order and their colour's RGB
+    times UNDERWORLD_GREY / 255, rounded (as many as there are names; none when the skins do not read)."""
     out = bytearray(data)
     if kind == "atlas.zst":
         if bytes(x ^ y for x, y in zip(data[:8], ATLAS_KEY)) != (src + ".png\n").encode():
@@ -1115,8 +1292,30 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
                     counts[k] += 1
         note = "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
             x for k in range(3) for x in (counts[k], colours[k].hex() if colours and colours[k] else "none"))
+        edits = []                                      # (start, end, new bytes) on the file as it is
+        if face_skin:
+            layout = _skel_skins(data)
+            if layout is None or face_skin not in layout[1]:
+                note += "; Underworld colours: no skin %s" % face_skin
+            else:
+                spans, skins = layout
+                used = skins.get("default", set()) | skins[face_skin]
+                names = iris_names({n for n, _, _ in spans})
+                renamed = left = 0
+                for k, (name, start, end) in enumerate(spans):
+                    if k not in used or not name.endswith(TINT_SLOTS):
+                        continue
+                    if renamed == len(names):
+                        left += 1
+                        continue
+                    at = slots[k][1]
+                    out[at:at + 3] = bytes((out[at + i] * UNDERWORLD_GREY[i] + 127) // 255 for i in range(3))
+                    edits.append((start, end, _skel_string(names[renamed])))
+                    renamed += 1
+                note += "; Underworld colours: %d slots of %s renamed %s..%s%s" % (
+                    renamed, face_skin, names[0] if renamed else "-", names[renamed - 1] if renamed else "-",
+                    " (%d left: no name free)" % left if left else "")
         if unclip:
-            edits = []                                  # (start, end, new bytes) on the file as it is
             unclipped = []
             for name, at in slots:
                 if not name.endswith((CLIP_SLOT_SUFFIX, CLIP_END_SUFFIX)):
@@ -1131,9 +1330,9 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
             for count_at, at, end in entries:           # in the skins: the attachment goes, its slot group keeps no attachment
                 edits.append((count_at, count_at + 1, b"\0"))
                 edits.append((at, end, b""))
-            for start, end, new in sorted(edits, reverse=True):
-                out[start:end] = new
             note += "; clipping off: %s (%d skin attachments removed)" % (", ".join(unclipped) or "none", len(entries))
+        for start, end, new in sorted(edits, reverse=True):
+            out[start:end] = new
         return bytes(out), note
     return None, "not a rig file"
 
@@ -1231,7 +1430,7 @@ def main(argv=None):
                 with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
                     raw = fh.read()
                 edited_file, note = kasumi_rig_file(kind, inspect_romfs.unzstd(raw) if kind.endswith(".zst") else raw, src, colours,
-                                                    dst, unclip)
+                                                    dst, unclip, look.face_skin() if unclip else None)
                 print("randomizer: UI/Face/%s/%s.%s: from %s: %s" % (dst, dst, kind, src, note))
                 if a.o_kasumi and edited_file is not None:
                     os.makedirs(a.o_kasumi, exist_ok=True)
