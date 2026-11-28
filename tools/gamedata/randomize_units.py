@@ -99,9 +99,12 @@ QUOTE_PREFIXES = ("MID_LevelUp_", "MID_LevelUp_Min_", "MID_LevelUp_Max_", "MID_S
 # pool as a look of its own: KASUMI_AID, a look key no vanilla entry has, with the parts drawn from the seed (draw_kasumi). Every vanilla
 # look entry with an AID_イシュマール alternative gets an alternative for KASUMI_AID beside it, the drawn parts already satisfied
 # (kasumi_alternatives), so the entries keep their order. It has no slot of its own, so Kumos (KASUMI_SLOT, never placed on a map) joins
-# as a slot only. In Person.bin its slot takes KASUMI_MPID and KASUMI_AID (strings the file grows by) and the drawn sex as 性別.
+# as a slot only. In Person.bin its slot takes its name ID (KasumiLook.mpid: ESHMEL_MPID, or KASUMI_MPID for the hooded easter egg)
+# and KASUMI_AID (strings the file grows by) and the drawn sex as 性別.
 KASUMI_IDENT = "Ksm"                    # how randomize_force and the log name it
-KASUMI_MPID = "MPID_Kasumi"             # its name ID: Kasumi (ObeliskChamber_msg.cpp adds the text)
+KASUMI_MPID = "MPID_Kasumi"             # the easter egg's name ID: Kasumi (ObeliskChamber_msg.cpp adds the text)
+ESHMEL_MPID = "MPID_Eshmel"             # a random draw's: ObeliskChamber_msg.cpp copies each language's vanilla MPID_Ishmal text ("Eshmel")
+                                        # into it (MPID_Ishmal itself shows the player's custom name)
 KASUMI_AID = "AID_カスミ"
 KASUMI_SLOT = "Kon"                     # Kumos: a slot only while the second Eshmel is in
 KASUMI_SLOT_FORM = "コン・ムー"            # his asset key: he has no Underworld form, and gets one (as UNDERWORLD_FORMS) while he is in.
@@ -236,6 +239,10 @@ class KasumiLook:
     def voice(self):
         return "Ism0" + ("M" if self.sex == "男" else "F")
 
+    def mpid(self):
+        """Its name ID: Kasumi for the hooded easter egg, Eshmel otherwise."""
+        return KASUMI_MPID if self.hood else ESHMEL_MPID
+
     def rig(self):
         return KASUMI_RIGS[self.sex]
 
@@ -275,13 +282,13 @@ def draw_kasumi(seed, hood=False):
 
 def kasumi_character(look):
     """The second Eshmel as a replacement: no record, a name and model the file does not have yet."""
-    c = Character(KASUMI_IDENT, None, "", None, None, None, look.gender(), KASUMI_MPID, KASUMI_AID)
+    c = Character(KASUMI_IDENT, None, "", None, None, None, look.gender(), look.mpid(), KASUMI_AID)
     c.look = look
     return c
 
 
 def kasumi_line(look):
-    return "randomizer: second Eshmel %s(%s): %s" % (KASUMI_IDENT, KASUMI_MPID[5:], look.describe())
+    return "randomizer: second Eshmel %s(%s): %s" % (KASUMI_IDENT, look.mpid()[5:], look.describe())
 
 
 def kasumi_alternatives(alts, look):
@@ -322,7 +329,7 @@ def parse_force(text):
 
 
 def is_kasumi_name(name):
-    """The second Eshmel, as randomize_force names it: Ksm, Kasumi or MPID_Kasumi, any case."""
+    """The second Eshmel, as randomize_force names it, whatever its draw is named: Ksm, Kasumi or MPID_Kasumi, any case."""
     return name.strip().lower().replace(" ", "") in (KASUMI_IDENT.lower(), KASUMI_MPID.lower(), KASUMI_MPID[5:].lower())
 
 

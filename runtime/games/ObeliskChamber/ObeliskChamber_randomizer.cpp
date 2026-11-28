@@ -198,7 +198,8 @@ constexpr const char* kFlagSuffix = "\xe5\x86\xa5\xe5\xb0\x86";     // 冥将 (a
 // parts drawn from the seed, under a look key of its own; every look entry with an AID_イシュマール alternative gets one for it beside
 // it, the drawn parts already satisfied. Kumos (never placed on a map) joins as a slot only, so the pool stays one-to-one.
 constexpr const char* kKasumiIdent = "Ksm";
-constexpr const char* kKasumiMpid = "MPID_Kasumi";
+constexpr const char* kKasumiMpid = "MPID_Kasumi";   // the hooded easter egg's name ID (Kasumi)
+constexpr const char* kEshmelMpid = "MPID_Eshmel";   // a random draw's: each language's vanilla MPID_Ishmal text (ObeliskChamber_msg.cpp)
 constexpr const char* kKasumiAid = "AID_\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x9f";                              // AID_カスミ
 constexpr const char* kKasumiSlot = "Kon";
 // Kumos's asset key (コン・ムー): he has no Underworld form, and gets one (as kUnderworldForms) while he is in. His own look is never
@@ -257,6 +258,7 @@ struct KasumiLook {
     }
     uint8_t gender() const { return sex == kMale ? 1 : 2; }
     std::string portrait() const { return std::string(kEshmel) + sex + head + (hood ? kHoodWord : ""); }   // the entry its own copies
+    const char* mpid() const { return hood ? kKasumiMpid : kEshmelMpid; }   // Kasumi for the easter egg, Eshmel otherwise
     std::string voice() const { return std::string("Ism0") + (sex == kMale ? "M" : "F"); }
     std::string rig() const { return sex == kMale ? "015" : "016"; }
     // the skin of the rig its portrait shows: the Eshmel entry's face is <rig>_<head>HoodOff, or HoodOn with the hood
@@ -557,7 +559,7 @@ std::string trim(const std::string& s) {
 
 using Mapping = std::vector<std::pair<const Character*, const Character*>>;
 
-// The second Eshmel, as randomize_force names it: Ksm, Kasumi or MPID_Kasumi, any case
+// The second Eshmel, as randomize_force names it, whatever its draw is named: Ksm, Kasumi or MPID_Kasumi, any case
 bool is_kasumi_name(const std::string& name) {
     const std::string n = lower_nospace(name);
     return n == "ksm" || n == "kasumi" || n == "mpid_kasumi";
@@ -641,7 +643,7 @@ void edit_person(const NxModFile* file, void*) {
     }
     const std::vector<Character> cs = characters(b, t);
     Character kasumi;   // the second Eshmel, when randomize_eshmel is on
-    kasumi.ident = kKasumiIdent, kasumi.mpid = kKasumiMpid, kasumi.aid = kKasumiAid, kasumi.gender = g_kasumi.gender(), kasumi.kasumi = true;
+    kasumi.ident = kKasumiIdent, kasumi.mpid = g_kasumi.mpid(), kasumi.aid = kKasumiAid, kasumi.gender = g_kasumi.gender(), kasumi.kasumi = true;
     const Mapping mapping = make_mapping(cs, g_set.seed, g_set.force, g_set.eshmel ? &kasumi : nullptr);
     g_swaps.clear();
     g_speakers.clear();
@@ -2524,7 +2526,7 @@ void randomizer_install() {
     else if (!(eshmel.empty() || eshmel == "off" || eshmel == "false" || eshmel == "0" || eshmel == "no"))
         NXLOG_W(kTag, "randomizer: randomize_eshmel = \"%s\" is not off, on or hood: off", eshmel.c_str());
     if (g_set.eshmel) g_kasumi = draw_kasumi(g_set.seed, g_set.eshmel == 2);
-    msg_names_install();   // Katarina's name (a name ID but no text) and Kasumi's (ObeliskChamber_msg.cpp)
+    msg_names_install();   // Katarina's name (a name ID but no text) and the second Eshmel's, Eshmel and Kasumi (ObeliskChamber_msg.cpp)
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
     if (g_set.eshmel) {

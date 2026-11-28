@@ -12,8 +12,10 @@
 //
 // The unit randomizer adds names the same way (msg_names_install) to each language's Msg/<language>/Person.msbt.zst, after MPID_Leda:
 // Katarina, who is in its pool, has a name ID (MPID_Katarina) but no text in any language; the second Eshmel ([fefw] randomize_eshmel)
-// has a name ID of its own, MPID_Kasumi (as Persona 5 Royal spells her: かすみ, 카스미, 霞). A name starts with the control tags
-// MPID_Leda's text starts with (Spanish and Italian names begin with one).
+// has two name IDs of its own: MPID_Eshmel for a random draw, whose text is a copy of the file's own MPID_Ishmal (the vanilla "Eshmel",
+// イシュマール, 伊修玛尔 / 伊修瑪爾...; MPID_Ishmal itself shows the player's custom name in game), and MPID_Kasumi for the hooded easter egg
+// (as Persona 5 Royal spells her: かすみ, 카스미, 霞). A name starts with the control tags MPID_Leda's text starts with (Spanish and Italian
+// names begin with one); a copied name is the source's text as it is, tags and all.
 #include "ObeliskChamber_game.h"
 
 #include <zstd.h>
@@ -39,16 +41,18 @@ struct Msg {
     const char* zh;
     const char* ja = nullptr;   // nullptr: the English text
     const char* ko = nullptr;
+    const char* copy = nullptr; // a label whose text, in the same file, is copied as it is (the text above when the file has none)
     const char* text(Lang l) const { return l == Lang::Zh ? zh : l == Lang::Ja && ja ? ja : l == Lang::Ko && ko ? ko : en; }
 };
 const Msg kMsgs[] = {
     {kQuitMid, "Quit the game?\nProgress since your last save will be lost.", "要退出游戏吗？\n上次存档之后的进度将会丢失。"},
 };
 // The randomizer's names (msg_names_install): Katarina is in its pool, and has a name ID but no text in any language; the second
-// Eshmel's name ID is new
+// Eshmel's name IDs are new (randomize_units.py KASUMI_MPID / ESHMEL_MPID: Kasumi for the hooded easter egg, Eshmel otherwise)
 const Msg kNames[] = {
     {"MPID_Katarina", "Katarina", "卡塔琳娜", "カタリナ", "카타리나"},
     {"MPID_Kasumi", "Kasumi", "霞", "かすみ", "카스미"},
+    {"MPID_Eshmel", "Eshmel", "Eshmel", nullptr, nullptr, "MPID_Ishmal"},
 };
 
 // One kind of edit: messages added after an anchor label (whose attributes and style they copy) in the files its match names
@@ -135,7 +139,9 @@ uint32_t label_hash(const std::string& s, uint32_t slots) {
 struct Section { char magic[5] = {}; size_t at = 0, size = 0; };   // at: the data (after the 16-byte section header)
 
 // The file with our messages added, or empty when it is not one to change (no anchor, ours already there, or a layout not handled).
-std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, Lang lang, const Job& job, std::string* why, std::string* notes = nullptr) {
+// warn: a copied name whose source the file does not have (its fallback text used instead).
+std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, Lang lang, const Job& job, std::string* why, std::string* notes = nullptr,
+                                  std::string* warn = nullptr) {
     if (n < 0x20 || std::memcmp(p, "MsgStdBn", 8) != 0) { *why = "not an MSBT file"; return {}; }
     Rd r{p, n, p[8] == 0xfe && p[9] == 0xff};
     const int enc = p[0x0c];
@@ -183,10 +189,13 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, Lang lang, const J
     const uint32_t msgs = r.u32(txt->at);
     if (!r.ok || slots == 0 || msgs == 0) return {};   // not a file we can read: left alone (the dialogs' file is checked below)
     int anchor = -1;
+    std::vector<int> copy_of(job.count, -1);   // the index of each copied name's source
     for (const Label& l : labels) {
         if (l.name == job.anchor) anchor = static_cast<int>(l.index);
-        for (uint32_t i = 0; i < job.count; ++i)
+        for (uint32_t i = 0; i < job.count; ++i) {
             if (l.name == job.msgs[i].label) { *why = "ours already there"; return {}; }
+            if (job.msgs[i].copy && l.name == job.msgs[i].copy && l.index < msgs) copy_of[i] = static_cast<int>(l.index);
+        }
     }
     if (anchor < 0) return {};   // not the file with the anchor: nothing to say
     if (hash_other) { *why = "the label table uses another hash"; return {}; }
@@ -321,6 +330,23 @@ std::vector<uint8_t> add_messages(const uint8_t* p, size_t n, Lang lang, const J
             d.b.insert(d.b.end(), p + s.at + 4 + size_t(msgs) * 4, p + s.at + s.size);
             for (uint32_t i = 0; i < add; ++i) {
                 d.put_u32(offs_at + i * 4, static_cast<uint32_t>(d.b.size()));
+                if (copy_of[i] >= 0) {
+                    // the source's text, up to the next text in the section (texts follow one another; the last ends the section)
+                    const uint32_t a = r.u32(s.at + 4 + size_t(copy_of[i]) * 4);
+                    uint32_t z = static_cast<uint32_t>(s.size);
+                    for (uint32_t k = 0; k < msgs; ++k) {
+                        const uint32_t o = r.u32(s.at + 4 + size_t(k) * 4);
+                        if (o > a && o < z) z = o;
+                    }
+                    if (a >= 4 + msgs * 4 && a < z && z <= s.size) {
+                        d.b.insert(d.b.end(), p + s.at + a, p + s.at + z);
+                        if (notes) *notes += std::string(" ") + job.msgs[i].label + ": " + job.msgs[i].copy + "'s text copied;";
+                        continue;
+                    }
+                }
+                if (job.msgs[i].copy && warn)
+                    *warn += std::string(warn->empty() ? "" : ", ") + job.msgs[i].label + " (no " + job.msgs[i].copy + ": \"" +
+                             job.msgs[i].text(lang) + "\" used)";
                 d.b.insert(d.b.end(), lead.begin(), lead.end());
                 put_text(d, enc, job.msgs[i].text(lang));
             }
@@ -405,8 +431,8 @@ void edit_msbt(const NxModFile* f, void* user) {
     }
     const uint8_t* src = zst ? plain.data() : f->data;
     const size_t src_n = zst ? plain.size() : static_cast<size_t>(f->size);
-    std::string notes;
-    std::vector<uint8_t> out = add_messages(src, src_n, lang, job, &why, &notes);
+    std::string notes, warn;
+    std::vector<uint8_t> out = add_messages(src, src_n, lang, job, &why, &notes, &warn);
     if (out.empty()) {
         if (!why.empty() && why != "not an MSBT file") {
             job.skipped.fetch_add(1);
@@ -425,6 +451,7 @@ void edit_msbt(const NxModFile* f, void* user) {
         out.swap(comp);
     }
     f->replace(f, out.data(), out.size());
+    if (!warn.empty()) NXLOG_W(kTag, "%s: %s", path.c_str(), warn.c_str());
     if (job.files.fetch_add(1) == 0)
         NXLOG_I(kTag, "%s: %s added (%llu -> %zu bytes; other sections:%s); the other languages' files get them too", path.c_str(), job.what,
                 static_cast<unsigned long long>(f->size), out.size(), notes.empty() ? " none" : notes.c_str());
@@ -438,7 +465,7 @@ void msg_install() {
 
 void msg_names_install() {
     if (!services::modapi::add_runtime_edit("randomizer", &match_person, &edit_msbt, &g_names))
-        NXLOG_W(kTag, "too late to add the randomizer's names: Katarina and Kasumi have none");
+        NXLOG_W(kTag, "too late to add the randomizer's names: Katarina and the second Eshmel have none");
 }
 
 bool msg_ready() { return g_system.files.load() > 0; }

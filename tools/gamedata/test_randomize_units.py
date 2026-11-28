@@ -756,6 +756,18 @@ class TestKasumi(unittest.TestCase):
         self.assertTrue(all(ru.draw_kasumi(s, hood=True).describe() == self.EGG.describe() for s in range(20)))
         self.assertEqual((self.LOOK.gender(), self.EGG.gender()), (1, 2))
 
+    def test_name(self):
+        # a random draw is named Eshmel (each language's vanilla text, copied at run time); only the hooded easter egg is Kasumi
+        self.assertEqual((self.LOOK.mpid(), self.EGG.mpid()), ("MPID_Eshmel", "MPID_Kasumi"))
+        self.assertEqual(ru.kasumi_character(self.LOOK).label(), "Ksm(Eshmel)")
+        self.assertEqual(ru.kasumi_character(self.EGG).label(), "Ksm(Kasumi)")
+        self.assertEqual(ru.kasumi_line(self.LOOK), "randomizer: second Eshmel Ksm(Eshmel): 男 頭部C 身体E 肌色7 髪色12")
+        self.assertEqual(ru.kasumi_line(self.EGG), "randomizer: second Eshmel Ksm(Kasumi): 女 頭部B 身体B 肌色2 髪色3 フード")
+        for name in ("Ksm", "kasumi", "MPID_Kasumi"):                                         # whatever the draw is named
+            self.assertTrue(ru.is_kasumi_name(name))
+        for name in ("Eshmel", "MPID_Eshmel", "Ism"):                                         # not the player's Eshmel's names
+            self.assertFalse(ru.is_kasumi_name(name))
+
     def test_alternatives(self):
         alts = [["AID_イシュマール", "男"], ["AID_イシュマール", "女"], ["AID_イシュマール", "男", "頭部C"], ["AID_イシュマール", "男", "頭部A"],
                 ["JID_闘士", "男", "AID_イシュマール", "頭部C", "3部"], ["AID_イシュマール", "髪色12", "Spine"], ["AID_イシュマール", "髪色1"],
@@ -789,23 +801,26 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual(warn, ["randomize_force: Ksm=Kai: no character named Ksm"])           # it has no slot
         self.assertEqual(ru.make_mapping(p, 1, pool, ru.parse_force("Lin=Ksm")[0])[1],
                          ["randomize_force: Lin=Ksm: no character named Ksm"])                 # off: no such character
-        self.assertEqual(ru.mapping_lines(1, [(m[0][0], k)])[1], "randomizer:   Lin(Lindo) -> Ksm(Kasumi)")
+        self.assertEqual(ru.mapping_lines(1, [(m[0][0], k)])[1], "randomizer:   Lin(Lindo) -> Ksm(Eshmel)")
+        egg = ru.kasumi_character(self.EGG)
+        self.assertEqual(ru.mapping_lines(1, [(m[0][0], egg)])[1], "randomizer:   Lin(Lindo) -> Ksm(Kasumi)")
 
     def test_person(self):
         data = person(ROWS)
-        p = ru.Person(data)
-        k = ru.kasumi_character(self.EGG)
-        out, changed, _ = ru.apply(data, [(p.find("Lin"), k), (p.find("Kai"), p.find("Tro"))])
-        t = TestApply()
-        rows = lambda _, d, key: TestApply.rec(t, d, key)  # noqa: E731
-        self.assertEqual({x: rows(t, out, "PID_リンド").get(x) for x in ("名前", "アセットフラグ", "性別")},
-                         {"名前": "MPID_Kasumi", "アセットフラグ": "AID_カスミ", "性別": 2})
-        story = rows(t, out, "PID_SC00_05_リンド")
-        self.assertEqual((story["名前"], story["アセット流用"], story["性別"]), ("MPID_Kasumi", "PID_リンド", 2))
-        self.assertEqual(rows(t, out, "PID_カイ")["アセットフラグ"], "AID_トロイア")
-        self.assertEqual(rows(t, out, "PID_トロイア")["アセットフラグ"], "AID_トロイア")       # untouched
-        self.assertEqual(len(out), len(data) + len("MPID_Kasumi\0AID_カスミ\0".encode("utf-8")))   # only the two strings
-        self.assertEqual(ru.Person(out).find("Lin").aid, "AID_カスミ")
+        for look, mpid, gender in ((self.EGG, "MPID_Kasumi", 2), (self.LOOK, "MPID_Eshmel", 1)):
+            p = ru.Person(data)
+            k = ru.kasumi_character(look)
+            out, changed, _ = ru.apply(data, [(p.find("Lin"), k), (p.find("Kai"), p.find("Tro"))])
+            t = TestApply()
+            rows = lambda _, d, key: TestApply.rec(t, d, key)  # noqa: E731
+            self.assertEqual({x: rows(t, out, "PID_リンド").get(x) for x in ("名前", "アセットフラグ", "性別")},
+                             {"名前": mpid, "アセットフラグ": "AID_カスミ", "性別": gender})
+            story = rows(t, out, "PID_SC00_05_リンド")
+            self.assertEqual((story["名前"], story["アセット流用"], story["性別"]), (mpid, "PID_リンド", gender))
+            self.assertEqual(rows(t, out, "PID_カイ")["アセットフラグ"], "AID_トロイア")
+            self.assertEqual(rows(t, out, "PID_トロイア")["アセットフラグ"], "AID_トロイア")       # untouched
+            self.assertEqual(len(out), len(data) + len((mpid + "\0AID_カスミ\0").encode("utf-8")))   # only the two strings
+            self.assertEqual(ru.Person(out).find("Lin").aid, "AID_カスミ")
 
     ENTRIES = [
         ("e0", [["AID_ブレザ", "SID_冥界兵"]], "ブレザ冥闘士", ["SID_冥界兵"]),                        # the template
