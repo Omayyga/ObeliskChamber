@@ -31,10 +31,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <random>
-#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -238,12 +236,6 @@ constexpr const char* kClipEndSuffix = "_Clipping_End";
 const char* const kRigFiles[] = {"atlas.zst", "bntx.zst", "skel.zst", "spdb"};
 constexpr uint8_t kAtlasKey[8] = {0x2d, 0x7a, 0x77, 0x7e, 0x3f, 0x50, 0x21, 0x60};   // an atlas's XOR key, first bytes
 const char* const kTintSlots[] = {"_Skin", "_Lip", "_Hair"};                         // the game's order: skin, lip, hair
-// Its colours there (randomize_units.py UNDERWORLD_GREY): the Underworld effect sets every slot's colour to one lavender grey but for Render,
-// the army colour slots and the iris slots, which keep their own setup colour; it finds the iris by slot name, any case (kEyeTags). In the
-// Underworld rig the _Skin, _Lip, _Hair slots the default skin and the portrait's skin use take iris names, each different (the game keeps
-// each slot's render data by name), and their colour times the grey.
-constexpr uint8_t kUnderworldGrey[3] = {0x8C, 0x84, 0x9A};
-const char* const kEyeTags[] = {"00_eye_l", "00_eye_r", "00_eye"};
 
 struct KasumiLook {
     std::string sex;         // 男 or 女
@@ -260,8 +252,6 @@ struct KasumiLook {
     std::string portrait() const { return std::string(kEshmel) + sex + head + (hood ? kHoodWord : ""); }   // the entry its own copies
     std::string voice() const { return std::string("Ism0") + (sex == kMale ? "M" : "F"); }
     std::string rig() const { return sex == kMale ? "015" : "016"; }
-    // the skin of the rig its portrait shows: the Eshmel entry's face is <rig>_<head>HoodOff, or HoodOn with the hood
-    std::string face_skin() const { return std::string(1, head) + (hood ? "HoodOn" : "HoodOff"); }
     std::string describe() const {
         return sex + " " + kHead + head + " " + kBody + body + " " + kSkin + std::to_string(skin) + " " + kHair + std::to_string(hair) +
                (hood ? std::string(" ") + kHoodWord : std::string());
@@ -1592,198 +1582,8 @@ std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& 
     return found;
 }
 
-// randomize_units.py _skel_skins(): a Spine 4.1 binary skeleton's slots (name, start, end of its string) and, for each skin ("default" for
-// the default one), the slot indices it has attachments for; false when the file does not read to the end of its skins.
-struct SkelSlotSpan {
-    std::string name;
-    size_t start, end;
-};
-bool skel_skins(const std::vector<uint8_t>& d, std::vector<SkelSlotSpan>* slots, std::map<std::string, std::set<uint32_t>>* skins) {
-    size_t p = 0;
-    bool ok = true;
-    auto take = [&](size_t n) {
-        if (!ok || n > d.size() - p) ok = false;
-        else p += n;
-    };
-    auto byte = [&]() {
-        if (!ok || p >= d.size()) {
-            ok = false;
-            return 0;
-        }
-        return int(d[p++]);
-    };
-    auto varint = [&]() {
-        uint32_t v = 0;
-        for (int shift = 0; ok; shift += 7) {
-            const int b = byte();
-            v |= uint32_t(b & 0x7F) << shift;
-            if (!(b & 0x80) || shift >= 28) break;
-        }
-        return v;
-    };
-    auto string = [&]() {
-        const uint32_t n = varint();
-        if (!ok || n <= 1) return std::string();
-        const size_t at = p;
-        take(n - 1);
-        return ok ? std::string(reinterpret_cast<const char*>(d.data() + at), n - 1) : std::string();
-    };
-    std::vector<std::string> strings;
-    auto ref = [&]() {
-        const uint32_t n = varint();
-        if (ok && n > strings.size()) ok = false;
-        return ok && n ? strings[n - 1] : std::string();
-    };
-    take(8);
-    if (string().rfind("4.1.", 0) != 0 || !ok) return false;
-    take(16);
-    const bool nonessential = byte() != 0;
-    if (nonessential) {
-        take(4);
-        string();
-        string();
-    }
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) strings.push_back(string());
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {   // bones
-        string();
-        if (i) varint();
-        take(32);
-        varint();
-        take(1);
-        if (nonessential) take(4);
-    }
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
-        const size_t at = p;
-        std::string name = string();
-        slots->push_back({std::move(name), at, p});
-        varint();
-        take(8);
-        varint();
-        varint();
-    }
-    auto constraint = [&](int varints, size_t bytes) {   // name, order, skin required, bones, then varints and bytes
-        string();
-        varint();
-        take(1);
-        for (uint32_t i = 0, n = varint(); ok && i < n; ++i) varint();
-        for (int i = 0; i < varints; ++i) varint();
-        take(bytes);
-    };
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) constraint(1, 12);   // ik: target, mix, softness, 4 flags
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) constraint(1, 50);   // transform: target, local, relative, 12 floats
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) constraint(4, 24);   // path: target, 3 modes, 6 floats
-    auto vertices = [&](uint32_t n) {
-        if (byte()) {
-            for (uint32_t v = 0; ok && v < n; ++v)
-                for (uint32_t b = 0, bones = varint(); ok && b < bones; ++b) {
-                    varint();
-                    take(12);
-                }
-        } else {
-            take(8ull * n);
-        }
-    };
-    auto sequence = [&]() {
-        if (byte())
-            for (int i = 0; i < 4; ++i) varint();
-    };
-    const size_t ne = nonessential ? 4 : 0;
-    auto skin = [&](const std::string& name) {
-        std::set<uint32_t>& used = (*skins)[name];
-        for (uint32_t g = 0, groups = varint(); ok && g < groups; ++g) {
-            const uint32_t k = varint();
-            if (k >= slots->size()) ok = false;
-            used.insert(k);
-            for (uint32_t a = 0, n = varint(); ok && a < n; ++a) {
-                ref();
-                ref();
-                switch (byte()) {
-                    case 0:   // region: path, rotation, x, y, scale x, y, width, height, colour, sequence
-                        ref();
-                        take(32);
-                        sequence();
-                        break;
-                    case 1:   // bounding box
-                        vertices(varint());
-                        take(ne);
-                        break;
-                    case 2: {   // mesh
-                        ref();
-                        take(4);
-                        const uint32_t vc = varint();
-                        take(8ull * vc);
-                        take(2ull * varint());
-                        vertices(vc);
-                        varint();
-                        sequence();
-                        if (nonessential) {
-                            take(2ull * varint());
-                            take(8);
-                        }
-                        break;
-                    }
-                    case 3:   // linked mesh: path, colour, skin, parent, timelines, sequence
-                        ref();
-                        take(4);
-                        ref();
-                        ref();
-                        take(1);
-                        sequence();
-                        take(nonessential ? 8 : 0);
-                        break;
-                    case 4: {   // path
-                        take(2);
-                        const uint32_t vc = varint();
-                        vertices(vc);
-                        take(4ull * (vc / 3));
-                        take(ne);
-                        break;
-                    }
-                    case 5:   // point
-                        take(12 + ne);
-                        break;
-                    case 6:   // clipping: end slot, vertices
-                        varint();
-                        vertices(varint());
-                        take(ne);
-                        break;
-                    default:
-                        ok = false;
-                }
-            }
-        }
-    };
-    skin("default");
-    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
-        const std::string name = ref();
-        for (int list = 0; ok && list < 4; ++list)   // its bones and constraints
-            for (uint32_t j = 0, m = varint(); ok && j < m; ++j) varint();
-        skin(name);
-    }
-    return ok;
-}
-
-// randomize_units.py iris_names(): every slot name the Underworld effect takes for an iris (kEyeTags, in any case) but those in taken, in a
-// fixed order: each tag, its letters' cases counting up from all lower case (the first letter the lowest bit)
-std::vector<std::string> iris_names(const std::set<std::string>& taken) {
-    std::vector<std::string> out;
-    for (const char* tag : kEyeTags) {
-        const std::string t = tag;
-        std::vector<size_t> letters;
-        for (size_t i = 0; i < t.size(); ++i)
-            if (t[i] >= 'a' && t[i] <= 'z') letters.push_back(i);
-        for (uint32_t mask = 0; mask < (1u << letters.size()); ++mask) {
-            std::string name = t;
-            for (size_t bit = 0; bit < letters.size(); ++bit)
-                if (mask >> bit & 1) name[letters[bit]] = static_cast<char>(name[letters[bit]] - 32);
-            if (!taken.count(name)) out.push_back(name);
-        }
-    }
-    return out;
-}
-
 std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<uint8_t>& d, const std::string& src, const std::string& dst,
-                                     bool unclip, const std::string& face_skin, std::string* note) {
+                                     bool unclip, std::string* note) {
     std::vector<uint8_t> out = d;
     auto count = [](const std::vector<uint8_t>& hay, const std::string& needle, size_t* first) {
         size_t n = 0;
@@ -1854,48 +1654,12 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
         };
         *note = "slots coloured: skin " + std::to_string(counts[0]) + " (" + hex(g_kasumi_colours[0]) + "), lip " + std::to_string(counts[1]) +
                 " (" + hex(g_kasumi_colours[1]) + "), hair " + std::to_string(counts[2]) + " (" + hex(g_kasumi_colours[2]) + ")";
-        struct Edit {
-            size_t start, end;
-            std::vector<uint8_t> with;
-        };
-        std::vector<Edit> edits;   // on the file as it is
-        if (!face_skin.empty()) {   // the Underworld colours: the tinted slots the default skin and face_skin use take iris names
-            std::vector<SkelSlotSpan> spans;
-            std::map<std::string, std::set<uint32_t>> skins;
-            if (!skel_skins(d, &spans, &skins) || !skins.count(face_skin) || spans.size() != slots.size()) {
-                *note += "; Underworld colours: no skin " + face_skin;
-            } else {
-                std::set<uint32_t> used = skins[face_skin];
-                used.insert(skins["default"].begin(), skins["default"].end());
-                std::set<std::string> taken;
-                for (const SkelSlotSpan& s : spans) taken.insert(s.name);
-                const std::vector<std::string> names = iris_names(taken);
-                size_t renamed = 0, left = 0;
-                for (uint32_t k = 0; k < spans.size(); ++k) {
-                    const std::string& name = spans[k].name;
-                    if (!used.count(k) || std::none_of(std::begin(kTintSlots), std::end(kTintSlots), [&](const char* t) { return ends_with(name, t); }))
-                        continue;
-                    if (renamed == names.size()) {
-                        ++left;
-                        continue;
-                    }
-                    const size_t at = slots[k].second;
-                    for (int i = 0; i < 3; ++i) out[at + i] = static_cast<uint8_t>((out[at + i] * kUnderworldGrey[i] + 127) / 255);
-                    std::vector<uint8_t> with;
-                    for (uint32_t n = static_cast<uint32_t>(names[renamed].size()) + 1;; n >>= 7) {   // the string: its length + 1, the bytes
-                        with.push_back(static_cast<uint8_t>((n & 0x7F) | (n > 0x7F ? 0x80 : 0)));
-                        if (n <= 0x7F) break;
-                    }
-                    with.insert(with.end(), names[renamed].begin(), names[renamed].end());
-                    edits.push_back({spans[k].start, spans[k].end, std::move(with)});
-                    ++renamed;
-                }
-                *note += "; Underworld colours: " + std::to_string(renamed) + " slots of " + face_skin + " renamed " +
-                         (renamed ? names[0] : "-") + ".." + (renamed ? names[renamed - 1] : "-") +
-                         (left ? " (" + std::to_string(left) + " left: no name free)" : "");
-            }
-        }
         if (unclip) {
+            struct Edit {
+                size_t start, end;
+                std::vector<uint8_t> with;
+            };
+            std::vector<Edit> edits;   // on the file as it is
             std::string list;
             for (const auto& [name, at] : slots) {
                 if (!ends_with_clip(name) && !ends_with(name, kClipEndSuffix)) continue;
@@ -1911,13 +1675,13 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
                 edits.push_back({count_at, count_at + 1, {0}});
                 edits.push_back({at, end, {}});
             }
+            std::sort(edits.begin(), edits.end(), [](const Edit& x, const Edit& y) { return x.start > y.start; });
+            for (const Edit& e : edits) {
+                out.erase(out.begin() + static_cast<std::ptrdiff_t>(e.start), out.begin() + static_cast<std::ptrdiff_t>(e.end));
+                out.insert(out.begin() + static_cast<std::ptrdiff_t>(e.start), e.with.begin(), e.with.end());
+            }
             *note += "; clipping off: " + (list.empty() ? std::string("none") : list) + " (" + std::to_string(entries.size()) +
                      " skin attachments removed)";
-        }
-        std::sort(edits.begin(), edits.end(), [](const Edit& x, const Edit& y) { return x.start > y.start; });
-        for (const Edit& e : edits) {
-            out.erase(out.begin() + static_cast<std::ptrdiff_t>(e.start), out.begin() + static_cast<std::ptrdiff_t>(e.end));
-            out.insert(out.begin() + static_cast<std::ptrdiff_t>(e.start), e.with.begin(), e.with.end());
         }
         return out;
     }
@@ -1966,8 +1730,7 @@ void edit_kasumi_rig(const NxModFile* file, void*) {
     if (kind == "skel.zst" && !g_kasumi_coloured)
         NXLOG_W(kTag, "randomizer: %s: edited before AssetTable.bin, so without the colours", file->path);
     std::string note;
-    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), dst, dst == kKasumiFaceUw,
-                                               dst == kKasumiFaceUw ? g_kasumi.face_skin() : std::string(), &note);
+    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), dst, dst == kKasumiFaceUw, &note);
     NXLOG_I(kTag, "randomizer: UI/Face/%s/%s.%s: from %s: %s", dst.c_str(), dst.c_str(), kind.c_str(), g_kasumi.rig().c_str(), note.c_str());
     if (out.empty()) return;
     if (zst) {
