@@ -27,13 +27,18 @@
 #include <array>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <optional>
 #include <random>
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -225,16 +230,18 @@ constexpr uint64_t kKasumiSalt = 0x4B4153554D49ull;                             
 // UI/Face/900 (add_runtime_copy) with her colours written into those slots, and portrait entries FID_カスミ, FID_カスミ冥闘士 using it.
 constexpr const char* kKasumiLook = "\xe3\x82\xab\xe3\x82\xb9\xe3\x83\x9f";                                 // カスミ
 constexpr const char* kKasumiFace = "900";
-// The Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/901: the same, with its clipping switched off (only Eshmel's
-// rigs clip, the game never draws them with an effect, and the Underworld effect draws a clipped head as one lavender blob): every slot
-// named ..._Clipping starts with no attachment.
+// The Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/901: her colours baked into its texture, the tinted slots white.
+// Only Eshmel's rigs clip (Hood_Clipping clips the head to the hood), and the game never draws them with an effect.
 constexpr const char* kKasumiFaceUw = "901";
 constexpr const char* kClipSlotSuffix = "_Clipping";
 // Each clip ends at a slot ..._Clipping_End showing a 1600 x 1600 quad (Clipping_End) with alpha 0; the Underworld effect draws every slot
-// opaque but Render, so that quad covers the head. In the Underworld rig the end markers go too.
+// opaque but Render, so that quad covers the head. In the Underworld rig its vertices sit at one point (it draws nothing); the clipping
+// stays (without it the hair shows through the hood) and still ends at that slot.
 constexpr const char* kClipEndSuffix = "_Clipping_End";
 const char* const kRigFiles[] = {"atlas.zst", "bntx.zst", "skel.zst", "spdb"};
-constexpr uint8_t kAtlasKey[8] = {0x2d, 0x7a, 0x77, 0x7e, 0x3f, 0x50, 0x21, 0x60};   // an atlas's XOR key, first bytes
+constexpr uint8_t kAtlasKey[32] = {0x2d, 0x7a, 0x77, 0x7e, 0x3f, 0x50, 0x21, 0x60, 0x39, 0x3a, 0x51, 0x5c, 0x7d, 0x37, 0x3b, 0x2c,
+                                   0x24, 0x35, 0x49, 0x7a, 0x64, 0x5a, 0x70, 0x5e, 0x76, 0x34, 0x69, 0x69, 0x31, 0x5c, 0x27, 0x24};   // repeating
+constexpr uint32_t kBc7Unorm = 0x2001;   // nn::gfx ImageFormat of the portrait textures
 const char* const kTintSlots[] = {"_Skin", "_Lip", "_Hair"};                         // the game's order: skin, lip, hair
 
 struct KasumiLook {
@@ -252,6 +259,8 @@ struct KasumiLook {
     std::string portrait() const { return std::string(kEshmel) + sex + head + (hood ? kHoodWord : ""); }   // the entry its own copies
     std::string voice() const { return std::string("Ism0") + (sex == kMale ? "M" : "F"); }
     std::string rig() const { return sex == kMale ? "015" : "016"; }
+    // the skin of the rig its portrait shows: the Eshmel entry's face is <rig>_<head>HoodOff, or HoodOn with the hood
+    std::string face_skin() const { return std::string(1, head) + (hood ? "HoodOn" : "HoodOff"); }
     std::string describe() const {
         return sex + " " + kHead + head + " " + kBody + body + " " + kSkin + std::to_string(skin) + " " + kHair + std::to_string(hair) +
                (hood ? std::string(" ") + kHoodWord : std::string());
@@ -291,6 +300,7 @@ KasumiLook g_kasumi;
 // Its portrait colours [skin, lip, hair] (RGBA, 4 bytes; empty: none), read by edit_assets for its rig's skeleton (a later late edit)
 std::string g_kasumi_colours[3];
 bool g_kasumi_coloured = false;
+std::vector<uint8_t> g_kasumi_uw_atlas, g_kasumi_uw_skel;   // UI/Face/901's atlas and skeleton as copied (decompressed), for its texture
 // The mapping by asset key (AID_リンド -> AID_ソレル), made by edit_person for edit_assets (randomize_units.py asset_swaps). Both run on
 // the thread that builds the RomFS image, Person.bin first (edit_assets is a late edit).
 std::unordered_map<std::string, std::string> g_swaps;
@@ -1582,8 +1592,552 @@ std::vector<std::array<size_t, 3>> clipping_entries(const std::vector<uint8_t>& 
     return found;
 }
 
+// ---- the Underworld rig's texture: her colours baked in (randomize_units.py bake_texture) ----------------------------------------------
+// The Underworld effect sets every slot's colour to one lavender grey, so in UI/Face/901 the 4x4 BC7 blocks the _Skin, _Lip, _Hair meshes
+// of the portrait's skins draw get their endpoint colours times hers, and those slots are white. The atlas packs by polygon, so the pixels
+// are the ones the mesh triangles cover, mapped through the atlas as Spine 4.1 maps them.
+
+struct AtlasRegion {
+    int64_t x = 0, y = 0, w = 0, h = 0, ox = 0, oy = 0, ow = 0, oh = 0, deg = 0;
+};
+
+// randomize_units.py atlas_regions(): the page's size and its regions (width, height unrotated); false when it is not one page of text.
+// A region named twice is left out.
+bool atlas_regions(const std::vector<uint8_t>& d, int64_t* width, int64_t* height, std::map<std::string, AtlasRegion>* out) {
+    std::string text(d.size(), '\0');
+    for (size_t i = 0; i < d.size(); ++i) {
+        text[i] = static_cast<char>(d[i] ^ kAtlasKey[i % sizeof kAtlasKey]);
+        if (static_cast<uint8_t>(text[i]) >= 0x80) return false;
+    }
+    auto strip = [](const std::string& s) {
+        const char* ws = " \t\n\r\x0b\x0c\x1c\x1d\x1e\x1f";
+        const size_t a = s.find_first_not_of(ws);
+        if (a == std::string::npos) return std::string();
+        return s.substr(a, s.find_last_not_of(ws) - a + 1);
+    };
+    auto to_int = [](const std::string& s, int64_t* v) {   // Python int(): optional sign, digits (spaces already stripped)
+        size_t i = (!s.empty() && (s[0] == '-' || s[0] == '+')) ? 1 : 0;
+        if (i >= s.size() || s.size() - i > 15) return false;
+        int64_t n = 0;
+        for (size_t j = i; j < s.size(); ++j) {
+            if (s[j] < '0' || s[j] > '9') return false;
+            n = n * 10 + (s[j] - '0');
+        }
+        *v = s[0] == '-' ? -n : n;
+        return true;
+    };
+    std::vector<std::string> lines;
+    for (size_t a = 0;;) {
+        const size_t b = text.find('\n', a);
+        lines.push_back(text.substr(a, b == std::string::npos ? std::string::npos : b - a));
+        if (b == std::string::npos) break;
+        a = b + 1;
+    }
+    struct Raw {
+        std::array<int64_t, 9> v{};
+        std::array<bool, 8> set{};
+    };
+    std::map<std::string, Raw> regions;
+    std::set<std::string> twice;
+    Raw* cur = nullptr;
+    bool gap = false, have_size = false;
+    for (size_t li = 1; li < lines.size(); ++li) {
+        const std::string line = strip(lines[li]);
+        if (line.empty()) {
+            gap = cur != nullptr;
+            continue;
+        }
+        if (gap) return false;   // a second page
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) {
+            if (regions.count(line)) twice.insert(line);
+            cur = &(regions[line] = Raw());
+            continue;
+        }
+        const std::string key = line.substr(0, colon), value = line.substr(colon + 1);
+        std::vector<std::string> values;
+        for (size_t a = 0;;) {
+            const size_t b = value.find(',', a);
+            values.push_back(strip(value.substr(a, b == std::string::npos ? std::string::npos : b - a)));
+            if (b == std::string::npos) break;
+            a = b + 1;
+        }
+        if (!cur) {
+            if (key == "size") {
+                if (values.size() != 2 || !to_int(values[0], width) || !to_int(values[1], height)) return false;
+                have_size = true;
+            }
+        } else if (key == "bounds" || key == "offsets") {
+            if (values.size() != 4) return false;
+            const size_t at = key == "bounds" ? 0 : 4;
+            for (size_t i = 0; i < 4; ++i) {
+                if (!to_int(values[i], &cur->v[at + i])) return false;
+                cur->set[at + i] = true;
+            }
+        } else if (key == "rotate") {
+            const std::string v = strip(value);
+            if (v == "true") cur->v[8] = 90;
+            else if (v == "false") cur->v[8] = 0;
+            else if (!to_int(v, &cur->v[8])) return false;
+        }
+    }
+    if (!have_size) return false;
+    for (auto& [name, r] : regions) {
+        const int64_t deg = r.v[8];
+        if (twice.count(name) || !r.set[0] || !r.set[1] || !r.set[2] || !r.set[3] || (deg != 0 && deg != 90 && deg != 180 && deg != 270))
+            continue;
+        if (!r.set[4]) r.v[4] = 0, r.v[5] = 0, r.v[6] = r.v[2], r.v[7] = r.v[3];
+        (*out)[name] = {r.v[0], r.v[1], r.v[2], r.v[3], r.v[4], r.v[5], r.v[6], r.v[7], deg};
+    }
+    return true;
+}
+
+struct SkelMesh {
+    int kind = 3;   // the index of the slot's kTintSlots suffix, or 3
+    std::string region;
+    std::vector<float> uvs;
+    std::vector<uint16_t> tris;
+};
+
+// randomize_units.py _skel_meshes(): the meshes and linked meshes of the skins named in skins (all when null; a linked mesh with its
+// parent's, from the skin it names or the default one, any skin); one with a sequence is left out; false when the file does not read.
+bool skel_meshes(const std::vector<uint8_t>& d, const std::vector<std::string>* skins, std::vector<SkelMesh>* out) {
+    size_t p = 0;
+    bool ok = true;
+    auto take = [&](size_t n) {
+        if (!ok || n > d.size() - p) ok = false;
+        else p += n;
+        return ok ? d.data() + p - n : nullptr;
+    };
+    auto byte = [&]() {
+        const uint8_t* b = take(1);
+        return b ? int(*b) : 0;
+    };
+    auto varint = [&]() {
+        uint32_t v = 0;
+        for (int shift = 0; ok; shift += 7) {
+            const int b = byte();
+            v |= uint32_t(b & 0x7F) << shift;
+            if (!(b & 0x80) || shift >= 28) break;
+        }
+        return v;
+    };
+    using Opt = std::optional<std::string>;
+    auto string = [&]() -> Opt {
+        const uint32_t n = varint();
+        if (!ok || n == 0) return std::nullopt;
+        const uint8_t* s = take(n - 1);
+        return s ? Opt(std::string(reinterpret_cast<const char*>(s), n - 1)) : std::nullopt;
+    };
+    std::vector<Opt> strings;
+    auto ref = [&]() -> Opt {
+        const uint32_t n = varint();
+        if (ok && n > strings.size()) ok = false;
+        return ok && n ? strings[n - 1] : std::nullopt;
+    };
+    auto truthy = [](const Opt& s) { return s && !s->empty(); };
+    take(8);
+    const Opt version = string();
+    if (!ok || !version || version->rfind("4.1.", 0) != 0) return false;
+    take(16);
+    const bool nonessential = byte() != 0;
+    if (nonessential) {
+        take(4);
+        string();
+        string();
+    }
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) strings.push_back(string());
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {   // bones
+        string();
+        if (i) varint();
+        take(32);
+        varint();
+        take(1);
+        if (nonessential) take(4);
+    }
+    std::vector<std::string> slots;
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
+        const Opt name = string();
+        slots.push_back(name ? *name : std::string());
+        varint();
+        take(8);
+        varint();
+        varint();
+    }
+    const std::pair<int, size_t> constraints[3] = {{1, 12}, {1, 50}, {4, 24}};   // ik, transform, path constraints
+    for (const auto& [varints, size] : constraints)
+        for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
+            string();
+            varint();
+            take(1);
+            for (uint32_t j = 0, m = varint(); ok && j < m; ++j) varint();
+            for (int j = 0; j < varints; ++j) varint();
+            take(size);
+        }
+    auto vertices = [&](uint32_t n) {
+        if (byte()) {
+            for (uint32_t v = 0; ok && v < n; ++v)
+                for (uint32_t b = 0, bones = varint(); ok && b < bones; ++b) {
+                    varint();
+                    take(12);
+                }
+        } else {
+            take(8ull * n);
+        }
+    };
+    auto sequence = [&]() {
+        if (!byte()) return false;
+        for (int i = 0; i < 4; ++i) varint();
+        return true;
+    };
+    auto kind = [&](uint32_t slot) {
+        for (int k = 0; k < 3; ++k)
+            if (ends_with(slots[slot], kTintSlots[k])) return k;
+        return 3;
+    };
+    auto be32 = [](const uint8_t* b) { return uint32_t(b[0]) << 24 | uint32_t(b[1]) << 16 | uint32_t(b[2]) << 8 | b[3]; };
+    struct Mesh {
+        SkelMesh m;
+        std::string skin;
+    };
+    struct Linked {
+        int kind;
+        std::string region, of;
+        uint32_t slot;
+        Opt parent;
+        std::string skin;
+    };
+    std::vector<Mesh> meshes;   // in the order first seen (a Python dict), the key's later value replacing an earlier
+    std::map<std::tuple<std::string, uint32_t, Opt>, size_t> by_key;
+    std::vector<Linked> linked;
+    auto skin = [&](const std::string& name) {
+        for (uint32_t g = 0, groups = varint(); ok && g < groups; ++g) {
+            const uint32_t k = varint();
+            if (ok && k >= slots.size()) ok = false;
+            for (uint32_t a = 0, n = varint(); ok && a < n; ++a) {
+                const Opt key = ref();
+                const Opt nm = ref();
+                std::string region = truthy(nm) ? *nm : key ? *key : std::string();
+                const bool region_none = !truthy(nm) && !key;
+                switch (byte()) {
+                    case 0:   // region
+                        ref();
+                        take(32);
+                        sequence();
+                        break;
+                    case 1:   // bounding box
+                        vertices(varint());
+                        take(nonessential ? 4 : 0);
+                        break;
+                    case 2: {   // mesh: path, colour, uvs, triangles, vertices, hull, sequence
+                        const Opt path = ref();
+                        bool none = region_none;
+                        if (truthy(path)) region = *path, none = false;
+                        take(4);
+                        const uint32_t vc = varint();
+                        const uint8_t* uv = take(8ull * vc);
+                        SkelMesh m;
+                        m.kind = ok ? kind(k) : 3;
+                        for (uint32_t i = 0; uv && i < 2 * vc; ++i) {
+                            const uint32_t bits = be32(uv + 4 * i);
+                            float f;
+                            std::memcpy(&f, &bits, 4);
+                            m.uvs.push_back(f);
+                        }
+                        const uint32_t nt = varint();
+                        const uint8_t* tri = take(2ull * nt);
+                        for (uint32_t i = 0; tri && i < nt; ++i) m.tris.push_back(static_cast<uint16_t>(tri[2 * i] << 8 | tri[2 * i + 1]));
+                        vertices(vc);
+                        varint();
+                        if (!sequence() && ok) {
+                            m.region = none ? std::string() : region;
+                            const auto id = std::make_tuple(name, k, key);
+                            const auto at = by_key.find(id);
+                            if (at == by_key.end()) {
+                                by_key[id] = meshes.size();
+                                meshes.push_back({std::move(m), name});
+                            } else {
+                                meshes[at->second] = {std::move(m), name};
+                            }
+                        }
+                        if (nonessential) {
+                            take(2ull * varint());
+                            take(8);
+                        }
+                        break;
+                    }
+                    case 3: {   // linked mesh: path, colour, skin, parent, timelines, sequence
+                        const Opt path = ref();
+                        if (truthy(path)) region = *path;
+                        take(4);
+                        const Opt of = ref();
+                        const Opt parent = ref();
+                        take(1);
+                        if (!sequence() && ok) linked.push_back({kind(k), region, truthy(of) ? *of : "default", k, parent, name});
+                        take(nonessential ? 8 : 0);
+                        break;
+                    }
+                    case 4: {   // path
+                        take(2);
+                        const uint32_t vc = varint();
+                        vertices(vc);
+                        take(4ull * (vc / 3));
+                        take(nonessential ? 4 : 0);
+                        break;
+                    }
+                    case 5:   // point
+                        take(12 + (nonessential ? 4 : 0));
+                        break;
+                    case 6:   // clipping
+                        varint();
+                        vertices(varint());
+                        take(nonessential ? 4 : 0);
+                        break;
+                    default:
+                        ok = false;
+                }
+            }
+        }
+    };
+    skin("default");
+    for (uint32_t i = 0, n = varint(); ok && i < n; ++i) {
+        const Opt name = ref();
+        for (int list = 0; ok && list < 4; ++list)
+            for (uint32_t j = 0, m = varint(); ok && j < m; ++j) varint();
+        skin(truthy(name) ? *name : std::string());
+    }
+    if (!ok) return false;
+    auto wanted = [&](const std::string& s) { return !skins || std::find(skins->begin(), skins->end(), s) != skins->end(); };
+    for (const Mesh& m : meshes)
+        if (wanted(m.skin)) out->push_back(m.m);
+    for (const Linked& l : linked) {
+        const auto at = by_key.find(std::make_tuple(l.of, l.slot, l.parent));
+        if (at == by_key.end() || !wanted(l.skin)) continue;
+        SkelMesh m = meshes[at->second].m;
+        m.kind = l.kind;
+        m.region = l.region;
+        out->push_back(std::move(m));
+    }
+    return true;
+}
+
+int64_t floordiv(int64_t a, int64_t b) {
+    const int64_t q = a / b;
+    return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
+}
+
+// randomize_units.py _cover(): mark in maps[k] the pixels whose centres the mesh's triangles cover, inside the region's packed rectangle;
+// for a tint kind, add the 4x4 blocks touched. Positions as Spine 4.1 has them (exact in doubles), in 1/256 pixel rounded half up.
+void cover(std::vector<uint8_t> (&maps)[4], std::set<int64_t>* touched, int64_t width, int64_t height, int k, const AtlasRegion& r,
+           const SkelMesh& m) {
+    const bool turned = r.deg == 90 || r.deg == 270;
+    const int64_t pw = turned ? r.h : r.w, ph = turned ? r.w : r.h;
+    const int64_t rx0 = std::max<int64_t>(r.x, 0), ry0 = std::max<int64_t>(r.y, 0);
+    const int64_t rx1 = std::min<int64_t>(r.x + pw, width) - 1, ry1 = std::min<int64_t>(r.y + ph, height) - 1;
+    std::vector<std::pair<int64_t, int64_t>> pts;
+    for (size_t i = 0; i + 1 < m.uvs.size(); i += 2) {
+        const double u = m.uvs[i], v = m.uvs[i + 1];
+        double px, py;
+        if (r.deg == 90) {
+            const double a = v * double(r.oh), b = (1 - u) * double(r.ow);
+            px = double(r.x - (r.oh - r.oy - r.h)) + a, py = double(r.y - (r.ow - r.ox - r.w)) + b;
+        } else if (r.deg == 180) {
+            const double a = (1 - u) * double(r.ow), b = (1 - v) * double(r.oh);
+            px = double(r.x - (r.ow - r.ox - r.w)) + a, py = double(r.y - r.oy) + b;
+        } else if (r.deg == 270) {
+            const double a = (1 - v) * double(r.oh), b = u * double(r.ow);
+            px = double(r.x - r.oy) + a, py = double(r.y - r.ox) + b;
+        } else {
+            const double a = u * double(r.ow), b = v * double(r.oh);
+            px = double(r.x - r.ox) + a, py = double(r.y - (r.oh - r.oy - r.h)) + b;
+        }
+        if (!(std::fabs(px) < double(1 << 20) && std::fabs(py) < double(1 << 20))) return;   // far off the page, or not a number
+        const double sx = px * 256, sy = py * 256;
+        pts.push_back({static_cast<int64_t>(std::floor(sx + 0.5)), static_cast<int64_t>(std::floor(sy + 0.5))});
+    }
+    std::vector<uint8_t>& map = maps[k];
+    const int64_t bw = (width + 3) / 4;
+    for (size_t t = 0; t + 2 < m.tris.size(); t += 3) {
+        const size_t a = m.tris[t], b = m.tris[t + 1], c = m.tris[t + 2];
+        if (std::max({a, b, c}) >= pts.size()) continue;
+        int64_t x0 = pts[a].first, y0 = pts[a].second, x1 = pts[b].first, y1 = pts[b].second, x2 = pts[c].first, y2 = pts[c].second;
+        const int64_t area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+        if (area == 0) continue;
+        if (area < 0) std::swap(x1, x2), std::swap(y1, y2);
+        const int64_t edges[3][4] = {{x0, y0, x1, y1}, {x1, y1, x2, y2}, {x2, y2, x0, y0}};
+        const int64_t lo_y = std::max(ry0, -floordiv(128 - std::min({y0, y1, y2}), 256));
+        const int64_t hi_y = std::min(ry1, floordiv(std::max({y0, y1, y2}) - 128, 256));
+        for (int64_t row = lo_y; row <= hi_y; ++row) {
+            const int64_t yc = row * 256 + 128;
+            int64_t lo = rx0, hi = rx1;
+            for (const auto& e : edges) {   // (xb - xa)(yc - ya) - (yb - ya)(px - xa) >= 0, px = 256 x + 128
+                const int64_t xa = e[0], ya = e[1], xb = e[2], yb = e[3];
+                const int64_t den = 256 * (ya - yb);
+                const int64_t num = -((xb - xa) * (yc - ya) + (yb - ya) * xa) - 128 * (ya - yb);
+                if (den > 0) lo = std::max(lo, -floordiv(-num, den));
+                else if (den < 0) hi = std::min(hi, floordiv(num, den));
+                else if (num > 0) hi = lo - 1;
+            }
+            if (lo > hi) continue;
+            std::fill(map.begin() + row * width + lo, map.begin() + row * width + hi + 1, uint8_t(1));
+            if (k < 3)
+                for (int64_t blk = (row / 4) * bw + lo / 4; blk <= (row / 4) * bw + hi / 4; ++blk) touched->insert(blk);
+        }
+    }
+}
+
+// randomize_units.py bake_blocks(): {block index: kind} for the blocks a tint kind touches: the kind covering most of the block's pixels
+// (ties: kTintSlots order), unless the other attachments cover more
+std::map<int64_t, int> bake_blocks(int64_t width, int64_t height, const std::map<std::string, AtlasRegion>& regions,
+                                   const std::vector<SkelMesh>& meshes) {
+    std::vector<uint8_t> maps[4];
+    for (auto& m : maps) m.assign(static_cast<size_t>(width * height), 0);
+    std::set<int64_t> touched;
+    for (const SkelMesh& m : meshes) {
+        const auto r = regions.find(m.region);
+        if (r != regions.end()) cover(maps, &touched, width, height, m.kind, r->second, m);
+    }
+    const int64_t bw = (width + 3) / 4;
+    std::map<int64_t, int> out;
+    for (const int64_t blk : touched) {
+        const int64_t by = blk / bw, bx = blk % bw;
+        int64_t cnt[4] = {0, 0, 0, 0};
+        for (int k = 0; k < 4; ++k)
+            for (int64_t row = 4 * by; row < std::min(4 * by + 4, height); ++row) {
+                const int64_t s = row * width + 4 * bx, e = std::min(s + 4, (row + 1) * width);
+                cnt[k] += std::count(maps[k].begin() + s, maps[k].begin() + e, uint8_t(1));
+            }
+        int best = 0;
+        for (int k = 1; k < 3; ++k)
+            if (cnt[k] > cnt[best]) best = k;
+        if (cnt[best] && cnt[best] >= cnt[3]) out[blk] = best;
+    }
+    return out;
+}
+
+// randomize_units.py bntx_texture(): the one texture of a BNTX file; false when it is not one block-linear 2D texture with its data
+struct BntxTexture {
+    uint32_t format = 0, width = 0, height = 0, gob_y = 0;
+    uint64_t at = 0, size = 0;
+};
+bool bntx_texture(const std::vector<uint8_t>& d, BntxTexture* t) {
+    static const char brti[4] = {'B', 'R', 'T', 'I'};
+    const auto first = std::search(d.begin(), d.end(), brti, brti + 4);
+    if (first == d.end() || std::search(first + 4, d.end(), brti, brti + 4) != d.end()) return false;
+    const size_t i = static_cast<size_t>(first - d.begin());
+    if (i + 0x78 > d.size()) return false;
+    auto le = [&](size_t at, int n) {
+        uint64_t v = 0;
+        for (int b = n - 1; b >= 0; --b) v = v << 8 | d[at + b];
+        return v;
+    };
+    const uint64_t tile = le(i + 0x12, 2), mips = le(i + 0x16, 2), table = le(i + 0x70, 8);
+    t->format = static_cast<uint32_t>(le(i + 0x1C, 4));
+    t->width = static_cast<uint32_t>(le(i + 0x24, 4)), t->height = static_cast<uint32_t>(le(i + 0x28, 4));
+    t->gob_y = 1u << (le(i + 0x34, 4) & 7);
+    t->size = le(i + 0x50, 4);
+    if (tile != 0 || mips < 1 || table > d.size() || d.size() - table < 8) return false;
+    t->at = le(static_cast<size_t>(table), 8);
+    return t->at <= d.size() && t->size <= d.size() - t->at;
+}
+
+// randomize_units.py block_linear(): where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes
+uint64_t block_linear(uint64_t bx, uint64_t by, uint64_t bw, uint64_t gob_y, uint64_t bpb = 16) {
+    const uint64_t x = bx * bpb, row_gobs = (bw * bpb + 63) / 64;
+    return (by / (8 * gob_y)) * row_gobs * gob_y * 512 + (x / 64) * gob_y * 512 + ((by % (8 * gob_y)) / 8) * 512 + ((x % 64) / 32) * 256 +
+           ((by % 8) / 2) * 64 + ((x % 32) / 16) * 32 + (by % 2) * 16 + (x % 16);
+}
+
+// randomize_units.py bc7_tint(): a BC7 block with each endpoint's red, green and blue times rgb / 255 (rounded, then the nearest the mode
+// holds with the same p-bit; modes 4 and 5 with a rotation keep that channel in the alpha field); alpha, p-bits and indices kept
+void bc7_tint(uint8_t* blk, const uint8_t rgb[3]) {
+    // subsets, partition bits, rotation bits, index selection bits, colour bits, alpha bits, p-bit per endpoint, p-bit per subset
+    static const int kModes[8][8] = {{3, 4, 0, 0, 4, 0, 1, 0}, {2, 6, 0, 0, 6, 0, 0, 1}, {3, 6, 0, 0, 5, 0, 0, 0}, {2, 6, 0, 0, 7, 0, 1, 0},
+                                     {1, 0, 2, 1, 5, 6, 0, 0}, {1, 0, 2, 0, 7, 8, 0, 0}, {1, 0, 0, 0, 7, 7, 1, 0}, {2, 6, 0, 0, 5, 5, 1, 0}};
+    auto get = [&](int pos, int n) {
+        uint32_t v = 0;
+        for (int i = 0; i < n; ++i) v |= uint32_t((blk[(pos + i) >> 3] >> ((pos + i) & 7)) & 1) << i;
+        return v;
+    };
+    auto put = [&](int pos, int n, uint32_t v) {
+        for (int i = 0; i < n; ++i) {
+            const uint8_t bit = uint8_t(1u << ((pos + i) & 7));
+            blk[(pos + i) >> 3] = static_cast<uint8_t>((v >> i & 1) ? blk[(pos + i) >> 3] | bit : blk[(pos + i) >> 3] & ~bit);
+        }
+    };
+    auto value = [](uint32_t q, int n) {
+        q <<= 8 - n;
+        return int(q | (q >> n));
+    };
+    if (blk[0] == 0) return;   // mode 8 (reserved)
+    int mode = 0;
+    while (!(blk[0] >> mode & 1)) ++mode;
+    const int ns = kModes[mode][0], cb = kModes[mode][4], ab = kModes[mode][5], epb = kModes[mode][6], spb = kModes[mode][7];
+    int pos = mode + 1 + kModes[mode][1];
+    const uint32_t rot = get(pos, kModes[mode][2]);
+    pos += kModes[mode][2] + kModes[mode][3];
+    const int colour = pos, alpha = pos + 6 * ns * cb, pbits = alpha + 2 * ns * ab;
+    for (int ch = 0; ch < 3; ++ch) {
+        const bool swapped = rot == uint32_t(ch + 1);
+        const int bits = swapped ? ab : cb;
+        for (int s = 0; s < ns; ++s)
+            for (int e = 0; e < 2; ++e) {
+                const int at = swapped ? alpha + (s * 2 + e) * ab : colour + ((ch * ns + s) * 2 + e) * cb;
+                const int p = epb ? int(get(pbits + 2 * s + e, 1)) : spb ? int(get(pbits + s, 1)) : -1;
+                const int n = bits + (p >= 0);
+                auto full = [&](uint32_t q) { return p >= 0 ? (q << 1 | uint32_t(p)) : q; };
+                const int target = (value(full(get(at, bits)), n) * rgb[ch] + 127) / 255;
+                uint32_t best = 0;
+                for (uint32_t q = 1; q < (1u << bits); ++q)
+                    if (std::abs(value(full(q), n) - target) < std::abs(value(full(best), n) - target)) best = q;
+                put(at, bits, best);
+            }
+    }
+}
+
+// randomize_units.py bake_texture(): the texture (decompressed BNTX) with colours[skin, lip, hair] (4 bytes RGBA; empty: that kind left)
+// baked into the blocks bake_blocks() picks from the rig's atlas and skeleton (decompressed), the meshes of skins (null: all); empty with
+// *why when one of them does not read as expected
+std::vector<uint8_t> bake_texture(const std::vector<uint8_t>& d, const std::vector<uint8_t>& atlas, const std::vector<uint8_t>& skel,
+                                  const std::string (&colours)[3], const std::vector<std::string>* skins, std::string* why) {
+    BntxTexture t;
+    if (!bntx_texture(d, &t) || t.format != kBc7Unorm) {
+        *why = "not one BC7 block-linear texture";
+        return {};
+    }
+    int64_t width = 0, height = 0;
+    std::map<std::string, AtlasRegion> regions;
+    if (!atlas_regions(atlas, &width, &height, &regions) || width != t.width || height != t.height) {
+        *why = "the atlas does not read as one page the texture's size";
+        return {};
+    }
+    std::vector<SkelMesh> meshes;
+    if (!skel_meshes(skel, skins, &meshes)) {
+        *why = "the skeleton's skins do not read";
+        return {};
+    }
+    const uint64_t bw = (t.width + 3) / 4, bh = (t.height + 3) / 4;
+    if (bw == 0 || bh == 0 || block_linear(bw - 1, bh - 1, bw, t.gob_y) + 16 > t.size) {
+        *why = "the texture data is too short";
+        return {};
+    }
+    std::vector<uint8_t> out = d;
+    int counts[3] = {0, 0, 0};
+    for (const auto& [blk, k] : bake_blocks(width, height, regions, meshes)) {
+        if (colours[k].size() != 4) continue;
+        const uint8_t rgb[3] = {uint8_t(colours[k][0]), uint8_t(colours[k][1]), uint8_t(colours[k][2])};
+        bc7_tint(out.data() + t.at + block_linear(uint64_t(blk) % bw, uint64_t(blk) / bw, bw, t.gob_y), rgb);
+        ++counts[k];
+    }
+    *why = "blocks tinted: skin " + std::to_string(counts[0]) + ", lip " + std::to_string(counts[1]) + ", hair " + std::to_string(counts[2]) +
+           " (" + std::to_string(meshes.size()) + " meshes)";
+    return out;
+}
+
+// With bake (the source rig's atlas and skeleton, decompressed, and the skins to take), the texture gets the colours baked in.
 std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<uint8_t>& d, const std::string& src, const std::string& dst,
-                                     bool unclip, std::string* note) {
+                                     bool collapse_ends, const std::string (&colours)[3], const std::vector<uint8_t>* atlas,
+                                     const std::vector<uint8_t>* skel, const std::vector<std::string>* skins, std::string* note) {
     std::vector<uint8_t> out = d;
     auto count = [](const std::vector<uint8_t>& hay, const std::string& needle, size_t* first) {
         size_t n = 0;
@@ -1615,6 +2169,12 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
         }
         std::copy(dst.begin(), dst.end(), out.begin() + static_cast<std::ptrdiff_t>(at + 2));
         *note = "texture " + dst;
+        if (atlas && skel) {
+            std::string why;
+            std::vector<uint8_t> baked = bake_texture(out, *atlas, *skel, colours, skins, &why);
+            *note += (baked.empty() ? "; not baked: " : "; ") + why;
+            if (!baked.empty()) out.swap(baked);
+        }
         return out;
     }
     if (kind == "spdb") {
@@ -1640,7 +2200,7 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
         for (const auto& [name, at] : slots)
             for (int k = 0; k < 3; ++k) {
                 const std::string suffix = kTintSlots[k];
-                const std::string& c = g_kasumi_colours[k];
+                const std::string& c = colours[k];
                 if (name.size() >= suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 && !c.empty()) {
                     std::copy(c.begin(), c.end(), out.begin() + static_cast<std::ptrdiff_t>(at));
                     ++counts[k];
@@ -1652,36 +2212,41 @@ std::vector<uint8_t> kasumi_rig_file(const std::string& kind, const std::vector<
             std::snprintf(buf, sizeof buf, "%02x%02x%02x%02x", uint8_t(c[0]), uint8_t(c[1]), uint8_t(c[2]), uint8_t(c[3]));
             return std::string(buf);
         };
-        *note = "slots coloured: skin " + std::to_string(counts[0]) + " (" + hex(g_kasumi_colours[0]) + "), lip " + std::to_string(counts[1]) +
-                " (" + hex(g_kasumi_colours[1]) + "), hair " + std::to_string(counts[2]) + " (" + hex(g_kasumi_colours[2]) + ")";
-        if (unclip) {
-            struct Edit {
-                size_t start, end;
-                std::vector<uint8_t> with;
-            };
-            std::vector<Edit> edits;   // on the file as it is
-            std::string list;
-            for (const auto& [name, at] : slots) {
-                if (!ends_with_clip(name) && !ends_with(name, kClipEndSuffix)) continue;
-                const size_t p = at + 8;   // the setup attachment: none
-                size_t end = p;
-                while (end < out.size() && (out[end] & 0x80)) ++end;
-                if (end >= out.size()) continue;
-                edits.push_back({p, end + 1, {0}});
-                list += (list.empty() ? "" : ", ") + name;
+        *note = "slots coloured: skin " + std::to_string(counts[0]) + " (" + hex(colours[0]) + "), lip " + std::to_string(counts[1]) + " (" +
+                hex(colours[1]) + "), hair " + std::to_string(counts[2]) + " (" + hex(colours[2]) + ")";
+        if (collapse_ends) {   // each clip's end marker (an unweighted Clipping_End mesh) with every vertex at 0, 0: it draws nothing
+            int collapsed = 0, kept = 0;
+            for (const auto& entry : clipping_entries(out, slots)) {
+                size_t q = entry[1];
+                uint32_t v = 0, vc = 0, tris = 0;
+                auto varint = [&](uint32_t* x) {
+                    *x = 0;
+                    for (int shift = 0; q < out.size(); shift += 7) {
+                        const uint8_t b = out[q++];
+                        *x |= uint32_t(b & 0x7F) << shift;
+                        if (!(b & 0x80) || shift >= 28) break;
+                    }
+                };
+                varint(&v);   // key
+                varint(&v);   // name
+                if (q >= out.size() || out[q] != 2) {   // a clipping attachment: kept
+                    ++kept;
+                    continue;
+                }
+                ++q;
+                varint(&v);   // path
+                q += 4;       // colour
+                varint(&vc);
+                q += 8ull * vc;   // uvs
+                varint(&tris);
+                q += 2ull * tris;
+                if (q < out.size() && out[q] == 0 && out.size() - q - 1 >= 8ull * vc) {   // unweighted: x, y for each vertex
+                    const auto from = out.begin() + static_cast<std::ptrdiff_t>(q + 1);
+                    std::fill(from, from + static_cast<std::ptrdiff_t>(8ull * vc), uint8_t(0));
+                    ++collapsed;
+                }
             }
-            const std::vector<std::array<size_t, 3>> entries = clipping_entries(out, slots);
-            for (const auto& [count_at, at, end] : entries) {   // in the skins: the attachment goes, its slot group keeps none
-                edits.push_back({count_at, count_at + 1, {0}});
-                edits.push_back({at, end, {}});
-            }
-            std::sort(edits.begin(), edits.end(), [](const Edit& x, const Edit& y) { return x.start > y.start; });
-            for (const Edit& e : edits) {
-                out.erase(out.begin() + static_cast<std::ptrdiff_t>(e.start), out.begin() + static_cast<std::ptrdiff_t>(e.end));
-                out.insert(out.begin() + static_cast<std::ptrdiff_t>(e.start), e.with.begin(), e.with.end());
-            }
-            *note += "; clipping off: " + (list.empty() ? std::string("none") : list) + " (" + std::to_string(entries.size()) +
-                     " skin attachments removed)";
+            *note += "; clip end markers collapsed: " + std::to_string(collapsed) + " (" + std::to_string(kept) + " clipping attachments kept)";
         }
         return out;
     }
@@ -1701,11 +2266,21 @@ std::string kasumi_rig_kind(const std::string& key, std::string* dst = nullptr) 
     }
     return std::string();
 }
-bool match_kasumi_rig(const std::string& key) {
-    const std::string kind = kasumi_rig_kind(key);
-    return !kind.empty() && kind != "skel.zst";
+// the files edited after AssetTable.bin, whose edit reads the colours: 900's skeleton (the slots) and 901's texture (baked in); 901's atlas
+// and skeleton go before them (they keep the source files for the texture)
+bool kasumi_rig_late(const std::string& kind, const std::string& dst) {
+    return (dst == kKasumiFace && kind == "skel.zst") || (dst == kKasumiFaceUw && kind == "bntx.zst");
 }
-bool match_kasumi_skel(const std::string& key) { return kasumi_rig_kind(key) == "skel.zst"; }
+bool match_kasumi_rig(const std::string& key) {
+    std::string dst;
+    const std::string kind = kasumi_rig_kind(key, &dst);
+    return !kind.empty() && !kasumi_rig_late(kind, dst);
+}
+bool match_kasumi_late(const std::string& key) {
+    std::string dst;
+    const std::string kind = kasumi_rig_kind(key, &dst);
+    return !kind.empty() && kasumi_rig_late(kind, dst);
+}
 
 void edit_kasumi_rig(const NxModFile* file, void*) {
     std::string key = file->path ? file->path : "";
@@ -1727,10 +2302,22 @@ void edit_kasumi_rig(const NxModFile* file, void*) {
             return;
         }
     }
-    if (kind == "skel.zst" && !g_kasumi_coloured)
+    if (kasumi_rig_late(kind, dst) && !g_kasumi_coloured)
         NXLOG_W(kTag, "randomizer: %s: edited before AssetTable.bin, so without the colours", file->path);
+    const bool uw = dst == kKasumiFaceUw;
+    if (uw && kind == "atlas.zst") g_kasumi_uw_atlas = data;
+    if (uw && kind == "skel.zst") g_kasumi_uw_skel = data;
+    // the Underworld rig: her colours in the texture, the tinted slots white
+    static const std::string kWhite[3] = {std::string(4, '\xff'), std::string(4, '\xff'), std::string(4, '\xff')};
+    const bool bake = uw && kind == "bntx.zst";
+    if (bake && (g_kasumi_uw_atlas.empty() || g_kasumi_uw_skel.empty()))
+        NXLOG_W(kTag, "randomizer: %s: its atlas or skeleton was not seen first: not baked", file->path);
+    const bool baked = bake && !g_kasumi_uw_atlas.empty() && !g_kasumi_uw_skel.empty();
+    const std::vector<std::string> skins = {"default", g_kasumi.face_skin()};
     std::string note;
-    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), dst, dst == kKasumiFaceUw, &note);
+    const std::string(*colours)[3] = uw && kind == "skel.zst" ? &kWhite : &g_kasumi_colours;
+    std::vector<uint8_t> out = kasumi_rig_file(kind, data, g_kasumi.rig(), dst, uw && kind == "skel.zst", *colours,
+                                               baked ? &g_kasumi_uw_atlas : nullptr, baked ? &g_kasumi_uw_skel : nullptr, &skins, &note);
     NXLOG_I(kTag, "randomizer: UI/Face/%s/%s.%s: from %s: %s", dst.c_str(), dst.c_str(), kind.c_str(), g_kasumi.rig().c_str(), note.c_str());
     if (out.empty()) return;
     if (zst) {
@@ -1940,8 +2527,8 @@ void randomizer_install() {
     if (!services::modapi::add_runtime_edit("randomizer", &match_eye_rig, &edit_eye_rig, nullptr))
         NXLOG_W(kTag, "randomizer: too late to rename the portrait rigs' eye slots");
     if (g_set.eshmel) {
-        // the second Eshmel's portrait rigs: copies of 015's or 016's four files in UI/Face/900 and 901 (Underworld, no clipping),
-        // edited as they load (the skeletons after AssetTable.bin, whose edit reads the colours)
+        // the second Eshmel's portrait rigs: copies of 015's or 016's four files in UI/Face/900 and 901 (Underworld),
+        // edited as they load (900's skeleton and 901's texture after AssetTable.bin, whose edit reads the colours)
         const std::string src = g_kasumi.rig();
         bool ok = true;
         for (const std::string dst : {kKasumiFace, kKasumiFaceUw})
@@ -1949,7 +2536,7 @@ void randomizer_install() {
                 ok = services::modapi::add_runtime_copy("randomizer", "/UI/Face/" + src + "/" + src + "." + kind,
                                                         "/UI/Face/" + dst + "/" + dst + "." + kind) && ok;
         ok = services::modapi::add_runtime_edit("randomizer", &match_kasumi_rig, &edit_kasumi_rig, nullptr) && ok;
-        ok = services::modapi::add_runtime_edit("randomizer", &match_kasumi_skel, &edit_kasumi_rig, nullptr, true) && ok;
+        ok = services::modapi::add_runtime_edit("randomizer", &match_kasumi_late, &edit_kasumi_rig, nullptr, true) && ok;
         if (!ok) NXLOG_W(kTag, "randomizer: too late to add the second Eshmel's portrait rig");
     }
     if (!services::modapi::add_runtime_edit("randomizer", &match_quotes, &edit_quotes, nullptr, true))

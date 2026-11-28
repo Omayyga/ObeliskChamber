@@ -907,20 +907,12 @@ class TestKasumi(unittest.TestCase):
         self.assertEqual(len(out), len(skel))
         self.assertEqual(note, "slots coloured: skin 1 (dcba9eff), lip 1 (da9681ff), hair 1 (9bc0d1ff)")
         self.assertEqual(ru.kasumi_rig_file("skel.zst", skeleton(["x_Hair"], version="4.2.01"), "016", colours)[0], None)
-        # the Underworld rig: every ..._Clipping slot starts with no attachment (the varint after the colours); the rest as before
+        # the Underworld rig without skins: nothing to collapse, the file as it was (colours apart)
         clipped = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"])
-        out, note = ru.kasumi_rig_file("skel.zst", clipped, "016", colours, "901", unclip=True)
-        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clipping off: Hood_Clipping, "
-                               "Hood_Clipping_End (0 skin attachments removed)")
-        at = dict(ru._skel_slot_colours(out))
-        self.assertEqual((out[at["Hood_Clipping"] + 8], out[at["A_TopHair_Hair"] + 8], out[at["Hood_Clipping_End"] + 8]), (0, 1, 0))
-        self.assertEqual(len(out), len(clipped))
-        long_att = bytearray(clipped)                       # an attachment index of two bytes becomes one
-        first = ru._skel_slot_colours(clipped)[0][1] + 8
-        long_att[first:first + 1] = b"\x81\x02"
-        out, _ = ru.kasumi_rig_file("skel.zst", bytes(long_att), "016", colours, "901", unclip=True)
-        self.assertEqual(len(out), len(long_att) - 1)
-        self.assertEqual(out[ru._skel_slot_colours(out)[0][1] + 8], 0)
+        out, note = ru.kasumi_rig_file("skel.zst", clipped, "016", colours, "901", collapse_ends=True)
+        self.assertEqual(note, "slots coloured: skin 0 (dcba9eff), lip 0 (da9681ff), hair 1 (9bc0d1ff); clip end markers collapsed: 0 "
+                               "(0 clipping attachments kept)")
+        self.assertEqual(out, ru.kasumi_rig_file("skel.zst", clipped, "016", colours)[0])
         # in a skin: the clipping attachment, alone in its slot group, goes; the group stays with no attachment
         head = skeleton(["Hood_Clipping", "A_TopHair_Hair", "Hood_Clipping_End"],
                         strings=("00_Eye", "x", "Hood_Clipping", "Clipping_End"))[:-1]
@@ -937,10 +929,14 @@ class TestKasumi(unittest.TestCase):
         end_at = start + len(clip) + len(other) + 2
         self.assertEqual(ru._clipping_entries(skel, ru._skel_slot_colours(skel)),
                          [(start - 1, start, start + len(clip)), (end_at - 1, end_at, end_at + len(end))])
-        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", unclip=True)
-        self.assertTrue(note.endswith("clipping off: Hood_Clipping, Hood_Clipping_End (2 skin attachments removed)"), note)
-        self.assertTrue(out.endswith(bytes([3]) + bytes([0, 0]) + other + bytes([2, 0]) + b"TAIL"))
-        self.assertEqual(len(out), len(skel) - len(clip) - len(end))
+        out, note = ru.kasumi_rig_file("skel.zst", skel, "016", colours, "901", collapse_ends=True)
+        self.assertTrue(note.endswith("clip end markers collapsed: 1 (1 clipping attachments kept)"), note)
+        collapsed = end.replace(struct.pack(">8f", 8, -8, -8, -8, -8, 8, 8, 8), bytes(32))
+        self.assertTrue(out.endswith(bytes([3]) + bytes([0, 1]) + clip + other + bytes([2, 1]) + collapsed + b"TAIL"))
+        self.assertEqual(len(out), len(skel))
+        weighted = bytearray(skel)                               # weighted vertices: left as they are
+        weighted[end_at + 54] = 1                                # (key, name, type, path, colour, 4 vertices, uvs, 6 triangles)
+        self.assertIn("collapsed: 0 (1", ru.kasumi_rig_file("skel.zst", bytes(weighted), "016", colours, "901", collapse_ends=True)[1])
         self.assertEqual(ru._clipping_entries(skel[:start + 10], ru._skel_slot_colours(skel)), [])   # cut short: not taken
         bad = bytearray(skel)
         bad[start + 3] = 1                                       # the end slot is not Hood_Clipping_End
@@ -952,6 +948,168 @@ class TestKasumi(unittest.TestCase):
     def test_look_helpers(self):
         self.assertEqual((self.EGG.portrait(), self.EGG.voice(), self.EGG.rig()), ("イシュマール女Bフード", "Ism0F", "016"))
         self.assertEqual((self.LOOK.portrait(), self.LOOK.voice(), self.LOOK.rig()), ("イシュマール男C", "Ism0M", "015"))
+        self.assertEqual((self.EGG.face_skin(), self.LOOK.face_skin()), ("BHoodOn", "CHoodOff"))
+
+
+def scramble(text):
+    return bytes(b ^ ru.ATLAS_KEY[i % len(ru.ATLAS_KEY)] for i, b in enumerate(text.encode()))
+
+
+def mesh(key, uvs, tris, kind=2, path=0):
+    """A skin entry: a mesh (key ref, no name, type 2, path ref, colour, uvs, triangles, unweighted vertices, hull, no sequence, no
+    edges, width, height; nonessential)."""
+    n = len(uvs) // 2
+    return (bytes([key, 0, kind, path]) + b"\xff" * 4 + bytes([n]) + struct.pack(">%df" % len(uvs), *uvs) + bytes([len(tris)])
+            + struct.pack(">%dH" % len(tris), *tris) + bytes([0]) + bytes(8 * n) + bytes([n, 0, 0]) + bytes(8))
+
+
+class TestBake(unittest.TestCase):
+    SQUARE = (0, 0, 1, 0, 1, 1, 0, 1)
+
+    def test_atlas(self):
+        text = ("p.png\nsize:16,8\nfilter:Linear,Linear\npma:true\nA_Hair\nbounds:0,0,8,4\noffsets:1,2,10,6\nrotate:90\nB_Skin\n"
+                "bounds:8,0,4,4\nrotate:true\nC\nbounds:12,4,4,4\n")
+        w, h, regions = ru.atlas_regions(scramble(text))
+        self.assertEqual((w, h), (16, 8))
+        self.assertEqual(regions, {"A_Hair": (0, 0, 8, 4, 1, 2, 10, 6, 90), "B_Skin": (8, 0, 4, 4, 0, 0, 4, 4, 90),
+                                   "C": (12, 4, 4, 4, 0, 0, 4, 4, 0)})
+        self.assertNotIn("C", ru.atlas_regions(scramble(text + "C\nbounds:0,0,1,1\n"))[2])      # named twice
+        self.assertIsNone(ru.atlas_regions(scramble(text + "\nq.png\nsize:4,4\n")))           # a second page
+        self.assertIsNone(ru.atlas_regions(scramble("p.png\nA\nbounds:0,0,1,1\n")))          # no size
+        self.assertIsNone(ru.atlas_regions(bytes([0xff]) + scramble(text)[1:]))                 # not text
+        self.assertIsNone(ru.atlas_regions(scramble(text + "D\nbounds:0,0,1\n")))           # three bounds
+
+    def test_meshes(self):
+        # strings: 1 x, 2 Body_Skin, 3 Hair, 4 BHoodOff; slots Body_Skin, A_Hair, Cloth; default skin: Body_Skin mesh (key 2), Cloth mesh
+        # (key 1); skin BHoodOff: A_Hair mesh (key 3), and a linked mesh in Body_Skin (key 1, path 3) of the default skin's mesh 2
+        head = skeleton(["Body_Skin", "A_Hair", "Cloth"], strings=("x", "Body_Skin", "Hair", "BHoodOff"))[:-1] + bytes([0, 0, 0])
+        tri = (0, 1, 2)
+        default = bytes([2, 0, 1]) + mesh(2, self.SQUARE, tri) + bytes([2, 1]) + mesh(1, self.SQUARE, tri)
+        linked = bytes([1, 0, 3, 3]) + b"\xff" * 4 + bytes([0, 2, 0, 0]) + bytes(8)
+        named = bytes([4, 0, 0, 0, 0, 2, 1, 1]) + mesh(3, (0, 0, 1, 0, 0, 1), (0, 1, 2)) + bytes([0, 1]) + linked
+        skel = head + default + bytes([1]) + named + b"TAIL"
+        got = ru._skel_meshes(skel)
+        self.assertEqual([(k, r, tuple(t)) for k, r, _, t in got], [(0, "Body_Skin", tri), (3, "x", tri), (2, "Hair", tri),
+                                                                    (0, "Hair", tri)])
+        self.assertEqual(got[3][2], got[0][2])                                  # the parent's uvs
+        self.assertEqual([r for _, r, _, _ in ru._skel_meshes(skel, ("default",))], ["Body_Skin", "x"])
+        self.assertIsNone(ru._skel_meshes(skel[:-10]))
+        self.assertIsNone(ru._skel_meshes(skeleton(["a"], version="4.2.0")))
+
+    def test_cover(self):
+        maps, touched = [bytearray(16 * 8) for _ in range(4)], set()
+        ru._cover(maps, touched, 16, 8, 2, (4, 0, 8, 8, 0, 0, 8, 8, 0), self.SQUARE, (0, 1, 2, 0, 2, 3))
+        rows = [bytes(maps[2][r * 16:(r + 1) * 16]) for r in range(8)]
+        self.assertEqual(rows, [bytes(4) + b"\1" * 8 + bytes(4)] * 8)        # the whole region, nothing outside it
+        self.assertEqual(touched, {1, 2, 5, 6})
+        # a half square (one triangle) of a region stripped and rotated 90: original 8 x 8, packed 4 wide 8 tall at (0, 0)
+        maps, touched = [bytearray(16 * 8) for _ in range(4)], set()
+        ru._cover(maps, touched, 16, 8, 3, (0, 0, 8, 4, 0, 4, 8, 8, 90), self.SQUARE, (0, 1, 2))
+        self.assertEqual(touched, set())                                        # not a tint kind
+        # uv (0, 0), (1, 0), (1, 1) land on (0, 8), (0, 0), (8, 0): the centres with x + y <= 8, inside the packed 4 x 8
+        self.assertEqual([[maps[3][r * 16 + c] for c in range(16)] for r in range(8)],
+                         [[int(c < 4 and c + r <= 7) for c in range(16)] for r in range(8)])
+        # degenerate and out-of-range triangles: nothing
+        maps = [bytearray(16 * 8) for _ in range(4)]
+        ru._cover(maps, set(), 16, 8, 0, (0, 0, 8, 8, 0, 0, 8, 8, 0), self.SQUARE, (0, 0, 1, 0, 1, 9))
+        self.assertEqual(sum(maps[0]), 0)
+        # a vertex far off the page: the mesh is left out
+        ru._cover(maps, set(), 16, 8, 0, (0, 0, 8, 8, 0, 0, 8, 8, 0), (0, 0, 1, 0, 1, 1, 1e6, 0), (0, 1, 2))
+        ru._cover(maps, set(), 16, 8, 0, (0, 0, 8, 8, 0, 0, 8, 8, 0), (0, 0, 1, 0, 1, 1, float("nan"), 0), (0, 1, 2))
+        self.assertEqual(sum(maps[0]), 0)
+
+    def test_blocks(self):
+        regions = {"S": (0, 0, 8, 4, 0, 0, 8, 4, 0), "H": (0, 4, 4, 4, 0, 0, 4, 4, 0), "O": (4, 4, 4, 4, 0, 0, 4, 4, 0),
+                   "L": (8, 0, 2, 4, 0, 0, 2, 4, 0)}
+        sq = (0, 1, 2, 0, 2, 3)
+        meshes = [(0, "S", self.SQUARE, sq), (2, "H", self.SQUARE, sq), (3, "O", self.SQUARE, sq), (1, "L", self.SQUARE, sq),
+                  (0, "missing", self.SQUARE, sq)]
+        # block 2 (x 8-11, rows 0-3): lip covers 8 pixels, nothing else; block 5 (x 4-7, rows 4-7): only the other part
+        self.assertEqual(ru.bake_blocks(16, 8, regions, meshes), {0: 0, 1: 0, 2: 1, 4: 2})
+        # a tie between a kind and the other attachments goes to the kind (S also drawn by another slot)
+        self.assertEqual(ru.bake_blocks(16, 8, regions, meshes + [(3, "S", self.SQUARE, sq)]), {0: 0, 1: 0, 2: 1, 4: 2})
+        # hair on one column of block 5, the other part on all of it: left; skin and hair, 8 pixels each: skin (TINT_SLOTS order)
+        regions.update({"h": (4, 4, 1, 4, 0, 0, 1, 4, 0), "s": (12, 0, 4, 2, 0, 0, 4, 2, 0), "t": (12, 2, 4, 2, 0, 0, 4, 2, 0)})
+        meshes += [(2, "h", self.SQUARE, sq), (2, "s", self.SQUARE, sq), (0, "t", self.SQUARE, sq)]
+        self.assertEqual(ru.bake_blocks(16, 8, regions, meshes), {0: 0, 1: 0, 2: 1, 3: 0, 4: 2})
+
+    def test_block_linear(self):
+        self.assertEqual([ru.block_linear(x, y, 512, 16) for x, y in ((0, 0), (1, 0), (0, 1), (2, 0), (0, 2), (4, 0), (0, 8), (0, 128))],
+                         [0, 32, 16, 256, 64, 8192, 512, 128 * 16 * 512])
+
+    @staticmethod
+    def block(fields):
+        """A BC7 block from (value, bits) fields, first in the lowest bits."""
+        v, pos = 0, 0
+        for value, bits in fields:
+            v |= value << pos
+            pos += bits
+        return v.to_bytes(16, "little")
+
+    def test_bc7(self):
+        # mode 6: R, G, B, A endpoints of 7 bits, p-bits 1 and 0, 63 index bits
+        blk = self.block([(1 << 6, 7), (100, 7), (20, 7), (64, 7), (0, 7), (127, 7), (127, 7), (127, 7), (90, 7), (1, 1), (0, 1),
+                          (0x5A5A5A5A5A5A5A5A >> 1, 63)])
+        self.assertEqual(ru.bc7_tint(blk, (255, 255, 255)), blk)
+        # fields R0 R1 G0 G1 B0 B1 A0 A1, endpoint 0 with p-bit 1, endpoint 1 with 0: values 201, 40, 129, 0, 255, 254 (alpha 255, 180)
+        # times 128 / 255: 101 (50 p1), 20 (10 p0), 65 (32 p1), 0, 128 and 127 (63: 127 and 126 the nearest, the lower q on a tie)
+        tail = [(127, 7), (90, 7), (1, 1), (0, 1), (0x5A5A5A5A5A5A5A5A >> 1, 63)]
+        self.assertEqual(ru.bc7_tint(blk, (128, 128, 128)),
+                         self.block([(1 << 6, 7), (50, 7), (10, 7), (32, 7), (0, 7), (63, 7), (63, 7)] + tail))
+        self.assertEqual(ru.bc7_tint(blk, (128, 128, 0)), self.block([(1 << 6, 7), (50, 7), (10, 7), (32, 7), (0, 7), (0, 7), (0, 7)] + tail))
+        # mode 5, rotation 1 (alpha and red swapped): red lives in the 8-bit alpha field, the 7-bit "red" is alpha
+        blk = self.block([(1 << 5, 6), (1, 2), (100, 7), (100, 7), (60, 7), (60, 7), (30, 7), (30, 7), (200, 8), (40, 8), (0, 62)])
+        want = self.block([(1 << 5, 6), (1, 2), (100, 7), (100, 7), (30, 7), (30, 7), (15, 7), (15, 7), (100, 8), (20, 8), (0, 62)])
+        self.assertEqual(ru.bc7_tint(blk, (128, 128, 128)), want)
+        # mode 1: 6-bit colours, a p-bit per subset; the partition, indices kept
+        blk = self.block([(1 << 1, 2), (13, 6), (63, 6), (0, 6), (10, 6), (20, 6), (30, 6), (40, 6), (50, 6), (60, 6), (5, 6), (15, 6),
+                          (25, 6), (35, 6), (1, 1), (0, 1), (0x2AAAAAAAAAAA, 46)])
+        out = ru.bc7_tint(blk, (255, 255, 255))
+        self.assertEqual(out, blk)
+        self.assertEqual(ru.bc7_tint(bytes(16), (1, 2, 3)), bytes(16))         # mode 8: as it is
+
+    @staticmethod
+    def bntx(width, height, blocks):
+        """A minimal BNTX: BRTI at 0x20 (2D, block linear, 1 mip, BC7, GOB height 1), the mip table at 0xa0, data at 0x100."""
+        brti = bytearray(0x80)
+        brti[0:4] = b"BRTI"
+        struct.pack_into("<HxxH", brti, 0x12, 0, 1)
+        struct.pack_into("<I", brti, 0x1C, ru.BC7_UNORM)
+        struct.pack_into("<II", brti, 0x24, width, height)
+        struct.pack_into("<I", brti, 0x50, len(blocks))
+        struct.pack_into("<Q", brti, 0x70, 0xA0)
+        return b"BNTX" + bytes(0x1C) + bytes(brti) + struct.pack("<Q", 0x100) + bytes(0x58) + blocks
+
+    def test_texture(self):
+        bw = 4
+        size = ru.block_linear(bw - 1, 1, bw, 1) + 16
+        blk = self.block([(1 << 6, 7), (100, 7), (100, 7), (100, 7), (100, 7), (100, 7), (100, 7), (127, 7), (127, 7), (0, 2),
+                          (0, 63)])
+        data = self.bntx(16, 8, blk * (size // 16))
+        self.assertEqual(ru.bntx_texture(data), (ru.BC7_UNORM, 16, 8, 1, 0x100, size))
+        atlas = scramble("p.png\nsize:16,8\nH_Hair\nbounds:0,0,4,4\n")
+        head = skeleton(["H_Hair"], strings=("H_Hair",))[:-1] + bytes([0, 0, 0])
+        skel = head + bytes([1, 0, 1]) + mesh(1, self.SQUARE, (0, 1, 2, 0, 2, 3)) + bytes([0])
+        colours = [None, None, bytes([128, 255, 0, 255])]
+        out, note = ru.bake_texture(data, atlas, skel, colours)
+        self.assertEqual(note, "blocks tinted: skin 0, lip 0, hair 1 (1 meshes)")
+        tinted = ru.bc7_tint(blk, colours[2])
+        self.assertNotEqual(tinted, blk)
+        self.assertEqual(out[0x100:0x110], tinted)                              # block (0, 0)
+        self.assertEqual(out[0x110:], data[0x110:])
+        self.assertEqual(ru.bake_texture(data, atlas, skel, [None] * 3)[0], data)
+        self.assertEqual(ru.bake_texture(data, scramble("p.png\nsize:8,8\nH\nbounds:0,0,4,4\n"), skel, colours),
+                         (None, "the atlas does not read as one page the texture's size"))
+        self.assertEqual(ru.bake_texture(data, atlas, skel[:-3], colours), (None, "the skeleton's skins do not read"))
+        self.assertEqual(ru.bake_texture(data[:-16], atlas, skel, colours)[0], None)
+        # through kasumi_rig_file: the texture renamed (the BNTX name), then baked
+        named = data[:0x18] + b"\x03\x00016\x00" + data[0x1E:]
+        out, note = ru.kasumi_rig_file("bntx.zst", named, "016", colours, "901", True, (atlas, skel, ("default",)))
+        self.assertEqual(note, "texture 901; blocks tinted: skin 0, lip 0, hair 1 (1 meshes)")
+        self.assertEqual(out[0x18:0x1E], b"\x03\x00901\x00")
+        self.assertEqual(out[0x100:0x110], tinted)
+        out, note = ru.kasumi_rig_file("bntx.zst", named, "016", colours, "901", True, (atlas[:3], skel, None))
+        self.assertTrue(note.startswith("texture 901; not baked: "), note)
 
 
 if __name__ == "__main__":

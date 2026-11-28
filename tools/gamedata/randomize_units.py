@@ -23,6 +23,7 @@ own and none borrowed are dragon forms (JID_ダグザ竜: the class is the model
 """
 import argparse
 import hashlib
+import math
 import os
 import struct
 import sys
@@ -120,19 +121,26 @@ KASUMI_EGG = ("女", "B", "B", 2, 3)
 # face in her folder and her sex's voice (the hooded entries' Ism4M/F has no sound or quotes). Eshmel's rigs and entries stay as they are.
 KASUMI_LOOK = "カスミ"
 KASUMI_FACE = "900"                     # no 9xx folder exists in UI/Face
-# Its Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/<KASUMI_FACE_UW>: the same, with its clipping switched off. Only
-# Eshmel's rigs clip (slot Hood_Clipping clips the whole head up to Hood_Clipping_End; AHood_ and DHood_Clipping too), the game never
-# draws them with an effect, and the Underworld effect draws a clipped head as one lavender blob. A slot named ..._Clipping starts with
-# no attachment there, so no clip is active.
+# Its Underworld portrait (FID_カスミ冥闘士) has a rig of its own, UI/Face/<KASUMI_FACE_UW>. Only Eshmel's rigs clip (slot Hood_Clipping
+# clips the head to the hood up to Hood_Clipping_End; AHood_ and DHood_Clipping too), and the game never draws them with an effect.
 KASUMI_FACE_UW = "901"
 CLIP_SLOT_SUFFIX = "_Clipping"
 # Each clip ends at a slot named ..._Clipping_End that shows a 1600 x 1600 quad (attachment Clipping_End) with alpha 0. The Underworld
-# effect draws every slot opaque but Render (the one alpha-0 slot other rigs have), so that quad becomes an opaque sheet over everything
-# drawn before it: the head. In the Underworld rig the end markers go too.
+# effect draws every slot opaque but Render (the one alpha-0 slot other rigs have), so that quad becomes an opaque lavender sheet over
+# everything drawn before it: the head. In the Underworld rig its vertices all sit at one point, so it draws nothing; the clipping stays
+# (without it the hair shows through the hood) and still ends at the same slot.
 CLIP_END_SUFFIX = "_Clipping_End"
+# Its colours there. The Underworld effect sets every slot's colour to one lavender grey (the per-slot handler in the executable; the eyes
+# and army colours apart), so a slot colour cannot carry hers. Eshmel's hair, skin and lip art is greyish and takes its colour from the
+# slot (texture x slot colour); other characters' colours are in their texture, which the grey only tints. So the Underworld rig's
+# texture has her colours baked in (bake_texture): the 4x4 BC7 blocks that the meshes of the _Skin, _Lip, _Hair slots (TINT_SLOTS, every
+# skin) draw get their endpoint colours times hers, and those slots are white. The atlas packs by polygon (regions' rectangles overlap),
+# so the pixels are the ones the mesh triangles cover, mapped through the atlas as Spine 4.1 maps them.
 KASUMI_RIGS = {"男": "015", "女": "016"}
 RIG_FILES = ("atlas.zst", "bntx.zst", "skel.zst", "spdb")
-ATLAS_KEY = bytes.fromhex("2d7a777e3f502160")   # an atlas is XOR-scrambled; these are the key's first bytes (each rig's "<n>.png\n")
+ATLAS_KEY = bytes.fromhex("2d7a777e3f502160393a515c7d373b2c2435497a645a705e76346969315c2724")   # an atlas is XOR-scrambled, this repeating
+BC7_UNORM = 0x2001                      # nn::gfx ImageFormat of the portrait textures
+WHITE = bytes([255, 255, 255, 255])
 TINT_SLOTS = ("_Skin", "_Lip", "_Hair")          # the game's order: skin, lip, hair colour
 KASUMI_SALT = 0x4B4153554D49            # "KASUMI": the look's generator is the seed's, apart from the shuffle's
 # The most shuffles make_mapping() tries for a draw where nobody keeps their own look.
@@ -230,6 +238,10 @@ class KasumiLook:
 
     def rig(self):
         return KASUMI_RIGS[self.sex]
+
+    def face_skin(self):
+        """The skin of the rig its portrait shows: the Eshmel entry's face is <rig>_<head>HoodOff, or HoodOn with the hood."""
+        return self.head + ("HoodOn" if self.hood else "HoodOff")
 
     def describe(self):
         return "%s 頭部%s 身体%s 肌色%d 髪色%d%s" % (self.sex, self.head, self.body, self.skin, self.hair, " フード" if self.hood else "")
@@ -1076,14 +1088,393 @@ def _clipping_entries(data, slots):
     return sorted(found)
 
 
-def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False):
+def atlas_regions(data):
+    """A portrait atlas (XOR-scrambled with ATLAS_KEY) read: (page width, page height, {region: (x, y, width, height, offset x, offset y,
+    original width, original height, degrees)}), width and height unrotated as Spine 4.1 has them; None when it is not one page of
+    text. A region named twice is left out."""
+    try:
+        text = bytes(b ^ ATLAS_KEY[i % len(ATLAS_KEY)] for i, b in enumerate(data)).decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    size, regions, cur, twice, gap = None, {}, None, set(), False
+    for line in text.split("\n")[1:]:
+        line = line.strip()
+        if not line:
+            gap = cur is not None
+            continue
+        if gap:
+            return None                             # a second page
+        key, sep, value = line.partition(":")
+        try:
+            values = [v.strip() for v in value.split(",")]
+            if not sep:
+                if line in regions:
+                    twice.add(line)
+                cur = regions[line] = [None, None, None, None, None, None, None, None, 0]
+            elif cur is None:
+                if key == "size":
+                    size = tuple(int(v) for v in values)
+                    if len(size) != 2:
+                        return None
+            elif key in ("bounds", "offsets"):
+                if len(values) != 4:
+                    return None
+                at = 0 if key == "bounds" else 4
+                cur[at:at + 4] = [int(v) for v in values]
+            elif key == "rotate":
+                cur[8] = {"true": 90, "false": 0}.get(value.strip(), None)
+                cur[8] = int(value) if cur[8] is None else cur[8]
+        except ValueError:
+            return None
+    if size is None:
+        return None
+    out = {}
+    for name, r in regions.items():
+        if name in twice or None in r[0:4] or r[8] not in (0, 90, 180, 270):
+            continue
+        if r[4] is None:
+            r[4:8] = [0, 0, r[2], r[3]]
+        out[name] = tuple(r)
+    return size[0], size[1], out
+
+
+def _skel_meshes(data, skins=None):
+    """The meshes and linked meshes in a Spine 4.1 binary skeleton's skins (all, or those named in `skins`; a linked mesh with its
+    parent's, from the skin it names or the default one, any skin): [(kind, region, uvs, triangles)], kind the index of the slot's
+    TINT_SLOTS suffix or 3, region the attachment's path (else its name, else its key); one with a sequence is left out (its regions are
+    numbered). None when the file does not read."""
+    r = _SkelReader(data)
+    try:
+        r.take(8)
+        if not (r.string() or "").startswith("4.1."):
+            return None
+        r.take(16)
+        nonessential = r.take(1)[0] != 0
+        if nonessential:
+            r.take(4)
+            r.string()
+            r.string()
+        strings = [r.string() for _ in range(r.varint())]
+
+        def ref():
+            n = r.varint()
+            return None if n == 0 else strings[n - 1]
+
+        for i in range(r.varint()):                 # bones
+            r.string()
+            if i:
+                r.varint()
+            r.take(32)
+            r.varint()
+            r.take(1)
+            if nonessential:
+                r.take(4)
+        slots = []
+        for _ in range(r.varint()):
+            slots.append(r.string() or "")
+            r.varint()
+            r.take(8)
+            r.varint()
+            r.varint()
+        for varints, size in ((1, 12), (1, 50), (4, 24)):   # ik (target, mix, softness, 4 flags), transform (target, 2 flags, 12
+            for _ in range(r.varint()):                     # floats), path constraints (target, 3 modes, 6 floats)
+                r.string()
+                r.varint()
+                r.take(1)
+                for _ in range(r.varint()):
+                    r.varint()
+                for _ in range(varints):
+                    r.varint()
+                r.take(size)
+
+        def vertices(n):
+            if r.take(1)[0]:
+                for _ in range(n):
+                    for _ in range(r.varint()):
+                        r.varint()
+                        r.take(12)
+            else:
+                r.take(8 * n)
+
+        def sequence():
+            if r.take(1)[0]:
+                for _ in range(4):
+                    r.varint()
+                return True
+            return False
+
+        meshes, linked = {}, []                     # (skin, slot, key) -> (kind, region, uvs, triangles); (..., skin, slot, parent)
+
+        def kind(slot):
+            return next((k for k, s in enumerate(TINT_SLOTS) if slots[slot].endswith(s)), 3)
+
+        def skin(name):
+            for _ in range(r.varint()):
+                k = r.varint()
+                if k >= len(slots):
+                    raise ValueError("no slot %d" % k)
+                for _ in range(r.varint()):
+                    key = ref()
+                    region = ref() or key
+                    t = r.take(1)[0]
+                    if t == 0:                      # region
+                        ref()
+                        r.take(32)
+                        sequence()
+                    elif t == 1:                    # bounding box
+                        vertices(r.varint())
+                        r.take(4 if nonessential else 0)
+                    elif t == 2:                    # mesh: path, colour, uvs, triangles, vertices, hull, sequence
+                        region = ref() or region
+                        r.take(4)
+                        vc = r.varint()
+                        uvs = struct.unpack(">%df" % (2 * vc), r.take(8 * vc))
+                        n = r.varint()
+                        tris = struct.unpack(">%dH" % n, r.take(2 * n))
+                        vertices(vc)
+                        r.varint()
+                        if not sequence():
+                            meshes[(name, k, key)] = (kind(k), region, uvs, tris, name)
+                        if nonessential:
+                            r.take(2 * r.varint())
+                            r.take(8)
+                    elif t == 3:                    # linked mesh: path, colour, skin, parent, timelines, sequence
+                        region = ref() or region
+                        r.take(4)
+                        of, parent = ref(), ref()
+                        r.take(1)
+                        if not sequence():
+                            linked.append((kind(k), region, of or "default", k, parent, name))
+                        r.take(8 if nonessential else 0)
+                    elif t == 4:                    # path
+                        r.take(2)
+                        vc = r.varint()
+                        vertices(vc)
+                        r.take(4 * (vc // 3))
+                        r.take(4 if nonessential else 0)
+                    elif t == 5:                    # point
+                        r.take(12 + (4 if nonessential else 0))
+                    elif t == 6:                    # clipping
+                        r.varint()
+                        vertices(r.varint())
+                        r.take(4 if nonessential else 0)
+                    else:
+                        raise ValueError("attachment type %d" % t)
+
+        skin("default")
+        for _ in range(r.varint()):
+            name = ref() or ""
+            for _ in range(4):
+                for _ in range(r.varint()):
+                    r.varint()
+            skin(name)
+    except (ValueError, IndexError, UnicodeDecodeError, struct.error):
+        return None
+    out = [m[:4] for m in meshes.values() if skins is None or m[4] in skins]
+    for k, region, of, slot, parent, name in linked:
+        m = meshes.get((of, slot, parent))
+        if m is not None and (skins is None or name in skins):
+            out.append((k, region, m[2], m[3]))
+    return out
+
+
+def _cover(maps, touched, width, height, k, region, uvs, tris):
+    """Mark in maps[k] (a byte per pixel, row by row) the pixels whose centres the mesh's triangles cover, inside the region's packed
+    rectangle; for a tint kind, add the 4x4 blocks touched to `touched`. Positions are Spine 4.1's (MeshAttachment::updateRegion, the
+    atlas page in pixels; exact in doubles: a float times an int below 2^16, plus ints), in 1/256 pixel rounded half up, the test exact
+    in integers; a mesh with a vertex 2^20 pixels or more off the page is left out."""
+    x, y, w, h, ox, oy, ow, oh, deg = region
+    pw, ph = (h, w) if deg in (90, 270) else (w, h)
+    rx0, ry0, rx1, ry1 = max(x, 0), max(y, 0), min(x + pw, width) - 1, min(y + ph, height) - 1
+    pts = []
+    for i in range(0, len(uvs) - 1, 2):
+        u, v = uvs[i], uvs[i + 1]
+        if deg == 90:
+            px, py = x - (oh - oy - h) + v * oh, y - (ow - ox - w) + (1 - u) * ow
+        elif deg == 180:
+            px, py = x - (ow - ox - w) + (1 - u) * ow, y - oy + (1 - v) * oh
+        elif deg == 270:
+            px, py = x - oy + (1 - v) * oh, y - ox + u * ow
+        else:
+            px, py = x - ox + u * ow, y - (oh - oy - h) + v * oh
+        if not (abs(px) < 1 << 20 and abs(py) < 1 << 20):
+            return                                  # far off the page (or not a number): not this atlas's mesh
+        pts.append((math.floor(px * 256 + 0.5), math.floor(py * 256 + 0.5)))
+    m = maps[k]
+    bw = (width + 3) // 4
+    for t in range(0, len(tris) - 2, 3):
+        a, b, c = tris[t], tris[t + 1], tris[t + 2]
+        if max(a, b, c) >= len(pts):
+            continue
+        (x0, y0), (x1, y1), (x2, y2) = pts[a], pts[b], pts[c]
+        area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+        if area == 0:
+            continue
+        if area < 0:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        edges = ((x0, y0, x1, y1), (x1, y1, x2, y2), (x2, y2, x0, y0))
+        lo_y = max(ry0, -((128 - min(y0, y1, y2)) // 256))
+        hi_y = min(ry1, (max(y0, y1, y2) - 128) // 256)
+        for row in range(lo_y, hi_y + 1):
+            yc = row * 256 + 128
+            lo, hi = rx0, rx1
+            for xa, ya, xb, yb in edges:            # (xb - xa)(yc - ya) - (yb - ya)(px - xa) >= 0, px = 256 x + 128
+                den = 256 * (ya - yb)
+                num = -((xb - xa) * (yc - ya) + (yb - ya) * xa) - 128 * (ya - yb)
+                if den > 0:
+                    lo = max(lo, -((-num) // den))
+                elif den < 0:
+                    hi = min(hi, num // den)
+                elif num > 0:
+                    hi = lo - 1
+            if lo <= hi:
+                m[row * width + lo:row * width + hi + 1] = b"\1" * (hi - lo + 1)
+                if k < 3:
+                    touched.update(range((row // 4) * bw + lo // 4, (row // 4) * bw + hi // 4 + 1))
+
+
+def bake_blocks(width, height, regions, meshes):
+    """The 4x4 blocks to tint: {block index (row-major): kind}. Each mesh covers pixels (_cover; a mesh whose region the atlas lacks is
+    skipped); a block touched by a tint kind gets the kind covering most of its pixels (ties: TINT_SLOTS order), unless the other
+    attachments cover more of them."""
+    maps = [bytearray(width * height) for _ in range(4)]
+    touched = set()
+    for k, region, uvs, tris in meshes:
+        if region in regions:
+            _cover(maps, touched, width, height, k, regions[region], uvs, tris)
+    bw = (width + 3) // 4
+    out = {}
+    for blk in sorted(touched):
+        by, bx = divmod(blk, bw)
+        cnt = [0, 0, 0, 0]
+        for k in range(4):
+            for row in range(4 * by, min(4 * by + 4, height)):
+                s = row * width + 4 * bx
+                cnt[k] += maps[k][s:min(s + 4, (row + 1) * width)].count(1)
+        best = max(range(3), key=lambda k: (cnt[k], -k))
+        if cnt[best] and cnt[best] >= cnt[3]:
+            out[blk] = best
+    return out
+
+
+def bntx_texture(data):
+    """The one texture of a BNTX file: (format, width, height, GOBs per block, data offset, data size); None when it is not one
+    block-linear 2D texture with its data in the file."""
+    i = data.find(b"BRTI")
+    if i < 0 or data.find(b"BRTI", i + 4) >= 0 or i + 0x78 > len(data):
+        return None
+    tile, mips = struct.unpack_from("<HxxH", data, i + 0x12)
+    fmt, = struct.unpack_from("<I", data, i + 0x1C)
+    width, height = struct.unpack_from("<II", data, i + 0x24)
+    layout, = struct.unpack_from("<I", data, i + 0x34)
+    size, = struct.unpack_from("<I", data, i + 0x50)
+    table, = struct.unpack_from("<Q", data, i + 0x70)
+    if tile != 0 or mips < 1 or table + 8 > len(data):
+        return None
+    at, = struct.unpack_from("<Q", data, table)
+    if at + size > len(data):
+        return None
+    return fmt, width, height, 1 << (layout & 7), at, size
+
+
+def block_linear(bx, by, bw, gob_y, bpb=16):
+    """Where block (bx, by) of a block-linear surface bw blocks wide sits, in bytes (GOBs of 64 bytes x 8 rows, gob_y GOBs a block)."""
+    x = bx * bpb
+    row_gobs = (bw * bpb + 63) // 64
+    return ((by // (8 * gob_y)) * row_gobs * gob_y * 512 + (x // 64) * gob_y * 512 + ((by % (8 * gob_y)) // 8) * 512
+            + ((x % 64) // 32) * 256 + ((by % 8) // 2) * 64 + ((x % 32) // 16) * 32 + (by % 2) * 16 + (x % 16))
+
+
+# BC7 modes: subsets, partition bits, rotation bits, index selection bits, colour bits, alpha bits, p-bit per endpoint, p-bit per subset
+BC7_MODES = ((3, 4, 0, 0, 4, 0, 1, 0), (2, 6, 0, 0, 6, 0, 0, 1), (3, 6, 0, 0, 5, 0, 0, 0), (2, 6, 0, 0, 7, 0, 1, 0),
+             (1, 0, 2, 1, 5, 6, 0, 0), (1, 0, 2, 0, 7, 8, 0, 0), (1, 0, 0, 0, 7, 7, 1, 0), (2, 6, 0, 0, 5, 5, 1, 0))
+_BC7_NEAREST = {}
+
+
+def _bc7_value(q, n):
+    q <<= 8 - n
+    return q | (q >> n)
+
+
+def _bc7_nearest(bits, p):
+    """For each 8-bit target, the endpoint field (bits wide, then the p-bit p if not None) that decodes nearest (ties: the lower)."""
+    if (bits, p) not in _BC7_NEAREST:
+        n = bits + (p is not None)
+        vals = [_bc7_value((q << 1 | p) if p is not None else q, n) for q in range(1 << bits)]
+        _BC7_NEAREST[(bits, p)] = [min(range(1 << bits), key=lambda q: (abs(vals[q] - t), q)) for t in range(256)]
+    return _BC7_NEAREST[(bits, p)]
+
+
+def bc7_tint(block, rgb):
+    """A BC7 block with each endpoint's red, green and blue times rgb / 255 (rounded, then the nearest the mode can hold with the same
+    p-bit; modes 4 and 5 with a rotation keep that channel in the alpha field); alpha, p-bits and indices as they are. Every colour the
+    block decodes to is then about the old one times rgb (texture x slot colour, as the game tints Eshmel's). Mode 8 (reserved) as is."""
+    v = int.from_bytes(block, "little")
+    if v & 0xFF == 0:
+        return bytes(block)
+    mode = (v & -v).bit_length() - 1
+    ns, pb, rb, isb, cb, ab, epb, spb = BC7_MODES[mode]
+    pos = mode + 1 + pb
+    rot = (v >> pos) & ((1 << rb) - 1)
+    pos += rb + isb
+    colour = [[[pos + ((ch * ns + s) * 2 + e) * cb for e in range(2)] for s in range(ns)] for ch in range(3)]
+    pos += 6 * ns * cb
+    alpha = [[pos + (s * 2 + e) * ab for e in range(2)] for s in range(ns)]
+    pos += 2 * ns * ab
+    pbit = [[(v >> (pos + 2 * s + e)) & 1 if epb else (v >> (pos + s)) & 1 if spb else None for e in range(2)] for s in range(ns)]
+    for ch in range(3):
+        swapped = rot == ch + 1
+        bits = ab if swapped else cb
+        for s in range(ns):
+            for e in range(2):
+                at = alpha[s][e] if swapped else colour[ch][s][e]
+                p = pbit[s][e]
+                q = (v >> at) & ((1 << bits) - 1)
+                value = _bc7_value((q << 1 | p) if p is not None else q, bits + (p is not None))
+                q = _bc7_nearest(bits, p)[(value * rgb[ch] + 127) // 255]
+                v = (v & ~(((1 << bits) - 1) << at)) | (q << at)
+    return v.to_bytes(16, "little")
+
+
+def bake_texture(data, atlas, skel, colours, skins=None):
+    """A portrait texture (BNTX, decompressed) with colours [skin, lip, hair] (RGBA; None: that kind left) baked into the blocks
+    bake_blocks() picks from the rig's atlas and skeleton (decompressed), the meshes of `skins` (None: all); (None, why) when one of
+    them does not read as expected. Only the skins the portrait shows: one region can be drawn by a hair and a skin slot in two
+    skins (015's B_Head_Hair: B_Head_Hair, and B_Shave_Skin in BHoodOn), and holds one colour."""
+    tex = bntx_texture(data)
+    if tex is None or tex[0] != BC7_UNORM:
+        return None, "not one BC7 block-linear texture"
+    _, width, height, gob_y, at, size = tex
+    page = atlas_regions(atlas)
+    if page is None or page[0:2] != (width, height):
+        return None, "the atlas does not read as one page the texture's size"
+    meshes = _skel_meshes(skel, skins)
+    if meshes is None:
+        return None, "the skeleton's skins do not read"
+    bw, bh = (width + 3) // 4, (height + 3) // 4
+    if block_linear(bw - 1, bh - 1, bw, gob_y) + 16 > size:
+        return None, "the texture data is too short"
+    out = bytearray(data)
+    counts = [0, 0, 0]
+    for blk, k in bake_blocks(width, height, page[2], meshes).items():
+        if colours[k] is None:
+            continue
+        o = at + block_linear(blk % bw, blk // bw, bw, gob_y)
+        out[o:o + 16] = bc7_tint(out[o:o + 16], colours[k])
+        counts[k] += 1
+    return bytes(out), "blocks tinted: skin %d, lip %d, hair %d (%d meshes)" % (counts[0], counts[1], counts[2], len(meshes))
+
+
+def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, collapse_ends=False, bake=None):
     """One file of the second Eshmel's portrait rig (kind: one of RIG_FILES; .zst ones handed over decompressed), made from rig `src`'s
     (015 or 016) and a one-line note; (None, why) when the file is not laid out as expected. The folder name sits in fixed-length places:
     the atlas's first line "<src>.png" (the atlas is XOR-scrambled: the bytes change by src ^ dst), the BNTX texture name (a 16-bit
     length 3, the name, NUL), the .spdb paths "<src>/<src>.atlas" and "<src>/<src>.skel". The skeleton has no name but takes the colours:
     every slot whose name ends _Skin, _Lip, _Hair (TINT_SLOTS) gets colours[0], [1], [2] (RGBA), as the game tints Eshmel's; with
-    unclip, every slot whose name ends _Clipping (CLIP_SLOT_SUFFIX) has its setup attachment (the varint after the colours) set to none,
-    and its clipping attachments go from the skins (_clipping_entries): the game applies a skin's attachments itself."""
+    collapse_ends, each clip's end marker in the skins (_clipping_entries: the Clipping_End mesh, unweighted) has every vertex at 0, 0,
+    so it draws nothing; the clipping attachments and the end slots stay, so each clip still ends where it did. With bake (the
+    source rig's atlas and skeleton, decompressed, and the skins to take: default and the portrait's), the texture gets the colours
+    baked in (bake_texture)."""
     out = bytearray(data)
     if kind == "atlas.zst":
         if bytes(x ^ y for x, y in zip(data[:8], ATLAS_KEY)) != (src + ".png\n").encode():
@@ -1095,7 +1486,11 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
         old, new = b"\x03\x00" + src.encode() + b"\x00", b"\x03\x00" + dst.encode() + b"\x00"
         if data.count(old) != 1:
             return None, "the texture name %s is not there once" % src
-        return data.replace(old, new), "texture %s" % dst
+        out, note = data.replace(old, new), "texture %s" % dst
+        if bake:
+            baked, why = bake_texture(out, bake[0], bake[1], colours or [None, None, None], bake[2] if len(bake) > 2 else None)
+            out, note = (baked, note + "; " + why) if baked else (out, note + "; not baked: " + why)
+        return out, note
     if kind == "spdb":
         for ext in (".atlas", ".skel"):
             old, new = ("%s/%s%s" % (src, src, ext)).encode(), ("%s/%s%s" % (dst, dst, ext)).encode()
@@ -1115,25 +1510,22 @@ def kasumi_rig_file(kind, data, src, colours=None, dst=KASUMI_FACE, unclip=False
                     counts[k] += 1
         note = "slots coloured: skin %d (%s), lip %d (%s), hair %d (%s)" % tuple(
             x for k in range(3) for x in (counts[k], colours[k].hex() if colours and colours[k] else "none"))
-        if unclip:
-            edits = []                                  # (start, end, new bytes) on the file as it is
-            unclipped = []
-            for name, at in slots:
-                if not name.endswith((CLIP_SLOT_SUFFIX, CLIP_END_SUFFIX)):
+        if collapse_ends:
+            collapsed = kept = 0
+            for _, at, _ in _clipping_entries(bytes(out), slots):
+                _, q = _read_varint(out, at)            # key
+                _, q = _read_varint(out, q)             # name
+                if out[q] != 2:                         # a clipping attachment: kept
+                    kept += 1
                     continue
-                p = at + 8                              # the setup attachment: none
-                end = p
-                while end < len(out) and out[end] & 0x80:
-                    end += 1
-                edits.append((p, end + 1, b"\0"))
-                unclipped.append(name)
-            entries = _clipping_entries(bytes(out), slots)
-            for count_at, at, end in entries:           # in the skins: the attachment goes, its slot group keeps no attachment
-                edits.append((count_at, count_at + 1, b"\0"))
-                edits.append((at, end, b""))
-            for start, end, new in sorted(edits, reverse=True):
-                out[start:end] = new
-            note += "; clipping off: %s (%d skin attachments removed)" % (", ".join(unclipped) or "none", len(entries))
+                _, q = _read_varint(out, q + 1)         # path
+                vc, q = _read_varint(out, q + 4)        # past the colour
+                tris, q = _read_varint(out, q + 8 * vc)  # past the uvs
+                q += 2 * tris
+                if out[q] == 0:                         # unweighted: x, y for each vertex
+                    out[q + 1:q + 1 + 8 * vc] = bytes(8 * vc)
+                    collapsed += 1
+            note += "; clip end markers collapsed: %d (%d clipping attachments kept)" % (collapsed, kept)
         return bytes(out), note
     return None, "not a rig file"
 
@@ -1225,13 +1617,20 @@ def main(argv=None):
     if look and os.path.exists(assets):
         import inspect_romfs
         colours = kasumi_colours(vanilla_assets, look)
-        for dst, unclip in ((KASUMI_FACE, False), (KASUMI_FACE_UW, True)):
+        src = look.rig()
+        rig = {}
+        for kind in RIG_FILES:
+            with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
+                rig[kind] = inspect_romfs.unzstd(fh.read()) if kind.endswith(".zst") else fh.read()
+        for dst, uw in ((KASUMI_FACE, False), (KASUMI_FACE_UW, True)):
             for kind in RIG_FILES:
-                src = look.rig()
-                with open(os.path.join(a.romfs, "UI", "Face", src, src + "." + kind), "rb") as fh:
-                    raw = fh.read()
-                edited_file, note = kasumi_rig_file(kind, inspect_romfs.unzstd(raw) if kind.endswith(".zst") else raw, src, colours,
-                                                    dst, unclip)
+                # the Underworld rig: her colours in the texture, the tinted slots white, the clip end markers collapsed
+                if uw and kind == "skel.zst":
+                    edited_file, note = kasumi_rig_file(kind, rig[kind], src, [WHITE] * 3, dst, True)
+                else:
+                    edited_file, note = kasumi_rig_file(kind, rig[kind], src, colours, dst, False,
+                                                        (rig["atlas.zst"], rig["skel.zst"], ("default", look.face_skin()))
+                                                        if uw and kind == "bntx.zst" else None)
                 print("randomizer: UI/Face/%s/%s.%s: from %s: %s" % (dst, dst, kind, src, note))
                 if a.o_kasumi and edited_file is not None:
                     os.makedirs(a.o_kasumi, exist_ok=True)
